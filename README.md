@@ -481,6 +481,22 @@ curl -X POST http://127.0.0.1:XXXXX/sessions/SESSION_ID/messages \
 
 ---
 
+## Development
+
+### Formatting
+
+The project uses `make` targets for formatting. Run from the repo root:
+
+```bash
+make fmt        # format everything (Lua + Go)
+make fmt-lua    # Lua only  — stylua lua/ plugin/  (config: stylua.toml)
+make fmt-go     # Go only   — gofmt -w ./server
+```
+
+Requirements: [`stylua`](https://github.com/JohnnyMorganz/StyLua) and `gofmt` (bundled with Go).
+
+CI enforces both formatters on every push — PRs with unformatted code will fail the **Lint** workflow.
+
 ## Testing
 
 ```bash

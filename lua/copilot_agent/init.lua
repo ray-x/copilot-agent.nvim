@@ -1,3 +1,7 @@
+-- Copyright 2026 ray-x. All rights reserved.
+-- Use of this source code is governed by an Apache 2.0
+-- license that can be found in the LICENSE file.
+
 local uv = vim.uv or vim.loop
 local utils = require('copilot_agent.utils')
 

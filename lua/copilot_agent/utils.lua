@@ -1,3 +1,7 @@
+-- Copyright 2026 ray-x. All rights reserved.
+-- Use of this source code is governed by an Apache 2.0
+-- license that can be found in the LICENSE file.
+
 -- Pure utility functions with no Neovim API dependencies.
 -- Kept in a separate module so they can be unit-tested with plain Lua / busted.
 local M = {}

@@ -26,9 +26,9 @@ local defaults = {
   service = {
     auto_start = false,
     command = { 'go', 'run', '.' },
-    cwd = nil,  -- defaults to <plugin_root>/server
+    cwd = nil, -- defaults to <plugin_root>/server
     env = nil,
-    port_range = nil,  -- e.g. '18000-19000'; appended as --port-range when set
+    port_range = nil, -- e.g. '18000-19000'; appended as --port-range when set
     healthcheck_path = '/healthz',
     startup_timeout_ms = 15000,
     startup_poll_interval_ms = 250,
@@ -66,7 +66,7 @@ local state = {
   input_winid = nil,
   service_job_id = nil,
   service_starting = false,
-  service_addr_known = false,   -- set true when COPILOT_AGENT_ADDR= line received
+  service_addr_known = false, -- set true when COPILOT_AGENT_ADDR= line received
   pending_service_callbacks = {},
   service_output = {},
   model_cache = {},
@@ -77,17 +77,17 @@ local state = {
   prompt_history_draft = '',
   lsp_client_id = nil,
   -- Input buffer UI state
-  input_mode = 'agent',         -- 'ask' | 'plan' | 'agent'
+  input_mode = 'agent', -- 'ask' | 'plan' | 'agent'
   permission_mode = 'interactive', -- 'interactive' | 'approve-all' | 'autopilot'
-  pending_attachments = {},     -- list of {type, path, display} waiting to be sent
-  chat_busy = false,            -- true while the agent is processing a turn
+  pending_attachments = {}, -- list of {type, path, display} waiting to be sent
+  chat_busy = false, -- true while the agent is processing a turn
   -- Thinking spinner
-  thinking_timer = nil,         -- uv timer while assistant is generating
-  thinking_frame = 1,           -- current spinner frame index
-  thinking_entry_key = nil,     -- key in assistant_entries that is currently "thinking"
+  thinking_timer = nil, -- uv timer while assistant is generating
+  thinking_frame = 1, -- current spinner frame index
+  thinking_entry_key = nil, -- key in assistant_entries that is currently "thinking"
   -- Incremental streaming render
-  render_pending = false,       -- true when a debounced render is scheduled
-  stream_line_start = nil,      -- 0-based buf line where current streaming entry content begins
+  render_pending = false, -- true when a debounced render is scheduled
+  stream_line_start = nil, -- 0-based buf line where current streaming entry content begins
 }
 
 -- Static list of slash commands supported by the Copilot CLI backend.
@@ -175,8 +175,12 @@ local is_thinking_content = utils.is_thinking_content
 
 local function stop_thinking_spinner()
   if state.thinking_timer then
-    pcall(function() state.thinking_timer:stop() end)
-    pcall(function() state.thinking_timer:close() end)
+    pcall(function()
+      state.thinking_timer:stop()
+    end)
+    pcall(function()
+      state.thinking_timer:close()
+    end)
     state.thinking_timer = nil
   end
   state.thinking_entry_key = nil
@@ -188,15 +192,21 @@ local function start_thinking_spinner(entry_key)
   state.thinking_frame = 1
   local timer = uv.new_timer()
   state.thinking_timer = timer
-  timer:start(0, 100, vim.schedule_wrap(function()
-    if not state.thinking_timer then return end
-    state.thinking_frame = (state.thinking_frame % #SPINNER_FRAMES) + 1
-    local bufnr = state.chat_bufnr
-    if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
-      -- render_chat is defined below; safe to call via upvalue after module load.
-      pcall(render_chat)
-    end
-  end))
+  timer:start(
+    0,
+    100,
+    vim.schedule_wrap(function()
+      if not state.thinking_timer then
+        return
+      end
+      state.thinking_frame = (state.thinking_frame % #SPINNER_FRAMES) + 1
+      local bufnr = state.chat_bufnr
+      if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+        -- render_chat is defined below; safe to call via upvalue after module load.
+        pcall(render_chat)
+      end
+    end)
+  )
 end
 
 local function split_lines(text)
@@ -232,10 +242,10 @@ local function statusline_attachments()
 end
 
 local _perm_icons = {
-  interactive  = '🔐',
+  interactive = '🔐',
   ['approve-all'] = '✅',
-  autopilot    = '🤖',
-  ['reject-all']  = '🚫',
+  autopilot = '🤖',
+  ['reject-all'] = '🚫',
 }
 local function statusline_permission()
   local mode = state.permission_mode or 'interactive'
@@ -265,7 +275,9 @@ local function refresh_input_statusline()
   local att = statusline_attachments()
   vim.wo[state.input_winid].statusline = string.format(
     ' %s %s  %s  %s%s  (? for help)',
-    statusline_mode(), statusline_busy(), statusline_model(),
+    statusline_mode(),
+    statusline_busy(),
+    statusline_model(),
     statusline_permission(),
     att ~= '' and ('  ' .. att) or ''
   )
@@ -317,7 +329,10 @@ local function service_command()
   if pr and pr ~= '' and type(value) == 'table' then
     local has_addr = false
     for _, arg in ipairs(value) do
-      if arg == '--addr' or arg == '-addr' then has_addr = true; break end
+      if arg == '--addr' or arg == '-addr' then
+        has_addr = true
+        break
+      end
     end
     if not has_addr then
       value = vim.list_extend(vim.deepcopy(value), { '--port-range', pr })
@@ -327,7 +342,9 @@ local function service_command()
 end
 
 local function remember_service_output(data)
-  if not data then return end
+  if not data then
+    return
+  end
   for _, line in ipairs(data) do
     if line and line ~= '' then
       -- Machine-readable address announcement from the Go service.
@@ -499,7 +516,9 @@ end
 -- Throttled: fires at most once per render cycle via vim.schedule.
 local function notify_render_plugins(bufnr)
   vim.schedule(function()
-    if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+    if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+      return
+    end
     -- render-markdown.nvim: call its refresh API if loaded.
     local ok, rm = pcall(require, 'render-markdown')
     if ok and rm.refresh then
@@ -514,9 +533,15 @@ end
 local function should_merge_assistant(idx)
   for i = idx - 1, 1, -1 do
     local e = state.entries[i]
-    if not e then return false end
-    if e.kind ~= 'assistant' then return false end       -- non-assistant breaks the run
-    if not is_thinking_content(e.content) then return true end
+    if not e then
+      return false
+    end
+    if e.kind ~= 'assistant' then
+      return false
+    end -- non-assistant breaks the run
+    if not is_thinking_content(e.content) then
+      return true
+    end
     -- empty/thinking-only: skip over and keep looking backwards
   end
   return false
@@ -526,34 +551,42 @@ end
 local function entry_lines(entry, idx)
   local out = {}
   if entry.kind == 'system' or entry.kind == 'error' then
-    out[#out+1] = (entry.kind == 'error' and 'Error' or 'System') .. ':'
-    for _, l in ipairs(split_lines(entry.content)) do out[#out+1] = '  ' .. l end
-    out[#out+1] = ''
+    out[#out + 1] = (entry.kind == 'error' and 'Error' or 'System') .. ':'
+    for _, l in ipairs(split_lines(entry.content)) do
+      out[#out + 1] = '  ' .. l
+    end
+    out[#out + 1] = ''
   elseif entry.kind == 'assistant' then
     if is_thinking_content(entry.content) then
       -- No real content yet. Show spinner while streaming; skip the entry
       -- entirely once the turn is done (avoids rendering bare "Assistant:\n..").
       if state.chat_busy then
-        out[#out+1] = 'Assistant:'
-        out[#out+1] = '  ' .. (SPINNER_FRAMES[state.thinking_frame] or '⠋') .. ' Thinking…'
-        out[#out+1] = ''
+        out[#out + 1] = 'Assistant:'
+        out[#out + 1] = '  ' .. (SPINNER_FRAMES[state.thinking_frame] or '⠋') .. ' Thinking…'
+        out[#out + 1] = ''
       end
     else
-      out[#out+1] = 'Assistant:'
-      for _, l in ipairs(split_lines(entry.content)) do out[#out+1] = '  ' .. l end
-      out[#out+1] = ''
+      out[#out + 1] = 'Assistant:'
+      for _, l in ipairs(split_lines(entry.content)) do
+        out[#out + 1] = '  ' .. l
+      end
+      out[#out + 1] = ''
     end
   else
-    out[#out+1] = 'User:'
-    for _, l in ipairs(split_lines(entry.content)) do out[#out+1] = '  ' .. l end
-    out[#out+1] = ''
+    out[#out + 1] = 'User:'
+    for _, l in ipairs(split_lines(entry.content)) do
+      out[#out + 1] = '  ' .. l
+    end
+    out[#out + 1] = ''
   end
   return out
 end
 
 -- Auto-scroll only when the cursor is already at or near the bottom.
 local function lazy_scroll(bufnr)
-  if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then return end
+  if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then
+    return
+  end
   local lc = vim.api.nvim_buf_line_count(bufnr)
   local ok, cursor = pcall(vim.api.nvim_win_get_cursor, state.chat_winid)
   if ok and cursor[1] >= lc - 5 then
@@ -561,12 +594,14 @@ local function lazy_scroll(bufnr)
   end
 end
 
-local HEADER_LINES = 5  -- title, service, session, commands, separator
+local HEADER_LINES = 5 -- title, service, session, commands, separator
 
 render_chat = function()
   state.render_pending = false
   local bufnr = state.chat_bufnr
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
 
   local lines = {
     state.config.chat.title,
@@ -577,9 +612,9 @@ render_chat = function()
   }
 
   if #state.entries == 0 then
-    lines[#lines+1] = 'No messages yet.'
-    lines[#lines+1] = 'Press i or <Enter> to open the input buffer.'
-    lines[#lines+1] = 'Run :CopilotAgentAsk to send a prompt from the command line.'
+    lines[#lines + 1] = 'No messages yet.'
+    lines[#lines + 1] = 'Press i or <Enter> to open the input buffer.'
+    lines[#lines + 1] = 'Run :CopilotAgentAsk to send a prompt from the command line.'
   else
     for idx, entry in ipairs(state.entries) do
       local elines = entry_lines(entry, idx)
@@ -587,11 +622,12 @@ render_chat = function()
         -- Merge consecutive real assistant entries under one "Assistant:" header.
         -- Replace the header line with "" for 2nd+ entries in a run.
         -- Line count is preserved (1→1), so stream_update offsets stay correct.
-        if entry.kind == 'assistant' and not is_thinking_content(entry.content)
-           and should_merge_assistant(idx) then
+        if entry.kind == 'assistant' and not is_thinking_content(entry.content) and should_merge_assistant(idx) then
           elines[1] = ''
         end
-        for _, l in ipairs(elines) do lines[#lines+1] = l end
+        for _, l in ipairs(elines) do
+          lines[#lines + 1] = l
+        end
       end
     end
   end
@@ -618,7 +654,9 @@ end
 -- Debounced render: coalesces rapid calls (e.g. streaming deltas) to ~25fps.
 local RENDER_DEBOUNCE_MS = 40
 local function schedule_render()
-  if state.render_pending then return end
+  if state.render_pending then
+    return
+  end
   state.render_pending = true
   vim.defer_fn(render_chat, RENDER_DEBOUNCE_MS)
 end
@@ -627,13 +665,19 @@ end
 -- current streaming entry's content lines. O(entry size) instead of O(buffer).
 local function stream_update(entry, idx)
   local bufnr = state.chat_bufnr
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
 
   local new_lines = entry_lines(entry, idx)
   -- Apply the same merge logic as render_chat so incremental writes stay
   -- consistent with full renders (line count is preserved, so offsets are unaffected).
-  if entry.kind == 'assistant' and not is_thinking_content(entry.content)
-     and should_merge_assistant(idx) and #new_lines > 0 then
+  if
+    entry.kind == 'assistant'
+    and not is_thinking_content(entry.content)
+    and should_merge_assistant(idx)
+    and #new_lines > 0
+  then
     new_lines[1] = ''
   end
 
@@ -684,13 +728,13 @@ local function ensure_chat_window()
   -- Create the chat buffer; set options once here, not on every render.
   state.chat_bufnr = vim.api.nvim_create_buf(false, true)
   local bufnr = state.chat_bufnr
-  vim.bo[bufnr].buftype    = 'nofile'
-  vim.bo[bufnr].buflisted  = false
-  vim.bo[bufnr].bufhidden  = 'hide'
-  vim.bo[bufnr].swapfile   = false
-  vim.bo[bufnr].filetype   = 'markdown'
+  vim.bo[bufnr].buftype = 'nofile'
+  vim.bo[bufnr].buflisted = false
+  vim.bo[bufnr].bufhidden = 'hide'
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].filetype = 'markdown'
   vim.bo[bufnr].modifiable = false
-  vim.bo[bufnr].readonly   = true
+  vim.bo[bufnr].readonly = true
   vim.api.nvim_buf_set_name(bufnr, 'copilot-agent-chat')
 
   -- Open a vertical split window via the API — no throwaway buffer created.
@@ -702,7 +746,9 @@ local function ensure_chat_window()
   -- Tell render-markdown.nvim (and similar) to enable on this buffer.
   -- It defaults to skipping nofile buffers, so we explicitly enable it.
   vim.schedule(function()
-    if not vim.api.nvim_buf_is_valid(bufnr) then return end
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      return
+    end
     local ok, rm = pcall(require, 'render-markdown')
     if ok and rm.enable then
       pcall(rm.enable, { buf = bufnr })
@@ -737,13 +783,13 @@ end
 local function create_input_buffer()
   local bufnr = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(bufnr, 'copilot-agent-input')
-  vim.bo[bufnr].buftype  = 'prompt'
+  vim.bo[bufnr].buftype = 'prompt'
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].bufhidden = 'hide'
   -- filetype = 'markdown' enables treesitter highlighting and render-markdown.
   -- Must be set *after* buftype so FileType autocmds fire with the right buftype.
-  vim.bo[bufnr].filetype  = 'markdown'
+  vim.bo[bufnr].filetype = 'markdown'
   -- copilot.lua skips prompt buffers by default; this explicit flag overrides it.
   vim.b[bufnr].copilot_enabled = true
   local input_modes = { 'ask', 'plan', 'agent' }
@@ -919,7 +965,10 @@ local function create_input_buffer()
       if choice == 'Current buffer' then
         local path = vim.api.nvim_buf_get_name(vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0)
         if path ~= '' then
-          table.insert(state.pending_attachments, { type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') })
+          table.insert(
+            state.pending_attachments,
+            { type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') }
+          )
           refresh_input_statusline()
         end
       elseif choice == 'Visual selection' then
@@ -936,7 +985,12 @@ local function create_input_buffer()
             text = text,
             start_line = start_line,
             end_line = end_line,
-            display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
+            display = 'selection:'
+              .. vim.fn.fnamemodify(filepath, ':t')
+              .. ':'
+              .. (start_line + 1)
+              .. '-'
+              .. (end_line + 1),
           })
           refresh_input_statusline()
         end
@@ -944,7 +998,10 @@ local function create_input_buffer()
         vim.ui.input({ prompt = 'File path: ', completion = 'file' }, function(path)
           if path and path ~= '' then
             local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(state.pending_attachments, { type = 'file', path = abs, display = vim.fn.fnamemodify(abs, ':t') })
+            table.insert(
+              state.pending_attachments,
+              { type = 'file', path = abs, display = vim.fn.fnamemodify(abs, ':t') }
+            )
             refresh_input_statusline()
           end
         end)
@@ -952,7 +1009,10 @@ local function create_input_buffer()
         vim.ui.input({ prompt = 'Folder path: ', completion = 'dir' }, function(path)
           if path and path ~= '' then
             local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(state.pending_attachments, { type = 'directory', path = abs, display = vim.fn.fnamemodify(abs, ':t') .. '/' })
+            table.insert(
+              state.pending_attachments,
+              { type = 'directory', path = abs, display = vim.fn.fnamemodify(abs, ':t') .. '/' }
+            )
             refresh_input_statusline()
           end
         end)
@@ -960,7 +1020,10 @@ local function create_input_buffer()
         vim.ui.input({ prompt = 'Instructions file path: ', completion = 'file' }, function(path)
           if path and path ~= '' then
             local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(state.pending_attachments, { type = 'file', path = abs, display = '📋' .. vim.fn.fnamemodify(abs, ':t') })
+            table.insert(
+              state.pending_attachments,
+              { type = 'file', path = abs, display = '📋' .. vim.fn.fnamemodify(abs, ':t') }
+            )
             refresh_input_statusline()
           end
         end)
@@ -1013,13 +1076,18 @@ local function create_input_buffer()
           excluded_set[choice.name] = true
         end
         local new_excluded = vim.tbl_keys(excluded_set)
-        request('POST', '/sessions/' .. state.session_id .. '/tools', { excludedTools = new_excluded }, function(_, req_err)
-          if req_err then
-            notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
-          else
-            notify('Tools updated', vim.log.levels.INFO)
+        request(
+          'POST',
+          '/sessions/' .. state.session_id .. '/tools',
+          { excludedTools = new_excluded },
+          function(_, req_err)
+            if req_err then
+              notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
+            else
+              notify('Tools updated', vim.log.levels.INFO)
+            end
           end
-        end)
+        )
       end)
     end)
   end, { buffer = bufnr, silent = true, desc = 'Configure session tools' })
@@ -1037,12 +1105,11 @@ local function create_input_buffer()
     end
     state.permission_mode = next_mode
     if state.session_id then
-      request('POST', '/sessions/' .. state.session_id .. '/permission-mode',
-        { mode = next_mode }, function(_, err)
-          if err then
-            notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
-          end
-        end)
+      request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = next_mode }, function(_, err)
+        if err then
+          notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+        end
+      end)
     end
     refresh_input_statusline()
     notify('Permission mode: ' .. next_mode, vim.log.levels.INFO)
@@ -1215,7 +1282,9 @@ open_input_window = function()
   -- copilot.lua's default should_attach rejects buftype='prompt' and buflisted=false.
   -- Force-attach the LSP client directly so virtual-text suggestions work.
   vim.schedule(function()
-    if not vim.api.nvim_buf_is_valid(state.input_bufnr) then return end
+    if not vim.api.nvim_buf_is_valid(state.input_bufnr) then
+      return
+    end
     local ok, copilot_client = pcall(require, 'copilot.client')
     if ok and type(copilot_client.buf_attach) == 'function' then
       pcall(copilot_client.buf_attach, true, state.input_bufnr)
@@ -1628,21 +1697,30 @@ local function handle_host_event(event_name, payload)
       end
       vim.schedule(function()
         vim.ui.select({ 'Allow', 'Deny' }, { prompt = prompt_str }, function(choice)
-          if not state.session_id then return end
+          if not state.session_id then
+            return
+          end
           local approved = (choice == 'Allow')
-          request('POST', '/sessions/' .. state.session_id .. '/permission/' .. req_id,
-            { approved = approved }, function(_, err)
+          request(
+            'POST',
+            '/sessions/' .. state.session_id .. '/permission/' .. req_id,
+            { approved = approved },
+            function(_, err)
               if err then
                 notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
               end
-            end)
+            end
+          )
         end)
       end)
     else
       notify_transient('Permission requested; mode=' .. tostring(mode), vim.log.levels.INFO)
     end
   elseif event_name == 'host.permission_decision' then
-    notify_transient('Permission ' .. tostring(data.decision or 'unknown') .. ' (' .. tostring(data.mode or '') .. ')', vim.log.levels.INFO)
+    notify_transient(
+      'Permission ' .. tostring(data.decision or 'unknown') .. ' (' .. tostring(data.mode or '') .. ')',
+      vim.log.levels.INFO
+    )
   elseif event_name == 'host.permission_mode_changed' then
     state.permission_mode = data.mode or state.permission_mode
     refresh_input_statusline()
@@ -1676,7 +1754,9 @@ local function handle_session_event(payload)
     -- Real content: stop spinner, clear any accumulated dots, then append.
     if state.thinking_entry_key ~= nil then
       stop_thinking_spinner()
-      if is_thinking_content(entry.content) then entry.content = '' end
+      if is_thinking_content(entry.content) then
+        entry.content = ''
+      end
     end
     entry.content = (entry.content or '') .. delta
     local idx = state.assistant_entries[key]
@@ -1704,7 +1784,7 @@ local function handle_session_event(payload)
     state.stream_line_start = nil
     state.chat_busy = false
     refresh_input_statusline()
-    render_chat()  -- immediate full render on turn completion
+    render_chat() -- immediate full render on turn completion
     return
   end
 
@@ -1920,7 +2000,9 @@ local function pick_or_create_session(callback)
     end
     table.insert(choices, { label = 'Create new session', id = nil })
 
-    local display = vim.tbl_map(function(c) return c.label end, choices)
+    local display = vim.tbl_map(function(c)
+      return c.label
+    end, choices)
 
     vim.ui.select(display, { prompt = 'Resume a session or start new?' }, function(_, idx)
       if not idx then
@@ -2366,77 +2448,79 @@ end
 -- &statusline / heirline example:
 --   %{v:lua.require'copilot_agent'.statusline()}
 --
-M.statusline_mode        = statusline_mode
-M.statusline_model       = statusline_model
-M.statusline_busy        = statusline_busy
+M.statusline_mode = statusline_mode
+M.statusline_model = statusline_model
+M.statusline_busy = statusline_busy
 M.statusline_attachments = statusline_attachments
-M.statusline_permission  = statusline_permission
-M.statusline             = statusline_component
+M.statusline_permission = statusline_permission
+M.statusline = statusline_component
 
 -- Build the command list for the LSP server process.
 -- We do NOT pass --addr so the OS assigns a free port.
 -- The bound address is announced via COPILOT_AGENT_ADDR= on stdout.
 local function lsp_command()
-	local cmd = service_command()
-	return vim.deepcopy(cmd)
+  local cmd = service_command()
+  return vim.deepcopy(cmd)
 end
 
 -- Start the Copilot agent as a single process that runs both the HTTP bridge
 -- service and the LSP server on stdio. The Neovim LSP client owns the process
 -- lifetime; ensure_service_running reuses it for HTTP health-checks.
 function M.start_lsp(opts)
-	opts = opts or {}
+  opts = opts or {}
 
-	-- If an LSP client with this name is already running for this root, reuse it.
-	local root = opts.root_dir or working_directory()
-	for _, client in ipairs(vim.lsp.get_clients({ name = "copilot-agent" })) do
-		if client.config.root_dir == root then
-			return client.id
-		end
-	end
+  -- If an LSP client with this name is already running for this root, reuse it.
+  local root = opts.root_dir or working_directory()
+  for _, client in ipairs(vim.lsp.get_clients({ name = 'copilot-agent' })) do
+    if client.config.root_dir == root then
+      return client.id
+    end
+  end
 
-	local cmd = lsp_command()
+  local cmd = lsp_command()
 
-	-- Wrap cmd in a shell that tees stderr so COPILOT_AGENT_ADDR= is captured.
-	-- stdout is kept clean for the LSP protocol.
-	local stderr_fifo = vim.fn.tempname()
-	local wrapped_cmd = {
-		'sh', '-c',
-		table.concat(vim.tbl_map(vim.fn.shellescape, cmd), ' ')
-		  .. ' 2>' .. vim.fn.shellescape(stderr_fifo),
-	}
-	-- Read the tee'd stderr in a background job so we can parse COPILOT_AGENT_ADDR.
-	vim.fn.jobstart({ 'tail', '-F', stderr_fifo }, {
-		on_stdout = function(_, data)
-			vim.schedule(function() remember_service_output(data) end)
-		end,
-	})
-	local client_id = vim.lsp.start({
-		name = "copilot-agent",
-		cmd = wrapped_cmd,
-		cmd_cwd = service_cwd(),
-		root_dir = root,
-		capabilities = vim.lsp.protocol.make_client_capabilities(),
-		on_init = function(client)
-			-- Record the LSP client id so the service is considered started.
-			state.lsp_client_id = client.id
-			notify("Copilot agent started (LSP id=" .. client.id .. ")", vim.log.levels.INFO)
-			-- Kick any pending service callbacks now that the HTTP port is up.
-			ensure_service_running(function() end)
-		end,
-		on_exit = function(code, signal)
-			state.lsp_client_id = nil
-			pcall(os.remove, stderr_fifo)
-			if code ~= 0 then
-				notify("Copilot agent exited: code=" .. code .. " signal=" .. tostring(signal), vim.log.levels.WARN)
-			end
-		end,
-	})
+  -- Wrap cmd in a shell that tees stderr so COPILOT_AGENT_ADDR= is captured.
+  -- stdout is kept clean for the LSP protocol.
+  local stderr_fifo = vim.fn.tempname()
+  local wrapped_cmd = {
+    'sh',
+    '-c',
+    table.concat(vim.tbl_map(vim.fn.shellescape, cmd), ' ') .. ' 2>' .. vim.fn.shellescape(stderr_fifo),
+  }
+  -- Read the tee'd stderr in a background job so we can parse COPILOT_AGENT_ADDR.
+  vim.fn.jobstart({ 'tail', '-F', stderr_fifo }, {
+    on_stdout = function(_, data)
+      vim.schedule(function()
+        remember_service_output(data)
+      end)
+    end,
+  })
+  local client_id = vim.lsp.start({
+    name = 'copilot-agent',
+    cmd = wrapped_cmd,
+    cmd_cwd = service_cwd(),
+    root_dir = root,
+    capabilities = vim.lsp.protocol.make_client_capabilities(),
+    on_init = function(client)
+      -- Record the LSP client id so the service is considered started.
+      state.lsp_client_id = client.id
+      notify('Copilot agent started (LSP id=' .. client.id .. ')', vim.log.levels.INFO)
+      -- Kick any pending service callbacks now that the HTTP port is up.
+      ensure_service_running(function() end)
+    end,
+    on_exit = function(code, signal)
+      state.lsp_client_id = nil
+      pcall(os.remove, stderr_fifo)
+      if code ~= 0 then
+        notify('Copilot agent exited: code=' .. code .. ' signal=' .. tostring(signal), vim.log.levels.WARN)
+      end
+    end,
+  })
 
-	if not client_id then
-		notify("Failed to start Copilot agent LSP", vim.log.levels.ERROR)
-	end
-	return client_id
+  if not client_id then
+    notify('Failed to start Copilot agent LSP', vim.log.levels.ERROR)
+  end
+  return client_id
 end
 
 -- Expose internal state for :checkhealth and debugging.

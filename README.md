@@ -156,6 +156,7 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
 ```lua
 {
   "ray-x/copilot-agent.nvim",
+  build = ":CopilotAgentInstall",
   config = function()
     require("copilot_agent").setup({
       -- When auto_start=true the plugin launches the Go service and reads its

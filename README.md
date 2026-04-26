@@ -63,7 +63,7 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 | Agent / tool-use mode     | ✅ full agentic (file edits, terminal, web search, …) | ❌ chat only              |
 | Chat modes                | ask · plan · **agent**                                | ask only                  |
 | Permission management     | ✅ interactive / approve-all / autopilot / reject-all | ❌                        |
-| File & folder attachments | ✅ (buffer, selection, path, instructions)            | ✅ (buffer context)       |
+| File & folder attachments | ✅ (buffer, selection, file, folder, image, clipboard paste) | ✅ (buffer context)       |
 | Session persistence       | ✅ per working directory                              | ❌                        |
 | Model switching (live)    | ✅ mid-session with tab-complete                      | ✅                        |
 | LSP code actions          | ✅ (explain / fix / add tests / add docs)             | ❌                        |
@@ -113,10 +113,12 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.24+ (only for building from source; pre-built binary skips this)
 - `curl` on `PATH`
 - GitHub Copilot CLI runtime (`@github/copilot/index.js`) or access via `-cli-url`
 - Neovim 0.11+ (0.12+ recommended)
+
+Run `:checkhealth copilot_agent` after installation to verify all requirements.
 
 ---
 
@@ -129,38 +131,54 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
   "ray-x/copilot-agent.nvim",
   config = function()
     require("copilot_agent").setup({
-      base_url = "http://127.0.0.1:8088",  -- only needed for externally-started services; omit when auto_start=true
+      -- When auto_start=true the plugin launches the Go service and reads its
+      -- port from stderr automatically. No manual base_url needed.
+      base_url = "http://127.0.0.1:8088",  -- only for externally-started services
       client_name = "nvim-copilot",
-      permission_mode = "interactive",  -- or "approve-all" / "autopilot"
+      permission_mode = "approve-all",  -- "interactive" | "approve-all" | "autopilot" | "reject-all"
+      auto_create_session = true,
       session = {
         working_directory = function() return vim.fn.getcwd() end,
         model = nil,    -- nil = Copilot picks a default
+        agent = nil,    -- nil = "default"; or "coding", "gpt-4.1", a custom agent name
         streaming = true,
-        enable_config_discovery = true,
+        enable_config_discovery = true,  -- respects .github/copilot-instructions.md etc.
+        auto_resume = "auto",  -- "auto" | "prompt" when multiple sessions exist
       },
       service = {
         auto_start = true,
         command = { "go", "run", "." },   -- or { "/path/to/copilot-agent" }
         cwd = nil,                         -- defaults to <plugin_root>/server
+        port_range = nil,                  -- e.g. "18000-19000" for fixed range
         startup_timeout_ms = 15000,
+        startup_poll_interval_ms = 250,
       },
       chat = {
         title = "Copilot Chat",
-        system_notify_timeout = 3000,      -- ms before auto-clearing transient notices
+        system_notify_timeout = 3000,    -- ms before auto-clearing transient notices
+        render_markdown = true,          -- set false to disable render-markdown.nvim (faster on long responses)
       },
+      notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
     })
     -- Start the combined HTTP + LSP service.
     -- Called automatically by CopilotAgentChat / CopilotAgentAsk if auto_start = true.
-    -- Call explicitly to get LSP code actions:
+    -- Call explicitly here to get LSP code actions available immediately:
     require("copilot_agent").start_lsp()
   end,
 }
 ```
 
-If you've built the binary separately (fixed port):
+If you've built the binary separately:
 
 ```lua
+-- Dynamic port (recommended for multiple nvim instances)
+service = { auto_start = true, command = { "/path/to/copilot-agent" } }
+
+-- Fixed port
 service = { auto_start = true, command = { "/path/to/copilot-agent", "--addr", "127.0.0.1:8088" } }
+
+-- Port range (first free port in 18000–19000)
+service = { auto_start = true, command = { "/path/to/copilot-agent" }, port_range = "18000-19000" }
 ```
 
 ---
@@ -186,21 +204,22 @@ go build -o copilot-agent .
 ./copilot-agent -addr 127.0.0.1:8088   # fixed port
 ```
 
+**Flags:**
+
+| Flag            | Default       | Description                                             |
+| --------------- | ------------- | ------------------------------------------------------- |
+| `-addr`         | (free port)   | HTTP listen address; empty or `:0` → OS picks           |
+| `-port-range`   | —             | Try ports lo–hi (e.g. `18000-19000`); first free wins   |
+| `-cwd`          | current dir   | Default working directory for sessions                  |
+| `-model`        | (sdk default) | Default model for new sessions                          |
+| `-cli-path`     | auto-detected | Path to Copilot CLI binary/JS entrypoint                |
+| `-cli-url`      | —             | URL of an already-running Copilot CLI server            |
+| `-log-level`    | —             | Copilot CLI log level                                   |
+| `-lsp`          | `true`        | Start LSP server on stdio                               |
+
 The service always prints `COPILOT_AGENT_ADDR=127.0.0.1:<PORT>` to stderr once the
 listener is bound. When `auto_start = true`, the plugin reads this line and
 configures its HTTP client automatically — no manual `base_url` needed.
-
-**Flags:**
-
-| Flag         | Default       | Description                                   |
-| ------------ | ------------- | --------------------------------------------- |
-| `-addr`      | (free port)   | HTTP listen address; empty or `:0` → OS picks |
-| `-cwd`       | current dir   | Default working directory for sessions        |
-| `-model`     | (sdk default) | Default model for new sessions                |
-| `-cli-path`  | auto-detected | Path to Copilot CLI binary/JS entrypoint      |
-| `-cli-url`   | —             | URL of an already-running Copilot CLI server  |
-| `-log-level` | —             | Copilot CLI log level                         |
-| `-lsp`       | `true`        | Start LSP server on stdio                     |
 
 ---
 
@@ -233,7 +252,8 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-t>`           | Cycle chat mode: **ask → plan → agent**                                        |
 | `<M-m>`           | Open model picker                                                              |
 | `<M-a>`           | Cycle permission mode: **🔐 interactive → ✅ approve-all → 🤖 autopilot**      |
-| `<C-a>`           | Attach resource (current buffer, visual selection, file, folder, instructions) |
+| `<C-a>`           | Attach resource — opens picker menu (see below)                                |
+| `<M-v>`           | Paste image from clipboard as attachment                                       |
 | `<C-x>`           | Toggle session tools (enable/disable individual tools)                         |
 | `<Tab>`           | Trigger completion (`@file` or `/slash-command`)                               |
 | `@<path>`         | Attach a file by path (autocomplete from working directory)                    |
@@ -241,6 +261,54 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-p>` / `<M-p>` | Previous prompt from history                                                   |
 | `<C-n>` / `<M-n>` | Next prompt from history                                                       |
 | `?` (normal)      | Show help float                                                                |
+
+### Attaching Files and Images
+
+Press `<C-a>` in the input buffer to open the resource picker:
+
+| Choice                      | What it does                                                    |
+| --------------------------- | --------------------------------------------------------------- |
+| Current buffer              | Attaches the previously focused file buffer                     |
+| Visual selection            | Attaches the last visual selection with file path + line range  |
+| File                        | Opens fuzzy picker → select one or more files (multi-select)    |
+| Folder                      | Opens fuzzy picker / `vim.ui.input` to pick a directory         |
+| Instructions file           | Same as File but marked as an instructions context file (📋)    |
+| Image file                  | Opens fuzzy picker to select an image (png/jpg/gif/…)           |
+| Paste image from clipboard  | Saves clipboard image to a temp PNG and attaches it (🖼️)        |
+
+`<M-v>` is a direct shortcut for **Paste image from clipboard** without opening the menu.
+`:CopilotAgentPasteImage` is the equivalent command.
+
+Pending attachments appear in the input statusline as `📎 N`. Each attachment is also shown below the prompt text in the chat buffer once sent.
+
+#### Fuzzy Picker Integration
+
+The File / Folder / Image / Instructions choices auto-detect and use the best available picker — no extra configuration needed:
+
+| Priority | Picker | Notes |
+| -------- | ------ | ----- |
+| 1 | **snacks.picker** | `snacks.picker.files` / `snacks.picker.directories` |
+| 2 | **telescope** | `find_files`; `telescope-file-browser` for directories |
+| 3 | **fzf-lua** | `fzf.files`; `fzf_exec fd --type d` for directories |
+| 4 | **mini.pick** | `mp.builtin.files` (files only) |
+| 5 | **vim.ui.input** | Fallback — type the path with completion |
+
+Override the picker or force the native fallback via config:
+
+```lua
+chat = { file_picker = 'auto' }       -- default: detect best available
+chat = { file_picker = 'telescope' }  -- always use telescope
+chat = { file_picker = 'fzf-lua' }    -- always use fzf-lua
+chat = { file_picker = 'native' }     -- always use vim.ui.input
+```
+
+#### Clipboard Image Requirements
+
+| Platform      | Tool required | Install |
+| ------------- | ------------- | ------- |
+| macOS         | `pngpaste`    | `brew install pngpaste` |
+| Linux/Wayland | `wl-paste`    | `sudo apt install wl-clipboard` |
+| Linux/X11     | `xclip` or `xsel` | `sudo apt install xclip` |
 
 ### Chat Modes
 
@@ -250,13 +318,20 @@ The mode is shown in the statusline prefix (e.g. `ask❯`):
 - **plan** — Ask Copilot to create an implementation plan
 - **agent** — Autonomous agent mode (runs tools, edits files)
 
+### Performance Tips
+
+- **render-markdown.nvim** integrates automatically when installed. On very long responses it can cause visible lag. Disable with `chat = { render_markdown = false }` to use treesitter highlighting only (much faster).
+- **Streaming** is enabled by default (`session.streaming = true`). The chat buffer updates incrementally as tokens arrive.
+- **Session resume** (`auto_resume = "auto"`) skips re-sending the full conversation on restart — the SDK resumes from persisted state.
+
 ### Permission Modes
 
-Cycled with `<M-a>`:
+Cycled with `<M-a>` in the input buffer, or set via config / `POST /sessions/{id}/permission-mode`:
 
 - 🔐 **interactive** — Neovim prompts `Allow / Deny` for each tool use
-- ✅ **approve-all** — Auto-approve all tool uses silently
-- 🤖 **autopilot** — Auto-approve tools + auto-answer any user-input requests
+- ✅ **approve-all** — Auto-approve all tool uses silently (default)
+- 🤖 **autopilot** — Approve tools + auto-answer any `ask_user` requests (fully autonomous)
+- 🚫 **reject-all** — Reject all tool uses (safe read-only mode)
 
 ---
 
@@ -351,19 +426,42 @@ Sessions are scoped per project: `pick_or_create_session` filters persisted sess
 ## Quick Start Example
 
 ```bash
-# Terminal 1: start the service
-go run ./server -addr 127.0.0.1:8088 -cli-path ~/.local/share/github-copilot/index.js
+# Terminal 1: start the service (dynamic port)
+cd server/
+go run . -cli-path ~/.local/share/github-copilot/index.js
+# prints: COPILOT_AGENT_ADDR=127.0.0.1:XXXXX
 
-# Terminal 2: create a session
-curl -s -X POST http://127.0.0.1:8088/sessions \
+# Terminal 2: create a session (replace port)
+curl -s -X POST http://127.0.0.1:XXXXX/sessions \
   -H 'Content-Type: application/json' \
   -d '{"workingDirectory":".","permissionMode":"approve-all","clientName":"test"}'
 
 # Stream events (replace SESSION_ID)
-curl -N http://127.0.0.1:8088/sessions/SESSION_ID/events
+curl -N http://127.0.0.1:XXXXX/sessions/SESSION_ID/events
 
 # Send a message
-curl -X POST http://127.0.0.1:8088/sessions/SESSION_ID/messages \
+curl -X POST http://127.0.0.1:XXXXX/sessions/SESSION_ID/messages \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"Explain what this project does."}'
 ```
+
+---
+
+## Testing
+
+```bash
+# Go tests (vet, fmt, unit tests, build)
+cd server/
+go vet ./...
+go test -race ./...
+go build ./...
+
+# Lua unit tests (no Neovim required)
+busted --lpath='lua/?.lua;lua/?/init.lua' tests/unit/
+
+# Neovim integration tests (requires nvim on PATH)
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedFile tests/integration/setup_spec.lua"
+```
+
+CI runs all of the above automatically on push and PR via GitHub Actions.

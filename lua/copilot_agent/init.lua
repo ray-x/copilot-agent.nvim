@@ -39,6 +39,15 @@ local defaults = {
     -- Noisy system messages (permission decisions, etc.) go to vim.notify instead
     -- of the chat buffer. Set to ms > 0 to auto-clear from the cmdline area.
     system_notify_timeout = 3000,
+    -- Set to true to enable render-markdown.nvim integration on the chat buffer.
+    -- Useful when render-markdown causes visual lag on long responses.
+    -- true  = enable on buffer creation, refresh once per completed turn (default)
+    -- false = disable entirely (raw markdown text, faster)
+    render_markdown = false,
+    -- File picker to use when attaching files/folders from <C-a>.
+    -- 'auto' detects in order: snacks → telescope → fzf-lua → mini.pick → vim.ui.input
+    -- Set to 'native' to always use vim.ui.input (completion-based path entry).
+    file_picker = 'auto',
   },
   session = {
     working_directory = nil,
@@ -508,12 +517,15 @@ end
 -- After programmatic nvim_buf_set_lines, notify rendering plugins (e.g.
 -- render-markdown.nvim) since no TextChanged event fires for nofile buffers.
 -- Throttled: fires at most once per render cycle via vim.schedule.
+-- Skipped entirely when chat.render_markdown = false.
 local function notify_render_plugins(bufnr)
+  if state.config.chat and state.config.chat.render_markdown == false then
+    return
+  end
   vim.schedule(function()
     if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
       return
     end
-    -- render-markdown.nvim: call its refresh API if loaded.
     local ok, rm = pcall(require, 'render-markdown')
     if ok and rm.refresh then
       pcall(rm.refresh)
@@ -571,21 +583,55 @@ local function entry_lines(entry, idx)
     for _, l in ipairs(split_lines(entry.content)) do
       out[#out + 1] = '  ' .. l
     end
+    -- Show image/file attachments below the prompt text.
+    if entry.attachments and #entry.attachments > 0 then
+      for _, a in ipairs(entry.attachments) do
+        out[#out + 1] = '  📎 ' .. (a.display or a.path or a.type)
+      end
+    end
     out[#out + 1] = ''
   end
   return out
 end
 
--- Auto-scroll only when the cursor is already at or near the bottom.
-local function lazy_scroll(bufnr)
-  if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then
+-- Returns true if the chat window's visible area ends at (or within a few lines
+-- of) the buffer end. Must be called BEFORE writing new lines so we can decide
+-- whether to auto-scroll after the write.
+local function chat_at_bottom()
+  local winid = state.chat_winid
+  local bufnr = state.chat_bufnr
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return false
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return false
+  end
+  local info = vim.fn.getwininfo(winid)
+  if not info or not info[1] then
+    return false
+  end
+  local lc = vim.api.nvim_buf_line_count(bufnr)
+  -- botline = last fully-visible line; consider "at bottom" within 3 lines.
+  return info[1].botline >= lc - 3
+end
+
+-- Move the cursor to the last buffer line and position that line at the bottom
+-- of the chat window. Runs in the window's context so focus is not stolen.
+local function scroll_to_bottom()
+  local winid = state.chat_winid
+  local bufnr = state.chat_bufnr
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
   local lc = vim.api.nvim_buf_line_count(bufnr)
-  local ok, cursor = pcall(vim.api.nvim_win_get_cursor, state.chat_winid)
-  if ok and cursor[1] >= lc - 5 then
-    vim.api.nvim_win_set_cursor(state.chat_winid, { lc, 0 })
-  end
+  vim.api.nvim_win_call(winid, function()
+    vim.api.nvim_win_set_cursor(0, { lc, 0 })
+    -- zb: scroll so the cursor line sits at the bottom of the visible area.
+    vim.cmd('normal! zb')
+  end)
 end
 
 local HEADER_LINES = 5 -- title, service, session, commands, separator
@@ -596,6 +642,10 @@ render_chat = function()
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
+
+  -- Snapshot scroll position BEFORE overwriting the buffer so we can restore
+  -- "following" behaviour: if the user was at the bottom, keep them there.
+  local at_bottom = chat_at_bottom()
 
   local lines = {
     state.config.chat.title,
@@ -636,7 +686,9 @@ render_chat = function()
   vim.bo[bufnr].readonly = true
   vim.bo[bufnr].modified = false
 
-  lazy_scroll(bufnr)
+  if at_bottom then
+    scroll_to_bottom()
+  end
   -- Only notify render-markdown once streaming is done. Calling rm.refresh()
   -- on every delta causes the plugin to re-parse and re-decorate the entire
   -- buffer at streaming speed, producing visible flickering and text jumps.
@@ -672,13 +724,17 @@ local function stream_update(entry, idx)
 
   if state.stream_line_start then
     -- Fast path: replace only this entry's lines at the cached offset.
+    -- Snapshot scroll position BEFORE writing so we honour "following" state.
+    local at_bottom = chat_at_bottom()
     vim.bo[bufnr].modifiable = true
     vim.bo[bufnr].readonly = false
     vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, -1, false, new_lines)
     vim.bo[bufnr].modifiable = false
     vim.bo[bufnr].readonly = true
     vim.bo[bufnr].modified = false
-    lazy_scroll(bufnr)
+    if at_bottom then
+      scroll_to_bottom()
+    end
     -- Do NOT call notify_render_plugins here — render-markdown refreshing on
     -- every streaming delta is the primary cause of visual jumping. The final
     -- render_chat() call (after turn_end) will trigger it once per turn.
@@ -698,6 +754,223 @@ local function stream_update(entry, idx)
   end
 end
 
+-- Open a fuzzy-finder to pick one or more files/directories.
+-- opts.prompt  string  prompt title
+-- opts.type    'file' | 'dir'   what to pick (default 'file')
+-- opts.cwd     string  root directory for the picker
+-- callback(paths)  receives a list of absolute path strings
+--
+-- Detection order (respects state.config.chat.file_picker):
+--   snacks → telescope → fzf-lua → mini.pick → vim.ui.input fallback
+local function pick_path(opts, callback)
+  opts = opts or {}
+  local prompt = opts.prompt or 'Select'
+  local pick_type = opts.type or 'file'
+  local root = opts.cwd or working_directory() or cwd()
+  local cfg = state.config.chat.file_picker or 'auto'
+
+  -- Normalize paths from a picker: make absolute, strip trailing newline.
+  local function abs(p)
+    if not p or p == '' then
+      return nil
+    end
+    p = p:gsub('\n$', '')
+    if vim.fn.isabsolutepath(p) == 0 then
+      p = root .. '/' .. p
+    end
+    return vim.fn.fnamemodify(p, ':p')
+  end
+
+  -- Helper: fires callback with a single list of valid paths.
+  local function done(raw_paths)
+    local out = {}
+    for _, p in ipairs(raw_paths or {}) do
+      local a = abs(p)
+      if a and a ~= '' then
+        out[#out + 1] = a
+      end
+    end
+    if #out > 0 then
+      callback(out)
+    end
+  end
+
+  -- ── snacks.picker ────────────────────────────────────────────────────────
+  local function try_snacks()
+    local ok, snacks = pcall(require, 'snacks')
+    if not ok or not snacks.picker then
+      return false
+    end
+    local picker_fn = pick_type == 'dir' and snacks.picker.directories or snacks.picker.files
+    if not picker_fn then
+      return false
+    end
+    picker_fn({
+      title = prompt,
+      cwd = root,
+      confirm = function(picker, item)
+        picker:close()
+        if item then
+          done({ item.file or item.path or tostring(item) })
+        end
+      end,
+    })
+    return true
+  end
+
+  -- ── telescope ────────────────────────────────────────────────────────────
+  local function try_telescope()
+    local ok_tb, tb = pcall(require, 'telescope.builtin')
+    local ok_a, actions = pcall(require, 'telescope.actions')
+    local ok_s, action_state = pcall(require, 'telescope.actions.state')
+    if not (ok_tb and ok_a and ok_s) then
+      return false
+    end
+    local picker_fn
+    if pick_type == 'dir' then
+      -- Try file_browser extension for directory picking.
+      local ok_fb, ext = pcall(function()
+        return require('telescope').extensions.file_browser
+      end)
+      if ok_fb and ext and ext.file_browser then
+        picker_fn = function(popts)
+          ext.file_browser(popts)
+        end
+      end
+    end
+    if not picker_fn then
+      picker_fn = tb.find_files
+    end
+    picker_fn({
+      prompt_title = prompt,
+      cwd = root,
+      attach_mappings = function(prompt_bufnr, _)
+        actions.select_default:replace(function()
+          local picker_obj = action_state.get_current_picker(prompt_bufnr)
+          local multi = picker_obj:get_multi_selection()
+          actions.close(prompt_bufnr)
+          local raw = {}
+          if #multi > 0 then
+            for _, entry in ipairs(multi) do
+              raw[#raw + 1] = entry[1] or entry.path or entry.filename or ''
+            end
+          else
+            local sel = action_state.get_selected_entry()
+            if sel then
+              raw[1] = sel[1] or sel.path or sel.filename or ''
+            end
+          end
+          done(raw)
+        end)
+        return true
+      end,
+    })
+    return true
+  end
+
+  -- ── fzf-lua ───────────────────────────────────────────────────────────────
+  local function try_fzf()
+    local ok, fzf = pcall(require, 'fzf-lua')
+    if not ok then
+      return false
+    end
+    local picker_fn
+    if pick_type == 'dir' then
+      -- fzf-lua doesn't have a built-in dir picker; use fzf_exec with fd/find.
+      local fd = vim.fn.executable('fd') == 1 and 'fd --type d --color never' or 'find . -type d -not -path "*/\\.*"'
+      picker_fn = function(popts)
+        fzf.fzf_exec(
+          fd,
+          vim.tbl_extend('force', popts, {
+            prompt = prompt .. '> ',
+            cwd = root,
+            actions = {
+              ['default'] = function(selected)
+                done(selected or {})
+              end,
+            },
+          })
+        )
+      end
+    else
+      picker_fn = fzf.files
+    end
+    picker_fn({
+      prompt = prompt .. '> ',
+      cwd = root,
+      actions = {
+        ['default'] = function(selected)
+          done(selected or {})
+        end,
+      },
+    })
+    return true
+  end
+
+  -- ── mini.pick ─────────────────────────────────────────────────────────────
+  local function try_mini()
+    local ok, mp = pcall(require, 'mini.pick')
+    if not ok then
+      return false
+    end
+    -- mini.pick doesn't have a directory picker; only offer for files.
+    if pick_type == 'dir' then
+      return false
+    end
+    mp.builtin.files(nil, {
+      source = {
+        cwd = root,
+        name = prompt,
+        choose = function(item)
+          done({ item })
+        end,
+        choose_marked = function(items)
+          done(items)
+        end,
+      },
+    })
+    return true
+  end
+
+  -- ── vim.ui.input fallback ─────────────────────────────────────────────────
+  local function use_native()
+    local completion = pick_type == 'dir' and 'dir' or 'file'
+    vim.ui.input({ prompt = prompt .. ': ', completion = completion }, function(path)
+      if path and path ~= '' then
+        done({ path })
+      end
+    end)
+  end
+
+  if cfg == 'native' then
+    use_native()
+    return
+  end
+
+  -- Auto-detect: try each picker in preference order.
+  if cfg == 'snacks' or cfg == 'auto' then
+    if try_snacks() then
+      return
+    end
+  end
+  if cfg == 'telescope' or cfg == 'auto' then
+    if try_telescope() then
+      return
+    end
+  end
+  if cfg == 'fzf-lua' or cfg == 'auto' then
+    if try_fzf() then
+      return
+    end
+  end
+  if cfg == 'mini.pick' or cfg == 'auto' then
+    if try_mini() then
+      return
+    end
+  end
+  use_native()
+end
+
 local function ensure_chat_window()
   if state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr) then
     if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
@@ -711,6 +984,7 @@ local function ensure_chat_window()
       win = 0,
     })
     render_chat()
+    scroll_to_bottom()
     return state.chat_bufnr
   end
 
@@ -734,15 +1008,18 @@ local function ensure_chat_window()
 
   -- Tell render-markdown.nvim (and similar) to enable on this buffer.
   -- It defaults to skipping nofile buffers, so we explicitly enable it.
-  vim.schedule(function()
-    if not vim.api.nvim_buf_is_valid(bufnr) then
-      return
-    end
-    local ok, rm = pcall(require, 'render-markdown')
-    if ok and rm.enable then
-      pcall(rm.enable, { buf = bufnr })
-    end
-  end)
+  -- Skipped when chat.render_markdown = false.
+  if state.config.chat and state.config.chat.render_markdown ~= false then
+    vim.schedule(function()
+      if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      local ok, rm = pcall(require, 'render-markdown')
+      if ok and rm.enable then
+        pcall(rm.enable, { buf = bufnr })
+      end
+    end)
+  end
 
   vim.keymap.set('n', 'q', function()
     if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
@@ -766,6 +1043,7 @@ local function ensure_chat_window()
   end
 
   render_chat()
+  scroll_to_bottom()
   return bufnr
 end
 
@@ -933,24 +1211,44 @@ local function create_input_buffer()
     M.select_model()
   end, { buffer = bufnr, silent = true, desc = 'Switch Copilot model' })
 
+  -- Paste image from clipboard directly into pending attachments.
+  vim.keymap.set({ 'n', 'i' }, '<M-v>', function()
+    M.paste_clipboard_image()
+  end, { buffer = bufnr, silent = true, desc = 'Paste image from clipboard as attachment' })
+
   -- Resource / attachment picker.
   vim.keymap.set({ 'n', 'i' }, '<C-a>', function()
     local choices = {
       'Current buffer',
       'Visual selection',
-      'File (enter path)',
-      'Folder (enter path)',
+      'File',
+      'Folder',
       'Instructions file',
+      'Image file',
+      'Paste image from clipboard',
     }
     vim.ui.select(choices, { prompt = 'Add resource' }, function(choice)
       if not choice then
         return
       end
+
+      -- Helper: add one path to pending attachments and refresh statusline.
+      local function add_attachment(att)
+        table.insert(state.pending_attachments, att)
+        refresh_input_statusline()
+        -- Return focus to the input window after picker closes.
+        vim.schedule(function()
+          if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+            vim.api.nvim_set_current_win(state.input_winid)
+            vim.cmd('startinsert!')
+          end
+        end)
+      end
+
       if choice == 'Current buffer' then
         local path = vim.api.nvim_buf_get_name(vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0)
         if path ~= '' then
-          table.insert(state.pending_attachments, { type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') })
-          refresh_input_statusline()
+          add_attachment({ type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') })
         end
       elseif choice == 'Visual selection' then
         local sel_buf = vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0
@@ -960,7 +1258,7 @@ local function create_input_buffer()
         local text = table.concat(lines, '\n')
         local filepath = vim.api.nvim_buf_get_name(sel_buf)
         if text ~= '' then
-          table.insert(state.pending_attachments, {
+          add_attachment({
             type = 'selection',
             path = filepath,
             text = text,
@@ -968,36 +1266,54 @@ local function create_input_buffer()
             end_line = end_line,
             display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
           })
-          refresh_input_statusline()
         end
-      elseif choice == 'File (enter path)' then
-        vim.ui.input({ prompt = 'File path: ', completion = 'file' }, function(path)
-          if path and path ~= '' then
-            local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(state.pending_attachments, { type = 'file', path = abs, display = vim.fn.fnamemodify(abs, ':t') })
-            refresh_input_statusline()
+      elseif choice == 'File' then
+        pick_path({ prompt = 'Attach file', type = 'file' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({ type = 'file', path = p, display = vim.fn.fnamemodify(p, ':t') })
           end
         end)
-      elseif choice == 'Folder (enter path)' then
-        vim.ui.input({ prompt = 'Folder path: ', completion = 'dir' }, function(path)
-          if path and path ~= '' then
-            local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(state.pending_attachments, { type = 'directory', path = abs, display = vim.fn.fnamemodify(abs, ':t') .. '/' })
-            refresh_input_statusline()
+      elseif choice == 'Folder' then
+        pick_path({ prompt = 'Attach folder', type = 'dir' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({
+              type = 'directory',
+              path = p,
+              display = vim.fn.fnamemodify(p:gsub('/$', ''), ':t') .. '/',
+            })
           end
         end)
       elseif choice == 'Instructions file' then
-        vim.ui.input({ prompt = 'Instructions file path: ', completion = 'file' }, function(path)
-          if path and path ~= '' then
-            local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(state.pending_attachments, { type = 'file', path = abs, display = '📋' .. vim.fn.fnamemodify(abs, ':t') })
-            refresh_input_statusline()
+        pick_path({ prompt = 'Instructions file', type = 'file' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({
+              type = 'file',
+              path = p,
+              display = '📋' .. vim.fn.fnamemodify(p, ':t'),
+            })
           end
         end)
+      elseif choice == 'Image file' then
+        pick_path({ prompt = 'Attach image', type = 'file' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({
+              type = 'image',
+              path = p,
+              display = '🖼️ ' .. vim.fn.fnamemodify(p, ':t'),
+            })
+          end
+        end)
+      elseif choice == 'Paste image from clipboard' then
+        M.paste_clipboard_image()
       end
-      if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
-        vim.api.nvim_set_current_win(state.input_winid)
-        vim.cmd('startinsert!')
+
+      -- For non-async choices (buffer, selection) return focus immediately.
+      -- Async choices (pick_path, paste) schedule their own focus restoration above.
+      if choice == 'Current buffer' or choice == 'Visual selection' then
+        if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+          vim.api.nvim_set_current_win(state.input_winid)
+          vim.cmd('startinsert!')
+        end
       end
     end)
   end, { buffer = bufnr, silent = true, desc = 'Add resource/attachment' })
@@ -1254,10 +1570,11 @@ open_input_window = function()
   end)
 end
 
-local function append_entry(kind, content)
+local function append_entry(kind, content, attachments)
   table.insert(state.entries, {
     kind = kind,
     content = content or '',
+    attachments = attachments,
   })
   -- Structural change: invalidate incremental cache and schedule a full render.
   state.stream_line_start = nil
@@ -1281,6 +1598,17 @@ local function clear_transcript()
   state.assistant_entries = {}
   state.stream_line_start = nil
   render_chat()
+end
+
+-- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
+local function discard_pending_attachments()
+  for _, a in ipairs(state.pending_attachments) do
+    if a.temp and a.path then
+      pcall(os.remove, a.path)
+    end
+  end
+  state.pending_attachments = {}
+  refresh_input_statusline()
 end
 
 local function stop_event_stream()
@@ -2159,6 +2487,13 @@ function M.setup(opts)
   state.config.base_url = normalize_base_url(state.config.base_url)
   -- Initialize runtime permission mode from config.
   state.permission_mode = state.config.permission_mode or 'interactive'
+  -- Clean up clipboard temp files if Neovim exits before they were sent.
+  vim.api.nvim_create_autocmd('VimLeavePre', {
+    group = vim.api.nvim_create_augroup('CopilotAgentCleanup', { clear = true }),
+    callback = function()
+      discard_pending_attachments()
+    end,
+  })
   -- Eagerly start connecting in the background so the session is ready by
   -- the time the user opens the chat window.
   if state.config.auto_create_session then
@@ -2180,6 +2515,7 @@ end
 function M.new_session()
   local previous_session_id = state.session_id
   state.session_id = nil
+  discard_pending_attachments()
   clear_transcript()
   M.open_chat()
   disconnect_session(previous_session_id, false, function(err)
@@ -2207,7 +2543,7 @@ function M.ask(prompt, opts)
   end
 
   M.open_chat()
-  append_entry('user', text)
+  append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
   -- Mark busy immediately so the spinner shows before the first delta arrives.
   state.chat_busy = true
   refresh_input_statusline()
@@ -2215,9 +2551,13 @@ function M.ask(prompt, opts)
 
   -- Build attachment list for the API.
   local api_attachments = {}
+  local temp_files = {} -- clipboard image temp files to delete after send
   for _, a in ipairs(opts.attachments or {}) do
-    if a.type == 'file' or a.type == 'directory' then
-      table.insert(api_attachments, { type = a.type, path = a.path })
+    if a.type == 'file' or a.type == 'directory' or a.type == 'image' then
+      table.insert(api_attachments, { type = 'file', path = a.path })
+      if a.temp then
+        temp_files[#temp_files + 1] = a.path
+      end
     elseif a.type == 'selection' then
       table.insert(api_attachments, {
         type = 'selection',
@@ -2243,6 +2583,10 @@ function M.ask(prompt, opts)
       body.attachments = api_attachments
     end
     request('POST', string.format('/sessions/%s/messages', session_id), body, function(_, request_err)
+      -- Clean up any clipboard temp PNGs — the HTTP request has been delivered.
+      for _, p in ipairs(temp_files) do
+        pcall(os.remove, p)
+      end
       if request_err then
         state.chat_busy = false
         refresh_input_statusline()
@@ -2334,6 +2678,7 @@ function M.stop(delete_state)
 
   local session_id = state.session_id
   state.session_id = nil
+  discard_pending_attachments()
   clear_transcript()
   disconnect_session(session_id, delete_state, function(err)
     if err then
@@ -2394,6 +2739,62 @@ M.statusline = statusline_component
 local function lsp_command()
   local cmd = service_command()
   return vim.deepcopy(cmd)
+end
+
+-- Capture the clipboard image and add it to pending_attachments.
+-- Saves clipboard PNG to a temp file, then inserts as an image attachment.
+-- Supports macOS (pngpaste), Linux/Wayland (wl-paste), Linux/X11 (xclip, xsel).
+function M.paste_clipboard_image()
+  local tmpfile = vim.fn.tempname() .. '.png'
+  local sysname = (uv.os_uname() or {}).sysname or ''
+
+  local cmd
+  if sysname == 'Darwin' then
+    if vim.fn.executable('pngpaste') == 1 then
+      cmd = { 'pngpaste', tmpfile }
+    else
+      notify('pngpaste not found. Install with: brew install pngpaste', vim.log.levels.ERROR)
+      return
+    end
+  elseif sysname == 'Linux' then
+    if vim.env.WAYLAND_DISPLAY and vim.fn.executable('wl-paste') == 1 then
+      cmd = { 'sh', '-c', 'wl-paste --type image/png > ' .. vim.fn.shellescape(tmpfile) }
+    elseif vim.fn.executable('xclip') == 1 then
+      cmd = { 'sh', '-c', 'xclip -selection clipboard -t image/png -o > ' .. vim.fn.shellescape(tmpfile) }
+    elseif vim.fn.executable('xsel') == 1 then
+      cmd = { 'sh', '-c', 'xsel --clipboard --output --type image/png > ' .. vim.fn.shellescape(tmpfile) }
+    else
+      notify('No clipboard image tool found. Install pngpaste (macOS) or wl-paste/xclip (Linux).', vim.log.levels.ERROR)
+      return
+    end
+  else
+    notify('Clipboard image paste is not supported on this platform.', vim.log.levels.WARN)
+    return
+  end
+
+  vim.fn.jobstart(cmd, {
+    on_exit = function(_, exit_code)
+      vim.schedule(function()
+        local stat = uv.fs_stat(tmpfile)
+        if exit_code ~= 0 or not stat or stat.size == 0 then
+          notify('No image found on clipboard (exit=' .. exit_code .. '). Copy an image first.', vim.log.levels.WARN)
+          return
+        end
+        table.insert(state.pending_attachments, {
+          type = 'image',
+          path = tmpfile,
+          display = '🖼️ clipboard.png',
+          temp = true, -- delete after send; see M.ask()
+        })
+        refresh_input_statusline()
+        notify('Image from clipboard added as attachment.', vim.log.levels.INFO)
+        if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+          vim.api.nvim_set_current_win(state.input_winid)
+          vim.cmd('startinsert!')
+        end
+      end)
+    end,
+  })
 end
 
 -- Start the Copilot agent as a single process that runs both the HTTP bridge

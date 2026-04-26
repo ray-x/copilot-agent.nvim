@@ -49,3 +49,7 @@ end, { desc = "Show Copilot Go session state" })
 vim.api.nvim_create_user_command("CopilotAgentLsp", function()
 	copilot_agent.start_lsp()
 end, { desc = "Start the Copilot LSP server (code actions: explain, fix, add tests, add docs)" })
+
+vim.api.nvim_create_user_command("CopilotAgentPasteImage", function()
+	copilot_agent.paste_clipboard_image()
+end, { desc = "Paste image from clipboard and add as attachment to next Copilot message" })

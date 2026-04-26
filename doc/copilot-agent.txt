@@ -1,0 +1,665 @@
+*copilot-agent.txt*  Neovim plugin for GitHub Copilot agentic sessions
+
+Author:   Ray Xu
+License:  MIT
+Homepage: https://github.com/ray-x/copilot-agent.nvim
+
+==============================================================================
+CONTENTS                                          *copilot-agent-contents*
+
+  1. Introduction ............... |copilot-agent-intro|
+  2. Requirements ................ |copilot-agent-requirements|
+  3. Installation ................ |copilot-agent-installation|
+  4. Setup ....................... |copilot-agent-setup|
+  5. Commands .................... |copilot-agent-commands|
+  6. Input Buffer ................ |copilot-agent-input|
+     6.1 Keybindings ............. |copilot-agent-keybindings|
+     6.2 Attachments ............. |copilot-agent-attachments|
+     6.3 Chat Modes .............. |copilot-agent-modes|
+     6.4 Slash Commands .......... |copilot-agent-slash|
+  7. Permission Modes ............ |copilot-agent-permissions|
+  8. Models ...................... |copilot-agent-models|
+  9. Session Management .......... |copilot-agent-sessions|
+  10. LSP Code Actions ........... |copilot-agent-lsp|
+  11. Statusline API ............. |copilot-agent-statusline|
+  12. Configuration .............. |copilot-agent-config|
+  13. HTTP API ................... |copilot-agent-api|
+  14. Lua API .................... |copilot-agent-lua|
+  15. Changelog .................. |copilot-agent-changelog|
+
+==============================================================================
+1. INTRODUCTION                                   *copilot-agent-intro*
+
+copilot-agent.nvim bridges the official GitHub Copilot SDK to Neovim via a
+lightweight Go HTTP service. It provides:
+
+  • Full agentic tool execution (file read/write, terminal, web search)
+  • Persistent sessions scoped per working directory
+  • Streamed assistant responses with incremental rendering
+  • LSP code actions (explain, fix, add tests, add docs)
+  • Granular permission management
+  • Model switching mid-session with tab-completion
+  • File, folder, image, and clipboard image attachments
+  • Fuzzy picker integration (snacks, telescope, fzf-lua, mini.pick)
+  • Slash commands and @-file completions
+
+Architecture overview:
+
+  Neovim (Lua plugin) ──curl──► Go HTTP service ──SDK──► Copilot CLI/API
+                       ◄──SSE──                  ◄──events──
+
+The Go binary runs a single process serving both the HTTP bridge and an LSP
+server on stdio. Neovim starts it as an LSP client; all chat traffic uses
+curl shell-outs for HTTP and SSE.
+
+==============================================================================
+2. REQUIREMENTS                                   *copilot-agent-requirements*
+
+  • Neovim 0.11+ (0.12+ recommended)
+  • `curl` on PATH
+  • Go 1.24+ (only when building from source)
+  • GitHub Copilot CLI runtime (`@github/copilot/index.js`)
+    or an already-running Copilot CLI server (`-cli-url`)
+  • A valid GitHub Copilot subscription
+
+Optional:
+  • pngpaste (macOS)      — clipboard image paste
+  • wl-paste (Linux/Wayland) — clipboard image paste
+  • xclip or xsel (Linux/X11) — clipboard image paste
+  • snacks.picker, telescope, fzf-lua, or mini.pick — fuzzy file picker
+
+Run |:checkhealth| copilot_agent to verify all requirements.
+
+==============================================================================
+3. INSTALLATION                                   *copilot-agent-installation*
+
+lazy.nvim: >lua
+  {
+    "ray-x/copilot-agent.nvim",
+    config = function()
+      require("copilot_agent").setup({
+        service = { auto_start = true },
+      })
+    end,
+  }
+<
+
+Build the Go binary (optional, for faster startup): >bash
+  cd server/
+  go build -o copilot-agent .
+<
+Then point `service.command` at the binary: >lua
+  service = { auto_start = true, command = { "/path/to/copilot-agent" } }
+<
+
+==============================================================================
+4. SETUP                                          *copilot-agent-setup*
+
+Call `require("copilot_agent").setup(opts)` with any overrides. All keys are
+optional — defaults are shown below: >lua
+
+  require("copilot_agent").setup({
+    base_url         = "http://127.0.0.1:8088",  -- for external services
+    client_name      = "nvim-copilot",
+    permission_mode  = "approve-all",
+    auto_create_session = true,
+    notify           = true,
+
+    session = {
+      working_directory        = nil,   -- function() or string; nil = cwd
+      model                    = nil,   -- nil = SDK default
+      agent                    = nil,   -- nil = "default"; or "coding", etc.
+      streaming                = true,
+      enable_config_discovery  = true,  -- respects .github/copilot-instructions.md
+      auto_resume              = "auto",  -- "auto" | "prompt"
+    },
+
+    service = {
+      auto_start              = false,
+      command                 = { "go", "run", "." },
+      cwd                     = nil,    -- defaults to <plugin_root>/server
+      env                     = nil,
+      port_range              = nil,    -- e.g. "18000-19000"
+      healthcheck_path        = "/healthz",
+      startup_timeout_ms      = 15000,
+      startup_poll_interval_ms = 250,
+    },
+
+    chat = {
+      split                   = "botright vnew",
+      title                   = "Copilot Chat",
+      system_notify_timeout   = 3000,   -- ms, 0 = never auto-clear
+      render_markdown         = false,  -- true = enable render-markdown.nvim
+      file_picker             = "auto", -- see |copilot-agent-picker|
+    },
+  })
+<
+
+==============================================================================
+5. COMMANDS                                       *copilot-agent-commands*
+
+                                                  *:CopilotAgentChat*
+:CopilotAgentChat
+    Open the chat buffer. Creates a session if one does not exist.
+
+                                                  *:CopilotAgentAsk*
+:CopilotAgentAsk [prompt]
+    Send [prompt] to the active session. If no argument is given, opens
+    `vim.ui.input()` for interactive entry.
+
+                                                  *:CopilotAgentNewSession*
+:CopilotAgentNewSession
+    Disconnect the current session and create a fresh one in the same
+    working directory.
+
+                                                  *:CopilotAgentModel*
+:CopilotAgentModel [id]
+    Switch to model [id]. Without argument, opens an interactive picker.
+    Supports tab-completion from the list returned by the service.
+
+                                                  *:CopilotAgentStart*
+:CopilotAgentStart
+    Manually start the Go service (useful when `auto_start = false`).
+
+                                                  *:CopilotAgentStop*
+:CopilotAgentStop[!]
+    Disconnect the active session. With [!] also deletes persisted session
+    state so the next open starts completely fresh.
+
+                                                  *:CopilotAgentStatus*
+:CopilotAgentStatus
+    Print service URL, session id, model, and stream status to a float.
+
+                                                  *:CopilotAgentLsp*
+:CopilotAgentLsp
+    Start (or reuse) the Copilot LSP client for code actions.
+    See |copilot-agent-lsp|.
+
+                                                  *:CopilotAgentPasteImage*
+:CopilotAgentPasteImage
+    Save the current clipboard image to a temp file and add it as a
+    pending attachment. Equivalent to <M-v> in the input buffer.
+    See |copilot-agent-clipboard|.
+
+==============================================================================
+6. INPUT BUFFER                                   *copilot-agent-input*
+
+Open the input buffer from the chat window by pressing `i` or `<Enter>`.
+Type your prompt and press `<CR>` or `<C-s>` to send.
+
+------------------------------------------------------------------------------
+6.1 Keybindings                                   *copilot-agent-keybindings*
+
+Normal and insert mode (unless noted):
+
+  <CR> / <C-s>        Send the prompt
+  q / <Esc>           Close the input buffer (normal mode only)
+  <C-t>               Cycle chat mode: ask → plan → agent
+  <M-a>               Cycle permission mode (see |copilot-agent-permissions|)
+  <M-m>               Open the model picker (see |copilot-agent-models|)
+  <C-a>               Open the attachment picker menu
+  <M-v>               Paste image from clipboard as attachment
+  <C-x>               Toggle individual session tools on/off
+  <Tab>               Trigger completion (@file or /slash-command)
+  <C-p> / <M-p>       Previous prompt from history
+  <C-n> / <M-n>       Next prompt from history
+  ? (normal)          Show this help in a float
+
+------------------------------------------------------------------------------
+6.2 Attachments                                   *copilot-agent-attachments*
+
+Press <C-a> to open the attachment picker. Options:
+
+  Current buffer        Attach the previously-focused file buffer
+  Visual selection      Attach the last visual selection (file + line range)
+  File                  Pick one or more files via fuzzy finder
+  Folder                Pick a directory
+  Instructions file     Pick a file to use as instructions context (📋)
+  Image file            Pick an image file (png, jpg, gif, …) (🖼️)
+  Paste image from clipboard  Save clipboard PNG and attach it
+
+Pending attachments are shown in the statusline as `📎 N`. After sending,
+each attachment is listed below the prompt text in the chat buffer.
+
+                                                  *copilot-agent-picker*
+Fuzzy Picker Integration ~
+
+File / Folder / Image / Instructions choices use the best available picker:
+
+  Priority  Picker           Notes
+  --------  ------           -----
+  1         snacks.picker    files / directories
+  2         telescope        find_files; telescope-file-browser for dirs
+  3         fzf-lua          fzf.files; fzf_exec fd --type d for dirs
+  4         mini.pick        builtin.files (files only)
+  5         vim.ui.input     fallback — type path with completion
+
+Override with `chat.file_picker` in |copilot-agent-setup|: >lua
+  chat = { file_picker = "telescope" }  -- force telescope
+  chat = { file_picker = "native" }     -- always use vim.ui.input
+<
+
+                                                  *copilot-agent-clipboard*
+Clipboard Image Paste ~
+
+<M-v> or |:CopilotAgentPasteImage| saves the clipboard image to a temporary
+PNG file and adds it as an attachment. The temp file is deleted automatically
+after the message is sent (or when the session ends / Neovim exits).
+
+Required tools by platform:
+
+  Platform        Tool        Install
+  --------        ----        -------
+  macOS           pngpaste    brew install pngpaste
+  Linux/Wayland   wl-paste    sudo apt install wl-clipboard
+  Linux/X11       xclip       sudo apt install xclip
+                  xsel        sudo apt install xsel
+
+------------------------------------------------------------------------------
+6.3 Chat Modes                                    *copilot-agent-modes*
+
+The current mode is shown in the prompt prefix (e.g. `agent❯`).
+
+  ask       Standard question-and-answer
+  plan      Ask Copilot to create an implementation plan
+  agent     Autonomous mode — Copilot runs tools and edits files
+
+Cycle with <C-t> in the input buffer or set via config: >lua
+  permission_mode = "approve-all"
+<
+
+------------------------------------------------------------------------------
+6.4 Slash Commands                                *copilot-agent-slash*
+
+Type `/` in the input buffer and press <Tab> for completions. Examples:
+
+  /clear              Clear the chat transcript
+  /copy               Copy the last response to the clipboard
+  /help               Show available slash commands
+  /newfile            Ask Copilot to create a new file
+  /fix                Fix the selected code
+  /tests              Generate tests for the selection
+  /doc                Generate documentation for the selection
+
+Type `@` followed by a file path for file attachments with autocomplete.
+
+==============================================================================
+7. PERMISSION MODES                               *copilot-agent-permissions*
+
+Control how tool-use requests are handled. Cycle with <M-a> in the input
+buffer, or set via |copilot-agent-setup| or `POST /sessions/{id}/permission-mode`.
+
+  interactive   Neovim shows Allow / Deny for each tool use (🔐)
+  approve-all   Auto-approve all tool uses silently (✅) [default]
+  autopilot     approve-all + auto-answer ask_user requests (🤖)
+  reject-all    Reject all tool uses — safe read-only mode (🚫)
+
+The current mode is shown by |copilot-agent-statusline| functions.
+
+==============================================================================
+8. MODELS                                         *copilot-agent-models*
+
+Switch model with |:CopilotAgentModel| or <M-m> in the input buffer.
+The model list is fetched from the service and cached; tab-completion works
+in the command line.
+
+Set a default model in |copilot-agent-setup|: >lua
+  session = { model = "claude-sonnet-4.6" }
+<
+
+The current model is shown by |copilot-agent-statusline| functions.
+
+==============================================================================
+9. SESSION MANAGEMENT                             *copilot-agent-sessions*
+
+Sessions are scoped per working directory. When you open the chat, the plugin
+looks for a persisted session matching the current directory and resumes it
+automatically (when `auto_resume = "auto"`).
+
+  :CopilotAgentNewSession   Start a fresh session in the same directory
+  :CopilotAgentStop         Disconnect (session state persisted on disk)
+  :CopilotAgentStop!        Disconnect and delete all persisted state
+
+The session ID is shown in the chat buffer header and by
+|copilot-agent-statusline|.
+
+Multiple Neovim instances can connect to separate sessions on the same
+service by using `service.port_range`: >lua
+  service = { port_range = "18000-19000" }
+<
+Each instance binds to the first free port in the range.
+
+==============================================================================
+10. LSP CODE ACTIONS                              *copilot-agent-lsp*
+
+The Go binary runs an LSP server on stdio. Start it with |:CopilotAgentLsp|
+or `require("copilot_agent").start_lsp()`.
+
+Available code actions (trigger with `vim.lsp.buf.code_action()` on any
+selection):
+
+  Explain selection     Ask Copilot to explain the selected code
+  Fix selection         Ask Copilot to suggest a fix
+  Add tests             Generate unit tests for the selection
+  Add docs              Generate documentation for the selection
+
+The action builds a prompt from the selection, file path, and line range,
+then posts it to the active HTTP session.
+
+Call `start_lsp()` in setup to make code actions available immediately: >lua
+  require("copilot_agent").setup({ ... })
+  require("copilot_agent").start_lsp()
+<
+
+==============================================================================
+11. STATUSLINE API                                *copilot-agent-statusline*
+
+Each function returns a short display string and is safe to call at any time.
+
+  require("copilot_agent").statusline_mode()        -- [ask] / [plan] / [agent]
+  require("copilot_agent").statusline_model()       -- claude-sonnet-4.6
+  require("copilot_agent").statusline_busy()        -- ✓ or ⏳
+  require("copilot_agent").statusline_permission()  -- 🔐interactive / ✅approve-all / …
+  require("copilot_agent").statusline_attachments() -- 📎3 (only when N > 0)
+
+lualine example: >lua
+  require("lualine").setup({
+    sections = {
+      lualine_x = {
+        require("copilot_agent").statusline_mode,
+        require("copilot_agent").statusline_model,
+        require("copilot_agent").statusline_busy,
+        require("copilot_agent").statusline_permission,
+        require("copilot_agent").statusline_attachments,
+      }
+    }
+  })
+<
+
+heirline / &statusline: >vim
+  %{v:lua.require'copilot_agent'.statusline()}
+<
+
+==============================================================================
+12. CONFIGURATION                                 *copilot-agent-config*
+
+All configuration keys and their defaults:
+
+base_url ~
+  Type: string
+  Default: `"http://127.0.0.1:8088"`
+  Base URL for connecting to an externally-started service. Overwritten
+  automatically when `service.auto_start = true`.
+
+client_name ~
+  Type: string
+  Default: `"nvim-copilot"`
+  Name sent to the Copilot SDK when creating sessions.
+
+permission_mode ~
+  Type: string  ("interactive" | "approve-all" | "autopilot" | "reject-all")
+  Default: `"approve-all"`
+  Initial permission mode for new sessions. See |copilot-agent-permissions|.
+
+auto_create_session ~
+  Type: boolean
+  Default: `true`
+  When true, eagerly create a session in the background on startup.
+
+notify ~
+  Type: boolean
+  Default: `true`
+  Set false to suppress all `[copilot-agent]` vim.notify calls.
+
+session.working_directory ~
+  Type: string | function() → string | nil
+  Default: `nil` (uses vim.fn.getcwd())
+  Working directory for sessions. Accepts a function for dynamic values.
+
+session.model ~
+  Type: string | nil
+  Default: `nil` (SDK picks a default)
+  Default model for new sessions.
+
+session.agent ~
+  Type: string | nil
+  Default: `nil` ("default" agent)
+  Agent to use. Examples: "coding", "gpt-4.1", or a custom agent name.
+
+session.streaming ~
+  Type: boolean
+  Default: `true`
+  Stream assistant responses token by token.
+
+session.enable_config_discovery ~
+  Type: boolean
+  Default: `true`
+  Respect `.github/copilot-instructions.md` and similar project files.
+
+session.auto_resume ~
+  Type: string  ("auto" | "prompt")
+  Default: `"auto"`
+  How to handle multiple matching sessions on startup.
+  "auto"   — silently resume the most recent session.
+  "prompt" — always show a picker when multiple sessions exist.
+
+service.auto_start ~
+  Type: boolean
+  Default: `false`
+  Start the Go service automatically when the plugin is loaded.
+
+service.command ~
+  Type: string[] | function() → string[]
+  Default: `{ "go", "run", "." }`
+  Command used to start the service.
+
+service.cwd ~
+  Type: string | nil
+  Default: `nil` (uses `<plugin_root>/server`)
+  Working directory for the service process.
+
+service.env ~
+  Type: table | nil
+  Default: `nil`
+  Extra environment variables for the service process.
+
+service.port_range ~
+  Type: string | nil  (format: "lo-hi", e.g. "18000-19000")
+  Default: `nil` (OS picks a free port)
+  Restrict the service to a fixed port range.
+
+service.startup_timeout_ms ~
+  Type: integer
+  Default: `15000`
+  Milliseconds to wait for the service to become healthy.
+
+service.startup_poll_interval_ms ~
+  Type: integer
+  Default: `250`
+  Interval between health-check polls during startup.
+
+chat.split ~
+  Type: string
+  Default: `"botright vnew"`
+  Vim split command used to open the chat window.
+
+chat.title ~
+  Type: string
+  Default: `"Copilot Chat"`
+  Title line displayed at the top of the chat buffer.
+
+chat.system_notify_timeout ~
+  Type: integer
+  Default: `3000`
+  Milliseconds before transient system notices are auto-cleared from the
+  cmdline area. Set to 0 to never auto-clear.
+
+chat.render_markdown ~
+  Type: boolean
+  Default: `false`
+  Enable render-markdown.nvim on the chat buffer. When true, the plugin
+  calls rm.refresh() once per completed turn. Disable if you see visual
+  lag on long responses.
+
+chat.file_picker ~
+  Type: string  ("auto"|"snacks"|"telescope"|"fzf-lua"|"mini.pick"|"native")
+  Default: `"auto"`
+  Fuzzy picker to use for file/folder/image attachment.
+  See |copilot-agent-picker|.
+
+==============================================================================
+13. HTTP API                                      *copilot-agent-api*
+
+The Go service exposes a REST + SSE API on the bound address.
+
+Endpoints: ~
+
+  GET  /healthz                            Health check
+  GET  /sessions                           List all sessions
+  POST /sessions                           Create or resume a session
+  GET  /sessions/{id}                      Get session metadata
+  DELETE /sessions/{id}                    Disconnect; ?delete=true removes state
+  GET  /sessions/{id}/messages             Fetch stored session events
+  POST /sessions/{id}/messages             Send a prompt with attachments
+  GET  /sessions/{id}/events               SSE stream of events
+  POST /sessions/{id}/user-input/{reqID}   Answer a pending ask_user request
+  POST /sessions/{id}/permission/{reqID}   Answer a permission request
+  POST /sessions/{id}/permission-mode      Update permission mode
+  POST /sessions/{id}/model               Switch model
+  POST /sessions/{id}/tools               Update excluded tools list
+  GET  /models                             List available models
+
+POST /sessions request body: >json
+  {
+    "workingDirectory": "/path/to/project",
+    "permissionMode":   "approve-all",
+    "clientName":       "my-client",
+    "model":            "claude-sonnet-4.6",
+    "streaming":        true
+  }
+<
+
+POST /sessions/{id}/messages request body: >json
+  {
+    "prompt": "Explain this code",
+    "mode": "agent",
+    "attachments": [
+      { "type": "file", "path": "/abs/path/to/file.go" },
+      { "type": "selection", "filePath": "/abs/path/to/file.go",
+        "text": "selected text", "lineRange": {"start": 0, "end": 5} }
+    ]
+  }
+<
+
+SSE Event Types: ~
+
+  session.event              Raw SDK events (assistant.message_delta, etc.)
+  host.user_input_requested  Agent needs user input
+  host.permission_requested  Tool use needs approval (interactive mode)
+  host.permission_decision   Approval/rejection outcome
+  host.permission_mode_changed  Permission mode updated
+  host.model_changed         Model switched
+  host.session_disconnected  Session closed
+  : keepalive                SSE keepalive comment (ignore)
+
+Service flags: ~
+
+  -addr          HTTP listen address (default: OS picks a free port)
+  -port-range    Try ports lo-hi, first free wins (e.g. 18000-19000)
+  -cwd           Default working directory for sessions
+  -model         Default model for new sessions
+  -cli-path      Path to Copilot CLI binary / index.js
+  -cli-url       URL of an already-running Copilot CLI server
+  -log-level     Copilot CLI log level
+  -lsp           Start LSP server on stdio (default: true)
+
+==============================================================================
+14. LUA API                                       *copilot-agent-lua*
+
+All functions are members of `require("copilot_agent")`.
+
+setup({opts})                             *copilot-agent.setup()*
+  Initialize the plugin. See |copilot-agent-setup|. Returns the module.
+
+open_chat()                               *copilot-agent.open_chat()*
+  Ensure the chat window is open. Creates a session if needed.
+  Returns the chat buffer number.
+
+new_session()                             *copilot-agent.new_session()*
+  Disconnect the current session and start a fresh one.
+
+ask({prompt}, {opts})                     *copilot-agent.ask()*
+  Send {prompt} to the active session. {opts} may include:
+    mode        "ask" | "plan" | "agent"
+    attachments List of attachment tables (see source for schema)
+
+select_model({model})                     *copilot-agent.select_model()*
+  Switch to {model}. Without argument, opens an interactive picker.
+
+complete_model({arglead})                 *copilot-agent.complete_model()*
+  Return a list of model IDs matching {arglead}. Used by :CopilotAgentModel.
+
+start_service({callback})                 *copilot-agent.start_service()*
+  Start the Go service. Calls {callback}(err) when ready.
+
+stop({delete_state})                      *copilot-agent.stop()*
+  Disconnect the session. Pass true to also delete persisted state.
+
+status()                                  *copilot-agent.status()*
+  Show a float with current service / session status.
+
+state()                                   *copilot-agent.state()*
+  Return a copy of the internal state table. Useful for debugging.
+
+paste_clipboard_image()                   *copilot-agent.paste_clipboard_image()*
+  Save the clipboard image to a temp PNG and add it as a pending attachment.
+  The temp file is deleted after the message is sent.
+  See |copilot-agent-clipboard|.
+
+start_lsp({opts})                         *copilot-agent.start_lsp()*
+  Start the Copilot LSP client for code actions. {opts} may include:
+    root_dir    string — LSP root directory (default: working_directory())
+  Returns the LSP client id.
+
+statusline_mode()                         *copilot-agent.statusline_mode()*
+statusline_model()                        *copilot-agent.statusline_model()*
+statusline_busy()                         *copilot-agent.statusline_busy()*
+statusline_permission()                   *copilot-agent.statusline_permission()*
+statusline_attachments()                  *copilot-agent.statusline_attachments()*
+  Statusline helper functions. See |copilot-agent-statusline|.
+
+==============================================================================
+15. CHANGELOG                                     *copilot-agent-changelog*
+
+v0.1.0 (initial) ~
+  • Go HTTP service + SSE fan-out
+  • Basic chat buffer with streaming render
+  • Session persistence per working directory
+
+v0.2.0 ~
+  • Input buffer with prompt history, slash commands, @-file completion
+  • Permission mode cycling (<M-a>)
+  • Model switching (<M-m>) with tab-completion
+  • Tool toggle (<C-x>)
+  • LSP server with code actions
+
+v0.3.0 ~
+  • Dynamic port / port-range flag
+  • Checkhealth module
+  • Session auto-resume ("auto" | "prompt")
+  • render-markdown.nvim integration (configurable)
+  • `session.agent` and `session.auto_resume` config keys
+
+v0.4.0 ~
+  • Image attachments (file picker + clipboard paste)
+  • Fuzzy picker integration (snacks, telescope, fzf-lua, mini.pick)
+  • `chat.file_picker` config key
+  • `<M-v>` / :CopilotAgentPasteImage
+  • Clipboard temp file cleanup (VimLeavePre, new session, stop)
+  • Fixed chat scroll: cursor always follows bottom with `zb`
+  • Fixed LSP race condition (sync.Mutex on sessionID)
+  • Fixed URI percent-decoding in uriToFilename
+  • Fixed missing POST /sessions/{id}/tools endpoint
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:

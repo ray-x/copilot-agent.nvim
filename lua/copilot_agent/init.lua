@@ -2139,12 +2139,59 @@ local function handle_host_event(event_name, payload)
     local req_id = req.id
     local mode = data.mode or 'interactive'
     if mode == 'interactive' and req_id then
-      local tool_name = (req.request or {}).toolName or 'unknown tool'
-      local description = (req.request or {}).description or ''
-      local prompt_str = 'Allow ' .. tool_name
-      if description ~= '' then
-        prompt_str = prompt_str .. ': ' .. description
+      local perm = req.request or {}
+      local kind = perm.kind or 'unknown'
+      local parts = {}
+
+      -- Build a descriptive prompt based on the permission kind.
+      if kind == 'shell' then
+        local cmd = perm.fullCommandText or perm.intention or '(shell command)'
+        table.insert(parts, 'Run shell command')
+        table.insert(parts, cmd)
+      elseif kind == 'write' then
+        local file = perm.fileName or perm.path or '(unknown file)'
+        table.insert(parts, 'Write file')
+        table.insert(parts, file)
+      elseif kind == 'read' then
+        local file = perm.path or perm.fileName or '(unknown path)'
+        table.insert(parts, 'Read')
+        table.insert(parts, file)
+      elseif kind == 'mcp' or kind == 'custom-tool' then
+        local tool = perm.toolTitle or perm.toolName or 'unknown tool'
+        local server = perm.serverName or ''
+        table.insert(parts, tool)
+        if server ~= '' then
+          table.insert(parts, '(' .. server .. ')')
+        end
+        if perm.toolDescription and perm.toolDescription ~= '' then
+          table.insert(parts, '— ' .. perm.toolDescription)
+        end
+      elseif kind == 'url' then
+        local url = perm.url or '(unknown URL)'
+        table.insert(parts, 'Fetch URL')
+        table.insert(parts, url)
+      elseif kind == 'memory' then
+        local action = perm.action or 'access'
+        table.insert(parts, 'Memory ' .. tostring(action))
+        if perm.fact then
+          table.insert(parts, perm.fact)
+        end
+      elseif kind == 'hook' then
+        table.insert(parts, 'Hook')
+        if perm.hookMessage then
+          table.insert(parts, perm.hookMessage)
+        end
+      else
+        local tool = perm.toolTitle or perm.toolName or kind
+        table.insert(parts, tool)
       end
+
+      -- Append intention if present and not already shown.
+      if perm.intention and kind ~= 'shell' then
+        table.insert(parts, '— ' .. perm.intention)
+      end
+
+      local prompt_str = 'Allow: ' .. table.concat(parts, ' ')
       vim.schedule(function()
         vim.ui.select({ 'Allow', 'Deny' }, { prompt = prompt_str }, function(choice)
           if not state.session_id then

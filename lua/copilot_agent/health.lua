@@ -7,14 +7,7 @@ local function check_neovim_version()
   if version.major > 0 or version.minor >= 10 then
     vim.health.ok(string.format('Neovim %d.%d.%d (>= 0.10 required)', version.major, version.minor, version.patch))
   else
-    vim.health.error(
-      string.format(
-        'Neovim %d.%d.%d detected — version 0.10+ is required',
-        version.major,
-        version.minor,
-        version.patch
-      )
-    )
+    vim.health.error(string.format('Neovim %d.%d.%d detected — version 0.10+ is required', version.major, version.minor, version.patch))
   end
 end
 
@@ -36,9 +29,7 @@ local function check_go()
     local ver = vim.fn.system('go version'):match('go(%S+)')
     vim.health.ok('`go` found' .. (ver and (' (v' .. ver .. ')') or ''))
   else
-    vim.health.warn(
-      '`go` not found — required only if running the service via `go run .`; not needed for a pre-built binary'
-    )
+    vim.health.warn('`go` not found — required only if running the service via `go run .`; not needed for a pre-built binary')
   end
 end
 
@@ -123,9 +114,7 @@ local function check_service()
       if auto then
         vim.health.warn('service not reachable at ' .. healthz .. ' (will be started automatically)')
       else
-        vim.health.warn(
-          'service not reachable at ' .. healthz .. ' — start it manually or set service.auto_start = true'
-        )
+        vim.health.warn('service not reachable at ' .. healthz .. ' — start it manually or set service.auto_start = true')
       end
     end
   end

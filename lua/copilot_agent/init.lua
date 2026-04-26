@@ -273,14 +273,8 @@ local function refresh_input_statusline()
     return
   end
   local att = statusline_attachments()
-  vim.wo[state.input_winid].statusline = string.format(
-    ' %s %s  %s  %s%s  (? for help)',
-    statusline_mode(),
-    statusline_busy(),
-    statusline_model(),
-    statusline_permission(),
-    att ~= '' and ('  ' .. att) or ''
-  )
+  vim.wo[state.input_winid].statusline =
+    string.format(' %s %s  %s  %s%s  (? for help)', statusline_mode(), statusline_busy(), statusline_model(), statusline_permission(), att ~= '' and ('  ' .. att) or '')
 end
 
 local function cwd()
@@ -672,12 +666,7 @@ local function stream_update(entry, idx)
   local new_lines = entry_lines(entry, idx)
   -- Apply the same merge logic as render_chat so incremental writes stay
   -- consistent with full renders (line count is preserved, so offsets are unaffected).
-  if
-    entry.kind == 'assistant'
-    and not is_thinking_content(entry.content)
-    and should_merge_assistant(idx)
-    and #new_lines > 0
-  then
+  if entry.kind == 'assistant' and not is_thinking_content(entry.content) and should_merge_assistant(idx) and #new_lines > 0 then
     new_lines[1] = ''
   end
 
@@ -908,12 +897,7 @@ local function create_input_buffer()
   end
 
   -- <C-s> submits in prompt mode; <CR> submits via prompt_setcallback().
-  vim.keymap.set(
-    { 'n', 'i' },
-    '<C-s>',
-    submit_buffer,
-    { buffer = bufnr, silent = true, desc = 'Submit prompt to Copilot' }
-  )
+  vim.keymap.set({ 'n', 'i' }, '<C-s>', submit_buffer, { buffer = bufnr, silent = true, desc = 'Submit prompt to Copilot' })
   vim.keymap.set('n', 'q', cancel, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('n', '<Esc>', cancel, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('i', '<Esc>', '<Esc>', { buffer = bufnr, silent = true, desc = 'Switch to normal mode' })
@@ -965,10 +949,7 @@ local function create_input_buffer()
       if choice == 'Current buffer' then
         local path = vim.api.nvim_buf_get_name(vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0)
         if path ~= '' then
-          table.insert(
-            state.pending_attachments,
-            { type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') }
-          )
+          table.insert(state.pending_attachments, { type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') })
           refresh_input_statusline()
         end
       elseif choice == 'Visual selection' then
@@ -985,12 +966,7 @@ local function create_input_buffer()
             text = text,
             start_line = start_line,
             end_line = end_line,
-            display = 'selection:'
-              .. vim.fn.fnamemodify(filepath, ':t')
-              .. ':'
-              .. (start_line + 1)
-              .. '-'
-              .. (end_line + 1),
+            display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
           })
           refresh_input_statusline()
         end
@@ -998,10 +974,7 @@ local function create_input_buffer()
         vim.ui.input({ prompt = 'File path: ', completion = 'file' }, function(path)
           if path and path ~= '' then
             local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(
-              state.pending_attachments,
-              { type = 'file', path = abs, display = vim.fn.fnamemodify(abs, ':t') }
-            )
+            table.insert(state.pending_attachments, { type = 'file', path = abs, display = vim.fn.fnamemodify(abs, ':t') })
             refresh_input_statusline()
           end
         end)
@@ -1009,10 +982,7 @@ local function create_input_buffer()
         vim.ui.input({ prompt = 'Folder path: ', completion = 'dir' }, function(path)
           if path and path ~= '' then
             local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(
-              state.pending_attachments,
-              { type = 'directory', path = abs, display = vim.fn.fnamemodify(abs, ':t') .. '/' }
-            )
+            table.insert(state.pending_attachments, { type = 'directory', path = abs, display = vim.fn.fnamemodify(abs, ':t') .. '/' })
             refresh_input_statusline()
           end
         end)
@@ -1020,10 +990,7 @@ local function create_input_buffer()
         vim.ui.input({ prompt = 'Instructions file path: ', completion = 'file' }, function(path)
           if path and path ~= '' then
             local abs = vim.fn.fnamemodify(path, ':p')
-            table.insert(
-              state.pending_attachments,
-              { type = 'file', path = abs, display = '📋' .. vim.fn.fnamemodify(abs, ':t') }
-            )
+            table.insert(state.pending_attachments, { type = 'file', path = abs, display = '📋' .. vim.fn.fnamemodify(abs, ':t') })
             refresh_input_statusline()
           end
         end)
@@ -1076,18 +1043,13 @@ local function create_input_buffer()
           excluded_set[choice.name] = true
         end
         local new_excluded = vim.tbl_keys(excluded_set)
-        request(
-          'POST',
-          '/sessions/' .. state.session_id .. '/tools',
-          { excludedTools = new_excluded },
-          function(_, req_err)
-            if req_err then
-              notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
-            else
-              notify('Tools updated', vim.log.levels.INFO)
-            end
+        request('POST', '/sessions/' .. state.session_id .. '/tools', { excludedTools = new_excluded }, function(_, req_err)
+          if req_err then
+            notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
+          else
+            notify('Tools updated', vim.log.levels.INFO)
           end
-        )
+        end)
       end)
     end)
   end, { buffer = bufnr, silent = true, desc = 'Configure session tools' })
@@ -1340,17 +1302,11 @@ local function disconnect_session(session_id, delete_state, callback)
     return
   end
 
-  request(
-    'DELETE',
-    string.format('/sessions/%s%s', session_id, delete_state and '?delete=true' or ''),
-    nil,
-    function(_, err)
-      if callback then
-        callback(err)
-      end
-    end,
-    { auto_start = false }
-  )
+  request('DELETE', string.format('/sessions/%s%s', session_id, delete_state and '?delete=true' or ''), nil, function(_, err)
+    if callback then
+      callback(err)
+    end
+  end, { auto_start = false })
 end
 
 decode_json = function(raw)
@@ -1528,8 +1484,7 @@ ensure_service_running = function(callback)
 
     if state.service_job_id then
       local timeout_ms = tonumber(state.config.service.startup_timeout_ms) or defaults.service.startup_timeout_ms
-      local interval_ms = tonumber(state.config.service.startup_poll_interval_ms)
-        or defaults.service.startup_poll_interval_ms
+      local interval_ms = tonumber(state.config.service.startup_poll_interval_ms) or defaults.service.startup_poll_interval_ms
       local attempts = math.max(1, math.floor(timeout_ms / interval_ms))
       poll_service_health(attempts)
       return
@@ -1586,8 +1541,7 @@ ensure_service_running = function(callback)
     append_entry('system', 'Starting service: ' .. (type(command) == 'table' and table.concat(command, ' ') or command))
 
     local timeout_ms = tonumber(state.config.service.startup_timeout_ms) or defaults.service.startup_timeout_ms
-    local interval_ms = tonumber(state.config.service.startup_poll_interval_ms)
-      or defaults.service.startup_poll_interval_ms
+    local interval_ms = tonumber(state.config.service.startup_poll_interval_ms) or defaults.service.startup_poll_interval_ms
     local attempts = math.max(1, math.floor(timeout_ms / interval_ms))
     poll_service_health(attempts)
   end)
@@ -1701,26 +1655,18 @@ local function handle_host_event(event_name, payload)
             return
           end
           local approved = (choice == 'Allow')
-          request(
-            'POST',
-            '/sessions/' .. state.session_id .. '/permission/' .. req_id,
-            { approved = approved },
-            function(_, err)
-              if err then
-                notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
-              end
+          request('POST', '/sessions/' .. state.session_id .. '/permission/' .. req_id, { approved = approved }, function(_, err)
+            if err then
+              notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
             end
-          )
+          end)
         end)
       end)
     else
       notify_transient('Permission requested; mode=' .. tostring(mode), vim.log.levels.INFO)
     end
   elseif event_name == 'host.permission_decision' then
-    notify_transient(
-      'Permission ' .. tostring(data.decision or 'unknown') .. ' (' .. tostring(data.mode or '') .. ')',
-      vim.log.levels.INFO
-    )
+    notify_transient('Permission ' .. tostring(data.decision or 'unknown') .. ' (' .. tostring(data.mode or '') .. ')', vim.log.levels.INFO)
   elseif event_name == 'host.permission_mode_changed' then
     state.permission_mode = data.mode or state.permission_mode
     refresh_input_statusline()
@@ -2042,28 +1988,20 @@ create_session = function(callback, opts)
         on_session_ready(nil, err)
         return
       end
-      if
-        unavailable_model
-        and state.config.session.model == unavailable_model
-        and opts.model_selection_attempts ~= false
-      then
+      if unavailable_model and state.config.session.model == unavailable_model and opts.model_selection_attempts ~= false then
         append_entry('system', string.format('Model "%s" is unavailable; choose a supported model.', unavailable_model))
-        prompt_supported_model_selection(
-          unavailable_model,
-          'Select a supported Copilot model',
-          function(reselected_model, prompt_err)
-            if prompt_err then
-              notify('Failed to create session: ' .. prompt_err, vim.log.levels.ERROR)
-              append_entry('error', 'Failed to create session: ' .. prompt_err)
-              on_session_ready(nil, prompt_err)
-              return
-            end
-            state.config.session.model = reselected_model
-            append_entry('system', 'Retrying session creation with model ' .. reselected_model)
-            state.creating_session = true
-            create_session(callback, { model_selection_attempts = false })
+        prompt_supported_model_selection(unavailable_model, 'Select a supported Copilot model', function(reselected_model, prompt_err)
+          if prompt_err then
+            notify('Failed to create session: ' .. prompt_err, vim.log.levels.ERROR)
+            append_entry('error', 'Failed to create session: ' .. prompt_err)
+            on_session_ready(nil, prompt_err)
+            return
           end
-        )
+          state.config.session.model = reselected_model
+          append_entry('system', 'Retrying session creation with model ' .. reselected_model)
+          state.creating_session = true
+          create_session(callback, { model_selection_attempts = false })
+        end)
         return
       end
       notify('Failed to create session: ' .. err, vim.log.levels.ERROR)
@@ -2092,8 +2030,7 @@ fetch_models = function(callback, on_error)
   request('GET', '/models', nil, function(response, err, status)
     if err then
       if status == 404 then
-        err = err
-          .. '. The running Go host does not expose /models; restart it so Neovim and the service use the same build.'
+        err = err .. '. The running Go host does not expose /models; restart it so Neovim and the service use the same build.'
       end
       if on_error then
         on_error(err)
@@ -2173,22 +2110,18 @@ local function apply_model(model, callback, opts)
       local unavailable_model = unavailable_model_from_error(err)
       if unavailable_model and opts.model_selection_attempts ~= false then
         append_entry('system', string.format('Model "%s" is unavailable; choose a supported model.', unavailable_model))
-        prompt_supported_model_selection(
-          unavailable_model,
-          'Select a supported Copilot model',
-          function(reselected_model, prompt_err)
-            if prompt_err then
-              state.config.session.model = previous_model
-              if callback then
-                callback(nil, prompt_err)
-              end
-              return
+        prompt_supported_model_selection(unavailable_model, 'Select a supported Copilot model', function(reselected_model, prompt_err)
+          if prompt_err then
+            state.config.session.model = previous_model
+            if callback then
+              callback(nil, prompt_err)
             end
-            apply_model(reselected_model, callback, {
-              model_selection_attempts = false,
-            })
+            return
           end
-        )
+          apply_model(reselected_model, callback, {
+            model_selection_attempts = false,
+          })
+        end)
         return
       end
       state.config.session.model = previous_model

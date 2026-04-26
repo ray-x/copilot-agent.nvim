@@ -7,7 +7,14 @@ local function check_neovim_version()
   if version.major > 0 or version.minor >= 10 then
     vim.health.ok(string.format('Neovim %d.%d.%d (>= 0.10 required)', version.major, version.minor, version.patch))
   else
-    vim.health.error(string.format('Neovim %d.%d.%d detected — version 0.10+ is required', version.major, version.minor, version.patch))
+    vim.health.error(
+      string.format(
+        'Neovim %d.%d.%d detected — version 0.10+ is required',
+        version.major,
+        version.minor,
+        version.patch
+      )
+    )
   end
 end
 
@@ -29,7 +36,9 @@ local function check_go()
     local ver = vim.fn.system('go version'):match('go(%S+)')
     vim.health.ok('`go` found' .. (ver and (' (v' .. ver .. ')') or ''))
   else
-    vim.health.warn('`go` not found — required only if running the service via `go run .`; not needed for a pre-built binary')
+    vim.health.warn(
+      '`go` not found — required only if running the service via `go run .`; not needed for a pre-built binary'
+    )
   end
 end
 
@@ -49,7 +58,9 @@ local function check_service()
 
   -- Service command
   local cmd = config.service and config.service.command
-  if type(cmd) == 'function' then cmd = cmd() end
+  if type(cmd) == 'function' then
+    cmd = cmd()
+  end
   if type(cmd) == 'table' and #cmd > 0 then
     local exe = cmd[1]
     if vim.fn.executable(exe) == 1 then
@@ -66,13 +77,17 @@ local function check_service()
   -- Service cwd
   local function plugin_root()
     local source = debug.getinfo(1, 'S').source
-    if type(source) ~= 'string' or source == '' then return nil end
+    if type(source) ~= 'string' or source == '' then
+      return nil
+    end
     local path = source:gsub('^@', '')
     -- health.lua is at lua/copilot_agent/health.lua → go up 3 levels
     return vim.fn.fnamemodify(path, ':p:h:h:h')
   end
   local cwd = config.service and config.service.cwd
-  if type(cwd) == 'function' then cwd = cwd() end
+  if type(cwd) == 'function' then
+    cwd = cwd()
+  end
   if cwd == nil or cwd == '' then
     local root = plugin_root()
     cwd = root and (root .. '/server') or nil
@@ -108,7 +123,9 @@ local function check_service()
       if auto then
         vim.health.warn('service not reachable at ' .. healthz .. ' (will be started automatically)')
       else
-        vim.health.warn('service not reachable at ' .. healthz .. ' — start it manually or set service.auto_start = true')
+        vim.health.warn(
+          'service not reachable at ' .. healthz .. ' — start it manually or set service.auto_start = true'
+        )
       end
     end
   end
@@ -117,7 +134,9 @@ end
 local function check_session()
   vim.health.start('Active session')
   local ok, ca = pcall(require, 'copilot_agent')
-  if not ok then return end
+  if not ok then
+    return
+  end
   local session_id = ca.state and ca.state.session_id
   if session_id then
     vim.health.ok('session connected: ' .. session_id)

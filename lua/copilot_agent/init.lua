@@ -60,9 +60,9 @@ local defaults = {
     agent = nil,
     streaming = true,
     enable_config_discovery = true,
-    -- 'auto' (default): silently resume the most recent matching session without prompting.
-    -- 'prompt': show a picker when multiple sessions exist for this project.
-    auto_resume = 'auto',
+    -- 'prompt' (default): show a picker when multiple sessions exist for this project.
+    -- 'auto': silently resume the most recent matching session without prompting.
+    auto_resume = 'prompt',
   },
 }
 
@@ -104,6 +104,7 @@ local state = {
   -- Incremental streaming render
   render_pending = false, -- true when a debounced render is scheduled
   stream_line_start = nil, -- 0-based buf line where current streaming entry content begins
+  history_loading = false, -- true while replaying SSE history; suppresses render until done
 }
 
 -- Static list of slash commands supported by the Copilot CLI backend.
@@ -714,6 +715,9 @@ end
 
 render_chat = function()
   state.render_pending = false
+  if state.history_loading then
+    return
+  end
   local bufnr = state.chat_bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
@@ -778,7 +782,7 @@ end
 -- Debounced render: coalesces rapid calls (e.g. streaming deltas) to ~25fps.
 local RENDER_DEBOUNCE_MS = 40
 local function schedule_render()
-  if state.render_pending then
+  if state.render_pending or state.history_loading then
     return
   end
   state.render_pending = true
@@ -788,6 +792,9 @@ end
 -- Incremental update: only replaces the tail of the buffer starting from the
 -- current streaming entry's content lines. O(entry size) instead of O(buffer).
 local function stream_update(entry, idx)
+  if state.history_loading then
+    return
+  end
   local bufnr = state.chat_bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
@@ -2216,6 +2223,10 @@ local function handle_host_event(event_name, payload)
   elseif event_name == 'host.session_disconnected' then
     state.session_name = nil
     append_entry('system', 'Session disconnected')
+  elseif event_name == 'host.history_done' then
+    state.history_loading = false
+    render_chat()
+    scroll_to_bottom()
   end
 end
 
@@ -2352,6 +2363,7 @@ local function start_event_stream(session_id)
   stop_event_stream()
   state.sse_event = { event = 'message', data = {} }
   state.sse_partial = ''
+  state.history_loading = true -- suppress rendering until host.history_done arrives
 
   local args = {
     state.config.curl_bin,

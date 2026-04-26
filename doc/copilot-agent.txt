@@ -125,7 +125,7 @@ optional — defaults are shown below: >lua
       agent                    = nil,   -- nil = "default"; or "coding", etc.
       streaming                = true,
       enable_config_discovery  = true,  -- respects .github/copilot-instructions.md
-      auto_resume              = "auto",    -- "auto" (default) | "prompt"
+      auto_resume              = "prompt",  -- "prompt" (default) | "auto"
     },
 
     service = {
@@ -460,13 +460,12 @@ session.enable_config_discovery ~
   Respect `.github/copilot-instructions.md` and similar project files.
 
 session.auto_resume ~
-  Type: string  ("auto" | "prompt")
-  Default: `"auto"`
+  Type: string  ("prompt" | "auto")
+  Default: `"prompt"`
   How to handle multiple matching sessions on startup.
-  "auto"   — silently resume the most recent session without prompting.
-              This is the default — the chat is immediately usable.
   "prompt" — show a picker (most recent first) so you can choose which session
-              to resume or start a new one.
+              to resume or start a new one.  This is the default.
+  "auto"   — silently resume the most recent session without prompting.
 
 service.auto_start ~
   Type: boolean

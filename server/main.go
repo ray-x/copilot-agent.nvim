@@ -645,6 +645,13 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Signal that history replay is complete so clients can batch-render once.
+		if err := writeSSE(w, "host.history_done", mustJSON(hostEvent{
+			Timestamp: time.Now().UTC(),
+			Data:      map[string]any{"sessionId": managed.session.SessionID, "count": len(events)},
+		})); err != nil {
+			return
+		}
 		flusher.Flush()
 	}
 

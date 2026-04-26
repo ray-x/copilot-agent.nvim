@@ -172,7 +172,7 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         agent = nil,    -- nil = "default"; or "coding", "gpt-4.1", a custom agent name
         streaming = true,
         enable_config_discovery = true,  -- respects .github/copilot-instructions.md etc.
-        auto_resume = "auto",    -- "auto" (default) | "prompt" — when multiple sessions exist
+        auto_resume = "prompt",  -- "prompt" (default) | "auto" — when multiple sessions exist
       },
       service = {
         auto_start = true,
@@ -354,7 +354,7 @@ The mode is shown in the statusline prefix (e.g. `ask❯`):
 
 - **render-markdown.nvim** integrates automatically when installed. On very long responses it can cause visible lag. Disable with `chat = { render_markdown = false }` to use treesitter highlighting only (much faster).
 - **Streaming** is enabled by default (`session.streaming = true`). The chat buffer updates incrementally as tokens arrive.
-- **Session resume**: with 1 matching session it resumes silently; with multiple sessions `auto_resume = "auto"` (default) silently resumes the most recent one; set `auto_resume = "prompt"` to show a picker.
+- **Session resume**: with 1 matching session it resumes silently; with multiple sessions `auto_resume = "prompt"` (default) shows a picker so you can choose which to continue.
 
 ### Permission Modes
 
@@ -416,8 +416,8 @@ Sessions are scoped per project: `pick_or_create_session` filters persisted sess
 |-------------------------------|-----------|
 | 0 | Creates a new session automatically |
 | 1 | Resumes it silently — no prompt |
-| 2+ (`auto_resume = 'auto'`, default) | Silently resumes the most recent session |
-| 2+ (`auto_resume = 'prompt'`) | Shows `vim.ui.select` picker; most recent session is listed first |
+| 2+ (`auto_resume = 'prompt'`, default) | Shows `vim.ui.select` picker; most recent session is listed first |
+| 2+ (`auto_resume = 'auto'`) | Silently resumes the most recent session |
 
 To always skip the picker, set in your config:
 

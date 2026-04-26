@@ -119,9 +119,9 @@ type permissionResult struct {
 }
 
 type pendingPermissionView struct {
-	ID        string                       `json:"id"`
+	ID        string                    `json:"id"`
 	Request   copilot.PermissionRequest `json:"request"`
-	CreatedAt time.Time                    `json:"createdAt"`
+	CreatedAt time.Time                 `json:"createdAt"`
 }
 
 type pendingPermission struct {
@@ -374,20 +374,20 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	managed := &managedSession{
-		model:              del,
-		workingDirectory:   rkingDirectory,
-		permissionMode:     q.PermissionMode,
-		excludedTools:      q.ExcludedTools,
-		createdAt:          me.Now().UTC(),
-		resumed:          req.Resume,
-		streaming:        streaming,
-		agent:            req.Agent,
-		configDiscovery:  configDiscovery,
-		clientName:       clientName,
-		subscribers:      make(map[chan sseMessage]struct{}),
-		pendingInputs:    make(map[string]*pendingUserInput),
-		pendingPermissions:ake(map[string]*pendingPermission),
-		inputResponseGrace:efaultInputTimeout,
+		model:              model,
+		workingDirectory:   workingDirectory,
+		permissionMode:     req.PermissionMode,
+		excludedTools:      req.ExcludedTools,
+		createdAt:          time.Now().UTC(),
+		resumed:            req.Resume,
+		streaming:          streaming,
+		agent:              req.Agent,
+		configDiscovery:    configDiscovery,
+		clientName:         clientName,
+		subscribers:        make(map[chan sseMessage]struct{}),
+		pendingInputs:      make(map[string]*pendingUserInput),
+		pendingPermissions: make(map[string]*pendingPermission),
+		inputResponseGrace: defaultInputTimeout,
 	}
 
 	var session *copilot.Session

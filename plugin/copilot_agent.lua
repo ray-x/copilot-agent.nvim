@@ -18,6 +18,10 @@ vim.api.nvim_create_user_command('CopilotAgentNewSession', function()
   copilot_agent.new_session()
 end, { desc = 'Create a new Copilot Go session' })
 
+vim.api.nvim_create_user_command('CopilotAgentSwitchSession', function()
+  copilot_agent.switch_session()
+end, { desc = 'Switch to a different Copilot session' })
+
 vim.api.nvim_create_user_command('CopilotAgentStart', function()
   copilot_agent.start_service()
 end, { desc = 'Start the Copilot Go service' })

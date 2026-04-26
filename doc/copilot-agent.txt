@@ -125,7 +125,7 @@ optional — defaults are shown below: >lua
       agent                    = nil,   -- nil = "default"; or "coding", etc.
       streaming                = true,
       enable_config_discovery  = true,  -- respects .github/copilot-instructions.md
-      auto_resume              = "auto",  -- "auto" | "prompt"
+      auto_resume              = "prompt",  -- "prompt" (default) | "auto"
     },
 
     service = {
@@ -335,7 +335,9 @@ The current model is shown by |copilot-agent-statusline| functions.
 
 Sessions are scoped per working directory. When you open the chat, the plugin
 looks for a persisted session matching the current directory and resumes it
-automatically (when `auto_resume = "auto"`).
+automatically when there is only one matching session. With multiple sessions
+and `auto_resume = "prompt"` (default), a picker lets you choose which to
+resume.
 
   :CopilotAgentNewSession   Start a fresh session in the same directory
   :CopilotAgentStop         Disconnect (session state persisted on disk)
@@ -458,11 +460,12 @@ session.enable_config_discovery ~
   Respect `.github/copilot-instructions.md` and similar project files.
 
 session.auto_resume ~
-  Type: string  ("auto" | "prompt")
-  Default: `"auto"`
+  Type: string  ("prompt" | "auto")
+  Default: `"prompt"`
   How to handle multiple matching sessions on startup.
-  "auto"   — silently resume the most recent session.
-  "prompt" — always show a picker when multiple sessions exist.
+  "prompt" — show a picker (most recent first) so you can choose which session
+             to resume or start a new one.  This is the default.
+  "auto"   — silently resume the most recent session without prompting.
 
 service.auto_start ~
   Type: boolean

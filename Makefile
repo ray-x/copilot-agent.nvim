@@ -1,4 +1,9 @@
-.PHONY: fmt fmt-lua fmt-go
+.PHONY: build fmt fmt-lua fmt-go
+
+## build: compile the Go service binary to bin/copilot-agent
+build:
+	mkdir -p bin
+	cd server && go build -o ../bin/copilot-agent .
 
 ## fmt: format all source code (Lua + Go)
 fmt: fmt-lua fmt-go

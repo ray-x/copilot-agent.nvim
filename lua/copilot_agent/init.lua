@@ -16,6 +16,7 @@ local decode_json
 local encode_json
 local prompt_supported_model_selection
 local render_chat
+local setup_action_keymaps
 
 local defaults = {
   -- Default base_url is used when connecting to a pre-built / externally-started
@@ -59,9 +60,9 @@ local defaults = {
     agent = nil,
     streaming = true,
     enable_config_discovery = true,
-    -- 'auto' (default): silently resume the most recent matching session.
-    -- 'prompt': always show a picker when multiple sessions exist.
-    auto_resume = 'auto',
+    -- 'prompt' (default): show a picker when multiple sessions exist for this project.
+    -- 'auto': silently resume the most recent matching session without prompting.
+    auto_resume = 'prompt',
   },
 }
 
@@ -93,6 +94,7 @@ local state = {
   -- Input buffer UI state
   input_mode = 'agent', -- 'ask' | 'plan' | 'agent'
   permission_mode = 'interactive', -- 'interactive' | 'approve-all' | 'autopilot'
+  session_name = nil, -- auto-generated name from SDK (updated after each turn)
   pending_attachments = {}, -- list of {type, path, display} waiting to be sent
   chat_busy = false, -- true while the agent is processing a turn
   -- Thinking spinner
@@ -296,8 +298,15 @@ local function refresh_chat_statusline()
   if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then
     return
   end
-  vim.wo[state.chat_winid].statusline =
-    string.format(' %s %s  %s  %s%s', statusline_mode(), statusline_busy(), statusline_model(), statusline_permission(), state.session_id and ('  #' .. state.session_id:sub(1, 8)) or '')
+  local session_label = ''
+  if state.session_id then
+    if state.session_name and state.session_name ~= '' then
+      session_label = '  session: ' .. state.session_name
+    else
+      session_label = '  #' .. state.session_id:sub(1, 8)
+    end
+  end
+  vim.wo[state.chat_winid].statusline = string.format(' %s %s  %s  %s%s', statusline_mode(), statusline_busy(), statusline_model(), statusline_permission(), session_label)
 end
 
 -- Refresh both window statuslines at once.
@@ -345,7 +354,18 @@ end
 local function installed_binary_path()
   local uname = vim.uv.os_uname()
   local ext = uname.sysname:find('Windows') and '.exe' or ''
-  return plugin_root() .. '/bin/copilot-agent' .. ext
+  local root = plugin_root()
+  -- Prefer bin/ (built via `make build`), fall back to server/ (built via `go build` in-place).
+  local candidates = {
+    root .. '/bin/copilot-agent' .. ext,
+    root .. '/server/copilot-agent' .. ext,
+  }
+  for _, p in ipairs(candidates) do
+    if vim.fn.executable(p) == 1 then
+      return p
+    end
+  end
+  return candidates[1] -- default for the nil→go-run fallback path
 end
 
 local function service_command()
@@ -1128,7 +1148,7 @@ end
 
 -- Keymaps shared by both the chat output buffer and the input buffer.
 -- The input buffer overrides <C-s> (submit) and <C-t> (also refreshes prompt).
-local function setup_action_keymaps(bufnr)
+setup_action_keymaps = function(bufnr)
   -- Open input window (chat: always open; input: overridden to submit).
   vim.keymap.set({ 'n', 'i' }, '<C-s>', function()
     M.ask()
@@ -2103,7 +2123,14 @@ local function handle_host_event(event_name, payload)
 
   local data = payload and payload.data or {}
   if event_name == 'host.session_attached' then
+    if data.summary and data.summary ~= '' then
+      state.session_name = data.summary
+      refresh_statuslines()
+    end
     append_entry('system', 'Connected to session ' .. (data.sessionId or state.session_id or '<unknown>'))
+  elseif event_name == 'host.session_name_updated' then
+    state.session_name = data.name or state.session_name
+    refresh_statuslines()
   elseif event_name == 'host.model_changed' then
     append_entry('system', 'Model changed to ' .. tostring(data.model or '<unknown>'))
   elseif event_name == 'host.permission_requested' then
@@ -2140,6 +2167,7 @@ local function handle_host_event(event_name, payload)
     state.permission_mode = data.mode or state.permission_mode
     refresh_statuslines()
   elseif event_name == 'host.session_disconnected' then
+    state.session_name = nil
     append_entry('system', 'Session disconnected')
   end
 end
@@ -2376,7 +2404,7 @@ local function pick_or_create_session(callback)
       return
     end
 
-    -- Auto-resume the most recent single match without prompting.
+    -- Auto-resume the single match silently — no need to prompt.
     if #matching == 1 then
       local s = matching[1]
       append_entry('system', 'Resuming session ' .. s.sessionId)
@@ -2384,22 +2412,22 @@ local function pick_or_create_session(callback)
       return
     end
 
-    -- Multiple matches: sort newest-first (modifiedTime or startTime desc) and
-    -- auto-resume the most recent one unless the user has opted into prompting.
+    -- Multiple matches: sort newest-first.
     table.sort(matching, function(a, b)
       local ta = a.modifiedTime or a.startTime or ''
       local tb = b.modifiedTime or b.startTime or ''
       return ta > tb
     end)
 
-    if state.config.session.auto_resume ~= 'prompt' then
+    -- auto_resume='auto': silently resume the most recent without prompting.
+    if state.config.session.auto_resume == 'auto' then
       local s = matching[1]
       append_entry('system', 'Resuming most recent session ' .. s.sessionId)
       resume_session(s.sessionId, callback)
       return
     end
 
-    -- User explicitly wants to choose.
+    -- Show a picker; most recent session is listed first (default selection).
     local choices = {}
     for _, s in ipairs(matching) do
       local label = s.sessionId
@@ -2645,11 +2673,13 @@ function M.setup(opts)
       discard_pending_attachments()
     end,
   })
-  -- Eagerly start connecting in the background so the session is ready by
-  -- the time the user opens the chat window.
-  if state.config.auto_create_session then
+  -- Eagerly start the Go service in the background so it is ready by
+  -- the time the user opens the chat window. Session creation is deferred
+  -- until the user actually opens the chat to avoid prompting for session
+  -- selection at startup.
+  if state.config.auto_create_session and state.config.service.auto_start then
     vim.schedule(function()
-      with_session(function() end)
+      ensure_service_running(function() end)
     end)
   end
   return M
@@ -2666,6 +2696,7 @@ end
 function M.new_session()
   local previous_session_id = state.session_id
   state.session_id = nil
+  state.session_name = nil
   discard_pending_attachments()
   clear_transcript()
   M.open_chat()

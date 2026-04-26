@@ -81,6 +81,7 @@ type sessionSummary struct {
 	ExcludedTools     []string                    `json:"excludedTools,omitempty"`
 	Capabilities      copilot.SessionCapabilities `json:"capabilities,omitempty"`
 	PendingUserInputs []pendingUserInputView      `json:"pendingUserInputs,omitempty"`
+	Summary           string                      `json:"summary,omitempty"`
 	Live              bool                        `json:"live"`
 	CreatedAt         time.Time                   `json:"createdAt"`
 	Resumed           bool                        `json:"resumed"`
@@ -146,6 +147,7 @@ type managedSession struct {
 	workingDirectory     string
 	permissionMode       string
 	excludedTools        []string
+	sessionName          string // auto-generated session name provided by the SDK after each turn
 	createdAt            time.Time
 	resumed              bool
 	streaming            bool
@@ -207,6 +209,26 @@ func main() {
 		defaultWorkingDirectory: workingDirectory,
 		sessions:                make(map[string]*managedSession),
 	}
+
+	// Track session name updates from the SDK. The SDK auto-generates a summary
+	// after each turn and delivers it via a SessionLifecycleUpdated event.
+	client.OnEventType(copilot.SessionLifecycleUpdated, func(event copilot.SessionLifecycleEvent) {
+		if event.Metadata == nil || event.Metadata.Summary == nil {
+			return
+		}
+		svc.sessionsMu.RLock()
+		managed, ok := svc.sessions[event.SessionID]
+		svc.sessionsMu.RUnlock()
+		if !ok {
+			return
+		}
+		name := *event.Metadata.Summary
+		managed.sessionName = name
+		managed.broadcastHostEvent("host.session_name_updated", map[string]string{
+			"sessionId": event.SessionID,
+			"name":      name,
+		})
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", svc.handleHealth)
@@ -395,6 +417,14 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		pendingInputs:      make(map[string]*pendingUserInput),
 		pendingPermissions: make(map[string]*pendingPermission),
 		inputResponseGrace: defaultInputTimeout,
+	}
+
+	// Pre-populate the session name from persisted metadata so it's available
+	// immediately in the statusline without waiting for the next turn.
+	if req.Resume {
+		if meta, metaErr := s.client.GetSessionMetadata(r.Context(), req.SessionID); metaErr == nil && meta != nil && meta.Summary != nil {
+			managed.sessionName = *meta.Summary
+		}
 	}
 
 	var session *copilot.Session
@@ -1035,6 +1065,7 @@ func (m *managedSession) summary() sessionSummary {
 		ExcludedTools:     m.excludedTools,
 		Capabilities:      m.session.Capabilities(),
 		PendingUserInputs: m.pendingUserInputsSnapshot(),
+		Summary:           m.sessionName,
 		Live:              true,
 		CreatedAt:         m.createdAt,
 		Resumed:           m.resumed,

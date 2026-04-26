@@ -84,11 +84,25 @@ lazy.nvim: >lua
   }
 <
 
-Build the Go binary (optional, for faster startup): >bash
+Step 1 — Download the pre-built binary (no Go required): >
+  :CopilotAgentInstall
+<
+This downloads the correct binary for your platform and saves it to
+`<plugin_root>/bin/copilot-agent` (or `.exe` on Windows). The binary is
+used automatically next time the service starts.
+
+Supported platforms:
+  linux-amd64        Linux x86_64
+  linux-arm64        Linux aarch64
+  windows-amd64.exe  Windows x86_64
+  windows-arm64.exe  Windows aarch64
+  darwin-arm64       macOS Apple Silicon
+
+Alternatively, build from source (requires Go 1.24+): >bash
   cd server/
   go build -o copilot-agent .
 <
-Then point `service.command` at the binary: >lua
+Or point `service.command` at any existing binary: >lua
   service = { auto_start = true, command = { "/path/to/copilot-agent" } }
 <
 
@@ -137,6 +151,13 @@ optional — defaults are shown below: >lua
 
 ==============================================================================
 5. COMMANDS                                       *copilot-agent-commands*
+
+                                                  *:CopilotAgentInstall*
+:CopilotAgentInstall
+    Download the pre-built `copilot-agent` binary for the current platform
+    from the latest GitHub release and save it to `<plugin_root>/bin/`.
+    After installation, the binary is used automatically on next startup
+    (no Go toolchain required). See |copilot-agent-installation|.
 
                                                   *:CopilotAgentChat*
 :CopilotAgentChat
@@ -449,9 +470,12 @@ service.auto_start ~
   Start the Go service automatically when the plugin is loaded.
 
 service.command ~
-  Type: string[] | function() → string[]
-  Default: `{ "go", "run", "." }`
-  Command used to start the service.
+  Type: string[] | function() → string[] | nil
+  Default: `nil`
+  Command used to start the service. `nil` (default) = auto-detect:
+  uses `<plugin_root>/bin/copilot-agent` if present (installed via
+  |:CopilotAgentInstall|), otherwise falls back to `{ "go", "run", "." }`.
+  Set explicitly to override: `{ "/path/to/copilot-agent" }`.
 
 service.cwd ~
   Type: string | nil

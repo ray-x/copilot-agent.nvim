@@ -1,5 +1,6 @@
 :CopilotAgentAsk	copilot-agent.txt	/*:CopilotAgentAsk*
 :CopilotAgentChat	copilot-agent.txt	/*:CopilotAgentChat*
+:CopilotAgentInstall	copilot-agent.txt	/*:CopilotAgentInstall*
 :CopilotAgentLsp	copilot-agent.txt	/*:CopilotAgentLsp*
 :CopilotAgentModel	copilot-agent.txt	/*:CopilotAgentModel*
 :CopilotAgentNewSession	copilot-agent.txt	/*:CopilotAgentNewSession*

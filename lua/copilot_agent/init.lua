@@ -29,7 +29,7 @@ local defaults = {
   notify = true,
   service = {
     auto_start = false,
-    command = { 'go', 'run', '.' },
+    command = nil, -- nil = auto-detect installed binary, then fall back to 'go run .'
     cwd = nil, -- defaults to <plugin_root>/server
     env = nil,
     port_range = nil, -- e.g. '18000-19000'; appended as --port-range when set
@@ -326,10 +326,25 @@ local function service_cwd()
   return value
 end
 
+local function installed_binary_path()
+  local uname = vim.uv.os_uname()
+  local ext = uname.sysname:find('Windows') and '.exe' or ''
+  return plugin_root() .. '/bin/copilot-agent' .. ext
+end
+
 local function service_command()
   local value = state.config.service.command
   if type(value) == 'function' then
     value = value()
+  end
+  -- nil = auto: prefer installed binary, fall back to 'go run .'
+  if value == nil then
+    local bin = installed_binary_path()
+    if vim.fn.executable(bin) == 1 then
+      value = { bin }
+    else
+      value = { 'go', 'run', '.' }
+    end
   end
   -- Append --port-range when configured and the command doesn't already set --addr.
   local pr = state.config.service.port_range
@@ -2802,7 +2817,81 @@ function M.paste_clipboard_image()
 end
 
 -- Start the Copilot agent as a single process that runs both the HTTP bridge
--- service and the LSP server on stdio. The Neovim LSP client owns the process
+-- Download the pre-built copilot-agent binary for the current platform from
+-- the latest GitHub release and save it to <plugin_root>/bin/copilot-agent[.exe].
+-- After a successful download the binary is used automatically on next startup
+-- (service.command = nil auto-detects it).
+function M.install_binary(opts)
+  opts = opts or {}
+  local uname = vim.uv.os_uname()
+
+  -- Detect GOOS
+  local os_name
+  local sysname = uname.sysname
+  if sysname == 'Darwin' then
+    os_name = 'darwin'
+  elseif sysname == 'Linux' then
+    os_name = 'linux'
+  elseif sysname:find('Windows') then
+    os_name = 'windows'
+  else
+    notify('install_binary: unsupported OS: ' .. sysname, vim.log.levels.ERROR)
+    return
+  end
+
+  -- Detect GOARCH
+  local arch
+  local machine = uname.machine
+  if machine == 'x86_64' or machine == 'AMD64' then
+    arch = 'amd64'
+  elseif machine == 'aarch64' or machine == 'arm64' then
+    arch = 'arm64'
+  else
+    notify('install_binary: unsupported architecture: ' .. machine, vim.log.levels.ERROR)
+    return
+  end
+
+  local ext = os_name == 'windows' and '.exe' or ''
+  local target = os_name .. '-' .. arch
+  local filename = 'copilot-agent-' .. target .. ext
+  local repo = opts.repo or 'ray-x/copilot-agent.nvim'
+  local release_tag = opts.tag or 'latest'
+  local url = ('https://github.com/%s/releases/download/%s/%s'):format(repo, release_tag, filename)
+
+  local bin_dir = plugin_root() .. '/bin'
+  local out_path = bin_dir .. '/copilot-agent' .. ext
+
+  vim.fn.mkdir(bin_dir, 'p')
+  notify(('Downloading %s for %s/%s …'):format(filename, os_name, arch), vim.log.levels.INFO)
+
+  local stderr_lines = {}
+  vim.fn.jobstart({ 'curl', '-fsSL', '--progress-bar', '-o', out_path, url }, {
+    on_stderr = function(_, data)
+      for _, line in ipairs(data) do
+        if line ~= '' then
+          table.insert(stderr_lines, line)
+        end
+      end
+    end,
+    on_exit = function(_, code)
+      if code ~= 0 then
+        local detail = #stderr_lines > 0 and (': ' .. table.concat(stderr_lines, ' ')) or ''
+        notify('Download failed (exit ' .. code .. ')' .. detail, vim.log.levels.ERROR)
+        vim.fn.delete(out_path)
+        return
+      end
+      if ext == '' then
+        vim.fn.system({ 'chmod', '+x', out_path })
+      end
+      notify('copilot-agent installed → ' .. out_path .. '\nRestart Neovim or run :CopilotAgentStart', vim.log.levels.INFO)
+      if opts.on_complete then
+        opts.on_complete(out_path)
+      end
+    end,
+  })
+end
+
+ The Neovim LSP client owns the process
 -- lifetime; ensure_service_running reuses it for HTTP health-checks.
 function M.start_lsp(opts)
   opts = opts or {}

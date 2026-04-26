@@ -57,3 +57,7 @@ end, { desc = "Start the Copilot LSP server (code actions: explain, fix, add tes
 vim.api.nvim_create_user_command("CopilotAgentPasteImage", function()
 	copilot_agent.paste_clipboard_image()
 end, { desc = "Paste image from clipboard and add as attachment to next Copilot message" })
+
+vim.api.nvim_create_user_command("CopilotAgentInstall", function()
+	copilot_agent.install_binary()
+end, { desc = "Download the pre-built copilot-agent binary for the current platform" })

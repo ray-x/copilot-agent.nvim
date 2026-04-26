@@ -124,7 +124,34 @@ Run `:checkhealth copilot_agent` after installation to verify all requirements.
 
 ## Installation
 
-### lazy.nvim
+### Step 1 — Download the pre-built binary (recommended)
+
+Run this command inside Neovim after installing the plugin:
+
+```
+:CopilotAgentInstall
+```
+
+This downloads the correct binary for your platform from the
+[latest GitHub release](https://github.com/ray-x/copilot-agent.nvim/releases/tag/latest)
+and saves it to `<plugin_root>/bin/copilot-agent` (or `copilot-agent.exe` on Windows).
+No Go toolchain required.
+
+Supported platforms:
+
+| Platform | Binary |
+|---|---|
+| Linux x86_64 | `copilot-agent-linux-amd64` |
+| Linux aarch64 | `copilot-agent-linux-arm64` |
+| Windows x86_64 | `copilot-agent-windows-amd64.exe` |
+| Windows aarch64 | `copilot-agent-windows-arm64.exe` |
+| macOS Apple Silicon | `copilot-agent-darwin-arm64` |
+
+You can also download manually from the
+[releases page](https://github.com/ray-x/copilot-agent.nvim/releases/tag/latest)
+and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`.
+
+### Step 2 — Plugin setup with lazy.nvim
 
 ```lua
 {
@@ -147,7 +174,9 @@ Run `:checkhealth copilot_agent` after installation to verify all requirements.
       },
       service = {
         auto_start = true,
-        command = { "go", "run", "." },   -- or { "/path/to/copilot-agent" }
+        -- command = nil means auto: uses <plugin_root>/bin/copilot-agent if present,
+        -- otherwise falls back to { "go", "run", "." } (requires Go toolchain).
+        command = nil,
         cwd = nil,                         -- defaults to <plugin_root>/server
         port_range = nil,                  -- e.g. "18000-19000" for fixed range
         startup_timeout_ms = 15000,
@@ -168,7 +197,7 @@ Run `:checkhealth copilot_agent` after installation to verify all requirements.
 }
 ```
 
-If you've built the binary separately:
+If you want to point at a binary in a custom location:
 
 ```lua
 -- Dynamic port (recommended for multiple nvim instances)
@@ -198,7 +227,7 @@ go run . \
   -cli-path /path/to/@github/copilot/index.js \
   -lsp=true      # default: true — LSP server on stdio
 
-# Build a binary first
+# Build a binary
 go build -o copilot-agent .
 ./copilot-agent          # dynamic port
 ./copilot-agent -addr 127.0.0.1:8088   # fixed port
@@ -227,6 +256,7 @@ configures its HTTP client automatically — no manual `base_url` needed.
 
 | Command                     | Description                                                |
 | --------------------------- | ---------------------------------------------------------- |
+| `:CopilotAgentInstall`      | Download pre-built binary for the current platform         |
 | `:CopilotAgentChat`         | Open the chat buffer (creates session if needed)           |
 | `:CopilotAgentAsk [prompt]` | Send a prompt; no argument opens `vim.ui.input()`          |
 | `:CopilotAgentNewSession`   | Disconnect current session and start a fresh one           |
@@ -426,9 +456,12 @@ Sessions are scoped per project: `pick_or_create_session` filters persisted sess
 ## Quick Start Example
 
 ```bash
-# Terminal 1: start the service (dynamic port)
-cd server/
-go run . -cli-path ~/.local/share/github-copilot/index.js
+# Terminal 1: start the service using the pre-built binary (no Go needed)
+# Download it first with :CopilotAgentInstall inside Neovim, then:
+~/.local/share/nvim/lazy/copilot-agent.nvim/bin/copilot-agent
+
+# Or build from source (requires Go 1.24+)
+cd server/ && go run . -cli-path ~/.local/share/github-copilot/index.js
 # prints: COPILOT_AGENT_ADDR=127.0.0.1:XXXXX
 
 # Terminal 2: create a session (replace port)

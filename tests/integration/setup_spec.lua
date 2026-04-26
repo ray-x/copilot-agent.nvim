@@ -79,9 +79,9 @@ describe('M.setup', function()
     assert_eq('approve-all', agent.state.permission_mode)
   end)
 
-  it('permission_mode defaults to interactive', function()
+  it('permission_mode defaults to approve-all', function()
     agent.setup({ auto_create_session = false })
-    assert_eq('interactive', agent.state.permission_mode)
+    assert_eq('approve-all', agent.state.permission_mode)
   end)
 
   it('session_id is nil after setup', function()

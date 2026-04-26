@@ -45,10 +45,16 @@ function M.normalize_model_entry(entry)
   end
 
   local name = entry.name or entry.Name or id
+  -- Preserve reasoning effort metadata from the SDK ModelInfo.
+  local caps = entry.capabilities or {}
+  local supports = caps.supports or {}
   return {
     id = id,
     name = name,
     label = string.format('%s (%s)', name, id),
+    supports_reasoning = supports.reasoningEffort == true,
+    supported_efforts = entry.supportedReasoningEfforts or {},
+    default_effort = entry.defaultReasoningEffort or nil,
   }
 end
 

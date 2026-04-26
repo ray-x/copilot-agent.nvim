@@ -93,6 +93,7 @@ local state = {
   lsp_client_id = nil,
   -- Input buffer UI state
   input_mode = 'agent', -- 'ask' | 'plan' | 'agent'
+  reasoning_effort = nil, -- current reasoning effort level (nil = model default)
   permission_mode = 'interactive', -- 'interactive' | 'approve-all' | 'autopilot'
   session_name = nil, -- auto-generated name from SDK (updated after each turn)
   pending_attachments = {}, -- list of {type, path, display} waiting to be sent
@@ -246,7 +247,11 @@ end
 
 local function statusline_model()
   local m = state.config.session and state.config.session.model or ''
-  return (m ~= '' and m or 'default')
+  local label = m ~= '' and m or 'default'
+  if state.reasoning_effort and state.reasoning_effort ~= '' then
+    label = label .. ' [' .. state.reasoning_effort .. ']'
+  end
+  return label
 end
 
 local function statusline_busy()
@@ -2663,9 +2668,11 @@ local function apply_model(model, callback, opts)
     return
   end
 
-  request('POST', string.format('/sessions/%s/model', state.session_id), {
-    model = selected,
-  }, function(response, err)
+  local body = { model = selected }
+  if opts.reasoning_effort and opts.reasoning_effort ~= '' then
+    body.reasoningEffort = opts.reasoning_effort
+  end
+  request('POST', string.format('/sessions/%s/model', state.session_id), body, function(response, err)
     if err then
       local unavailable_model = unavailable_model_from_error(err)
       if unavailable_model and opts.model_selection_attempts ~= false then
@@ -2691,7 +2698,12 @@ local function apply_model(model, callback, opts)
       return
     end
     state.config.session.model = response and response.model or selected
-    append_entry('system', 'Active model: ' .. state.config.session.model)
+    local msg = 'Active model: ' .. state.config.session.model
+    if opts.reasoning_effort and opts.reasoning_effort ~= '' then
+      state.reasoning_effort = opts.reasoning_effort
+      msg = msg .. ' (effort: ' .. opts.reasoning_effort .. ')'
+    end
+    append_entry('system', msg)
     refresh_statuslines()
     if callback then
       callback(state.config.session.model, nil)
@@ -2858,10 +2870,40 @@ function M.select_model(model)
     vim.ui.select(models, {
       prompt = 'Select Copilot model',
       format_item = function(item)
-        return item.label
+        local label = item.label
+        if item.supports_reasoning and #(item.supported_efforts or {}) > 0 then
+          label = label .. ' 🧠'
+        end
+        return label
       end,
     }, function(choice)
       if not choice then
+        return
+      end
+      -- If the model supports reasoning effort, prompt for it.
+      if choice.supports_reasoning and #(choice.supported_efforts or {}) > 0 then
+        local efforts = {}
+        for _, e in ipairs(choice.supported_efforts) do
+          local label = e
+          if e == (choice.default_effort or '') then
+            label = label .. ' (default)'
+          end
+          table.insert(efforts, { id = e, label = label })
+        end
+        vim.ui.select(efforts, {
+          prompt = 'Reasoning effort for ' .. choice.name,
+          format_item = function(item)
+            return item.label
+          end,
+        }, function(effort_choice)
+          local reasoning = effort_choice and effort_choice.id or nil
+          apply_model(choice.id, function(_, apply_err)
+            if apply_err then
+              notify('Failed to set model: ' .. apply_err, vim.log.levels.ERROR)
+              append_entry('error', 'Failed to set model: ' .. apply_err)
+            end
+          end, { reasoning_effort = reasoning })
+        end)
         return
       end
       apply_model(choice.id, function(_, apply_err)

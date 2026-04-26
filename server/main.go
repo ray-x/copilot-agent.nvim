@@ -63,7 +63,8 @@ type sendMessageRequest struct {
 }
 
 type setModelRequest struct {
-	Model string `json:"model"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 
 type answerUserInputRequest struct {
@@ -549,16 +550,24 @@ func (s *service) handleSetModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("resolve model: %v", err))
 		return
 	}
-	if err := managed.session.SetModel(r.Context(), model, nil); err != nil {
+	var setOpts *copilot.SetModelOptions
+	if re := strings.TrimSpace(req.ReasoningEffort); re != "" {
+		setOpts = &copilot.SetModelOptions{ReasoningEffort: &re}
+	}
+	if err := managed.session.SetModel(r.Context(), model, setOpts); err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("set model: %v", err))
 		return
 	}
 
 	managed.model = model
-	managed.broadcastHostEvent("host.model_changed", map[string]any{
+	evt := map[string]any{
 		"sessionId": managed.session.SessionID,
 		"model":     model,
-	})
+	}
+	if req.ReasoningEffort != "" {
+		evt["reasoningEffort"] = req.ReasoningEffort
+	}
+	managed.broadcastHostEvent("host.model_changed", evt)
 
 	writeJSON(w, http.StatusOK, managed.summary())
 }

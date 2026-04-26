@@ -1,4 +1,5 @@
 local uv = vim.uv or vim.loop
+local utils = require('copilot_agent.utils')
 
 local M = {}
 local raw_request
@@ -144,7 +145,7 @@ local SLASH_COMMANDS = {
 }
 
 local function normalize_base_url(url)
-  return (url or defaults.base_url):gsub('/+$', '')
+  return utils.normalize_base_url(url, defaults.base_url)
 end
 
 local function notify(message, level)
@@ -170,9 +171,7 @@ end
 local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 
 -- Returns true when content is empty / whitespace / dots only (model "thinking").
-local function is_thinking_content(s)
-  return s == nil or s == '' or s:match('^[%.%s]*$') ~= nil
-end
+local is_thinking_content = utils.is_thinking_content
 
 local function stop_thinking_spinner()
   if state.thinking_timer then
@@ -201,10 +200,7 @@ local function start_thinking_spinner(entry_key)
 end
 
 local function split_lines(text)
-  if text == nil or text == '' then
-    return { '' }
-  end
-  return vim.split(text, '\n', { plain = true })
+  return utils.split_lines(text)
 end
 
 local function build_url(path)
@@ -355,23 +351,7 @@ local function last_service_output()
   return state.service_output[#state.service_output]
 end
 
-local function normalize_model_entry(entry)
-  if type(entry) ~= 'table' then
-    return nil
-  end
-
-  local id = entry.id or entry.ID
-  if type(id) ~= 'string' or id == '' then
-    return nil
-  end
-
-  local name = entry.name or entry.Name or id
-  return {
-    id = id,
-    name = name,
-    label = string.format('%s (%s)', name, id),
-  }
-end
+local normalize_model_entry = utils.normalize_model_entry
 
 local function store_model_cache(models)
   local items = {}
@@ -413,12 +393,7 @@ local function model_completion_items(arglead)
   return matches
 end
 
-local function unavailable_model_from_error(err)
-  if type(err) ~= 'string' then
-    return nil
-  end
-  return err:match('Model "([^"]+)" is not available')
-end
+local unavailable_model_from_error = utils.unavailable_model_from_error
 
 local function stale_service_hint(unavailable_model)
   if type(unavailable_model) ~= 'string' or unavailable_model == '' then
@@ -433,22 +408,7 @@ local function stale_service_hint(unavailable_model)
   )
 end
 
-local function is_connection_error(err)
-  if type(err) ~= 'string' then
-    return false
-  end
-  for _, pattern in ipairs({
-    'Failed to connect',
-    "Couldn't connect to server",
-    'Connection refused',
-    'Empty reply from server',
-  }) do
-    if err:find(pattern, 1, true) then
-      return true
-    end
-  end
-  return false
-end
+local is_connection_error = utils.is_connection_error
 
 local function sync_request(method, path, body)
   if not ensure_curl() then
@@ -810,7 +770,9 @@ local function create_input_buffer()
   local function set_input_text(text)
     local lines = split_lines(text or '')
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-    vim.api.nvim_win_set_cursor(state.input_winid, { #lines, #lines[#lines] })
+    if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+      vim.api.nvim_win_set_cursor(state.input_winid, { #lines, #lines[#lines] })
+    end
     vim.cmd('startinsert')
   end
 
@@ -1023,7 +985,7 @@ local function create_input_buffer()
       end
       local caps = session.capabilities or {}
       local tools = caps.availableTools or {}
-      local excluded = caps.excludedTools or {}
+      local excluded = session.excludedTools or {}
       local excluded_set = {}
       for _, t in ipairs(excluded) do
         excluded_set[t] = true

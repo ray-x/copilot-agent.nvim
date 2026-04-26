@@ -1,0 +1,51 @@
+name: Lint
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'lua/**'
+      - 'server/**'
+      - '.github/workflows/lint.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'lua/**'
+      - 'server/**'
+      - '.github/workflows/lint.yml'
+
+jobs:
+  luacheck:
+    name: luacheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install luacheck
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y luarocks
+          sudo luarocks install luacheck
+
+      - name: Run luacheck
+        run: |
+          luacheck lua/ --globals vim --no-max-line-length \
+            --ignore 211 212 213   # unused variables/arguments in callbacks
+
+  stylua:
+    name: stylua
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: JohnnyMorganz/stylua-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: >-
+            --color always
+            --quote-style AutoPreferSingle
+            --column-width 120
+            --indent-type Spaces
+            --indent-width 2
+            --collapse-simple-statement Never
+            --check lua/

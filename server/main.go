@@ -73,6 +73,7 @@ type sessionSummary struct {
 	WorkingDirectory  string                      `json:"workingDirectory,omitempty"`
 	WorkspacePath     string                      `json:"workspacePath,omitempty"`
 	PermissionMode    string                      `json:"permissionMode"`
+	ExcludedTools     []string                    `json:"excludedTools,omitempty"`
 	Capabilities      copilot.SessionCapabilities `json:"capabilities,omitempty"`
 	PendingUserInputs []pendingUserInputView      `json:"pendingUserInputs,omitempty"`
 	Live              bool                        `json:"live"`
@@ -138,6 +139,7 @@ type managedSession struct {
 	model                string
 	workingDirectory     string
 	permissionMode       string
+	excludedTools        []string
 	createdAt            time.Time
 	resumed              bool
 	streaming            bool
@@ -214,6 +216,7 @@ func main() {
 	mux.HandleFunc("POST /sessions/{id}/user-input/{requestID}", svc.handleAnswerUserInput)
 	mux.HandleFunc("POST /sessions/{id}/permission/{requestID}", svc.handleAnswerPermission)
 	mux.HandleFunc("POST /sessions/{id}/permission-mode", svc.handleSetPermissionMode)
+	mux.HandleFunc("POST /sessions/{id}/tools", svc.handleSetTools)
 
 	// Resolve listen address. When -addr is not set, honour -port-range if
 	// provided, otherwise let the OS assign a free port (127.0.0.1:0).
@@ -374,6 +377,7 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		model:                model,
 		workingDirectory:     workingDirectory,
 		permissionMode:       req.PermissionMode,
+		excludedTools:        req.ExcludedTools,
 		createdAt:            time.Now().UTC(),
 		resumed:              req.Resume,
 		streaming:            streaming,
@@ -707,6 +711,37 @@ func (s *service) handleSetPermissionMode(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"sessionId": managed.session.SessionID, "mode": req.Mode})
 }
 
+// handleSetTools updates the locally-tracked excluded-tools list for the session.
+// Note: this does not affect the active session in the SDK (tools are configured at
+// session-creation time); the updated list is reflected in subsequent GET /sessions/{id}
+// responses and will be used when the session is next resumed.
+func (s *service) handleSetTools(w http.ResponseWriter, r *http.Request) {
+	managed, ok := s.getManagedSession(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session is not attached to this service")
+		return
+	}
+
+	var req struct {
+		ExcludedTools []string `json:"excludedTools"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	managed.excludedTools = req.ExcludedTools
+	managed.broadcastHostEvent("host.tools_changed", map[string]any{
+		"sessionId":     managed.session.SessionID,
+		"excludedTools": req.ExcludedTools,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sessionId":     managed.session.SessionID,
+		"excludedTools": req.ExcludedTools,
+	})
+}
+
 func (s *service) liveSessionSummaries() []sessionSummary {
 	s.sessionsMu.RLock()
 	defer s.sessionsMu.RUnlock()
@@ -939,6 +974,7 @@ func (m *managedSession) summary() sessionSummary {
 		WorkingDirectory:  m.workingDirectory,
 		WorkspacePath:     m.session.WorkspacePath(),
 		PermissionMode:    m.permissionMode,
+		ExcludedTools:     m.excludedTools,
 		Capabilities:      m.session.Capabilities(),
 		PendingUserInputs: m.pendingUserInputsSnapshot(),
 		Live:              true,

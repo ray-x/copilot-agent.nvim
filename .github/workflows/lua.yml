@@ -1,0 +1,81 @@
+name: Lua Tests
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'lua/**'
+      - 'tests/**'
+      - '.github/workflows/lua.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'lua/**'
+      - 'tests/**'
+      - '.github/workflows/lua.yml'
+
+jobs:
+  busted:
+    name: busted (pure-Lua unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaRocks + busted
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y luarocks
+          sudo luarocks install busted
+
+      - name: Run unit tests
+        run: busted --lpath='lua/?.lua;lua/?/init.lua' tests/unit/
+
+  nvim_integration:
+    name: Neovim integration (${{ matrix.nvim }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nvim:
+          - nightly
+          - v0.12.0
+          - v0.11.0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: date +%F > todays-date
+
+      - name: Restore Neovim cache
+        uses: actions/cache@v4
+        with:
+          path: _neovim
+          key: ${{ runner.os }}-nvim-${{ matrix.nvim }}-${{ hashFiles('todays-date') }}
+
+      - name: Download Neovim
+        run: |
+          if [ "${{ matrix.nvim }}" = "nightly" ]; then
+            URL=https://github.com/neovim/neovim/releases/download/nightly/nvim-linux-x86_64.tar.gz
+          else
+            URL=https://github.com/neovim/neovim/releases/download/${{ matrix.nvim }}/nvim-linux-x86_64.tar.gz
+          fi
+          test -d _neovim || {
+            mkdir -p _neovim
+            curl -sL "$URL" | tar xzf - --strip-components=1 -C _neovim
+          }
+
+      - name: Install plenary.nvim
+        run: |
+          mkdir -p ~/.local/share/nvim/site/pack/vendor/start
+          git clone --depth 1 https://github.com/nvim-lua/plenary.nvim \
+            ~/.local/share/nvim/site/pack/vendor/start/plenary.nvim
+          ln -s "$PWD" ~/.local/share/nvim/site/pack/vendor/start/copilot-agent.nvim
+
+      - name: Run integration tests
+        run: |
+          export PATH="${PWD}/_neovim/bin:${PATH}"
+          nvim --headless -u tests/minimal_init.lua \
+            -c "PlenaryBustedFile tests/integration/setup_spec.lua" \
+            2>&1
+          echo "Exit code: $?"
+

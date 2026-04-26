@@ -17,9 +17,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ── LSP wire types ────────────────────────────────────────────────────────────
@@ -135,7 +137,8 @@ var codeActions = []codeActionDef{
 
 type lspServer struct {
 	serviceURL string // base URL of the HTTP service
-	sessionID  string // session to send messages to (resolved lazily)
+	mu         sync.Mutex
+	sessionID  string // session to send messages to (resolved lazily); guarded by mu
 	reader     *bufio.Reader
 	writer     io.Writer
 }
@@ -282,6 +285,9 @@ func (s *lspServer) handleCodeAction(_ context.Context, msg *lspMessage) {
 	}
 
 	filename := uriToFilename(params.TextDocument.URI)
+	s.mu.Lock()
+	cachedSessionID := s.sessionID
+	s.mu.Unlock()
 	actions := make([]lspCodeAction, 0, len(codeActions))
 	for _, def := range codeActions {
 		arg := lspCodeActionArg{
@@ -289,7 +295,7 @@ func (s *lspServer) handleCodeAction(_ context.Context, msg *lspMessage) {
 			URI:        params.TextDocument.URI,
 			Range:      params.Range,
 			ServiceURL: s.serviceURL,
-			SessionID:  s.sessionID,
+			SessionID:  cachedSessionID,
 		}
 		actions = append(actions, lspCodeAction{
 			Title: def.title,
@@ -351,7 +357,9 @@ func (s *lspServer) handleExecuteCommand(ctx context.Context, msg *lspMessage) {
 	}
 	sessionID := arg.SessionID
 	if sessionID == "" {
+		s.mu.Lock()
 		sessionID = s.sessionID
+		s.mu.Unlock()
 	}
 	if sessionID == "" {
 		var err error
@@ -360,7 +368,9 @@ func (s *lspServer) handleExecuteCommand(ctx context.Context, msg *lspMessage) {
 			s.replyError(msg.ID, -32603, fmt.Sprintf("no active Copilot session: %v", err))
 			return
 		}
+		s.mu.Lock()
 		s.sessionID = sessionID
+		s.mu.Unlock()
 	}
 
 	// Send the prompt.
@@ -432,10 +442,11 @@ func (s *lspServer) sendPrompt(ctx context.Context, serviceURL, sessionID, promp
 
 func uriToFilename(uri string) string {
 	uri = strings.TrimPrefix(uri, "file://")
-	// Percent-decode common characters.
-	uri = strings.ReplaceAll(uri, "%20", " ")
-	uri = strings.ReplaceAll(uri, "%3A", ":")
-	return uri
+	decoded, err := url.PathUnescape(uri)
+	if err != nil {
+		return uri
+	}
+	return decoded
 }
 
 // readFileRange reads lines [start.Line, end.Line] (0-based) from a file.

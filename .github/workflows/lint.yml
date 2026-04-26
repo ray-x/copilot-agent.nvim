@@ -42,11 +42,4 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
-          args: >-
-            --color always
-            --quote-style AutoPreferSingle
-            --column-width 120
-            --indent-type Spaces
-            --indent-width 2
-            --collapse-simple-statement Never
-            --check lua/
+          args: --check lua/

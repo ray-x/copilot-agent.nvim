@@ -2204,17 +2204,66 @@ local function handle_host_event(event_name, payload)
       end
 
       local prompt_str = 'Allow: ' .. table.concat(parts, ' ')
+
+      -- Build choices: Allow, Deny, Allow all for session.
+      -- For read/write with a file path, also offer "Allow this directory".
+      local choices = { 'Allow', 'Deny', 'Allow all for this session' }
+      local dir_path = nil
+      if kind == 'read' or kind == 'write' then
+        local file = perm.path or perm.fileName
+        if file and file ~= '' then
+          dir_path = vim.fn.fnamemodify(file, ':h')
+          if dir_path and dir_path ~= '' and dir_path ~= '.' then
+            table.insert(choices, 3, 'Allow this directory (' .. vim.fn.fnamemodify(dir_path, ':~') .. ')')
+          end
+        end
+      end
+
       vim.schedule(function()
-        vim.ui.select({ 'Allow', 'Deny' }, { prompt = prompt_str }, function(choice)
+        vim.ui.select(choices, { prompt = prompt_str }, function(choice)
           if not state.session_id then
             return
           end
-          local approved = (choice == 'Allow')
-          request('POST', '/sessions/' .. state.session_id .. '/permission/' .. req_id, { approved = approved }, function(_, err)
-            if err then
-              notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+          if not choice then
+            return
+          end
+
+          local sid = state.session_id
+
+          if choice == 'Allow all for this session' then
+            -- Approve this request, then switch to approve-all mode.
+            request('POST', '/sessions/' .. sid .. '/permission/' .. req_id, { approved = true }, function(_, err)
+              if err then
+                notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+              end
+            end)
+            state.permission_mode = 'approve-all'
+            request('POST', '/sessions/' .. sid .. '/permission-mode', { mode = 'approve-all' }, function(_, err)
+              if err then
+                notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+              else
+                notify('Permission mode set to approve-all for this session', vim.log.levels.INFO)
+                refresh_statuslines()
+              end
+            end)
+          elseif choice:match('^Allow this directory') then
+            -- Approve this request, then send /add-dir as a user message.
+            request('POST', '/sessions/' .. sid .. '/permission/' .. req_id, { approved = true }, function(_, err)
+              if err then
+                notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+              end
+            end)
+            if dir_path then
+              M.ask('/add-dir ' .. dir_path)
             end
-          end)
+          else
+            local approved = (choice == 'Allow')
+            request('POST', '/sessions/' .. sid .. '/permission/' .. req_id, { approved = approved }, function(_, err)
+              if err then
+                notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+              end
+            end)
+          end
         end)
       end)
     else

@@ -1,0 +1,118 @@
+name: Release Binaries
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'server/**'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            goos: linux
+            goarch: amd64
+          - target: linux-arm64
+            goos: linux
+            goarch: arm64
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            ext: .exe
+          - target: windows-arm64
+            goos: windows
+            goarch: arm64
+            ext: .exe
+          - target: darwin-arm64
+            goos: darwin
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: server/go.sum
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${{ github.sha }}" \
+            -o "../dist/copilot-agent-${{ matrix.target }}${{ matrix.ext }}" \
+            ./...
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: copilot-agent-${{ matrix.target }}
+          path: dist/copilot-agent-${{ matrix.target }}${{ matrix.ext }}
+          retention-days: 7
+
+  release:
+    name: Update rolling release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum copilot-agent-* > checksums.sha256
+          cat checksums.sha256
+
+      - name: Update rolling release tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest
+          git push origin -f latest
+
+      - name: Upload to rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest build (${{ github.sha }})"
+          body: |
+            Automated build from commit ${{ github.sha }} on branch `master`.
+
+            | File | Platform | Arch |
+            |------|----------|------|
+            | `copilot-agent-linux-amd64` | Linux | x86_64 |
+            | `copilot-agent-linux-arm64` | Linux | aarch64 |
+            | `copilot-agent-windows-amd64.exe` | Windows | x86_64 |
+            | `copilot-agent-windows-arm64.exe` | Windows | aarch64 |
+            | `copilot-agent-darwin-arm64` | macOS | Apple Silicon (arm64) |
+
+            Download the binary for your platform, make it executable, and point
+            `service.command` in your plugin config to it.
+          prerelease: true
+          files: |
+            dist/copilot-agent-*
+            dist/checksums.sha256

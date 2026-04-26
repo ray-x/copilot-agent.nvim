@@ -60,9 +60,9 @@ local defaults = {
     agent = nil,
     streaming = true,
     enable_config_discovery = true,
-    -- 'prompt' (default): show a picker when multiple sessions exist for this project.
-    -- 'auto': silently resume the most recent matching session without prompting.
-    auto_resume = 'prompt',
+    -- 'auto' (default): silently resume the most recent matching session without prompting.
+    -- 'prompt': show a picker when multiple sessions exist for this project.
+    auto_resume = 'auto',
   },
 }
 

@@ -39,6 +39,8 @@ flowchart TD
 
 The Go binary runs a **single process** that serves both the HTTP bridge (sessions, SSE, user-input, permissions) and an LSP server on stdio. Neovim starts it as an LSP client (`vim.lsp.start`), which owns the process lifetime. The Lua plugin communicates via `curl` shell-outs for all HTTP and SSE traffic.
 
+**Why curl?** Neovim has no built-in HTTP client. `vim.uv` (libuv) exposes raw TCP sockets but requires a manual HTTP/1.1 implementation — headers, chunked encoding, SSE framing — adding ~200 lines of fragile Lua for zero user-visible benefit. `curl` is universally available on macOS and Linux, handles SSE natively via a single persistent `jobstart()` process (no repeated spawning), and keeps the Lua layer thin and dependency-free. The per-request process-spawn overhead (~5–20 ms) is imperceptible against LLM response latency.
+
 ---
 
 ## Comparison with Alternatives
@@ -119,7 +121,7 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
   "ray-x/copilot-agent.nvim",
   config = function()
     require("copilot_agent").setup({
-      base_url = "http://127.0.0.1:8088",
+      base_url = "http://127.0.0.1:8088",  -- only needed for externally-started services; omit when auto_start=true
       client_name = "nvim-copilot",
       permission_mode = "interactive",  -- or "approve-all" / "autopilot"
       session = {
@@ -147,7 +149,7 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 }
 ```
 
-If you've built the binary separately:
+If you've built the binary separately (fixed port):
 
 ```lua
 service = { auto_start = true, command = { "/path/to/copilot-agent", "--addr", "127.0.0.1:8088" } }
@@ -160,10 +162,10 @@ service = { auto_start = true, command = { "/path/to/copilot-agent", "--addr", "
 ```bash
 cd server/
 
-# Development (builds on the fly)
+# Development — OS assigns a free port; actual address printed to stderr
 go run .
 
-# With explicit options
+# Pin to a specific port (useful for curl testing)
 go run . \
   -addr 127.0.0.1:8088 \
   -cwd /path/to/workspace \
@@ -172,20 +174,25 @@ go run . \
 
 # Build a binary first
 go build -o copilot-agent .
-./copilot-agent -addr 127.0.0.1:8088
+./copilot-agent          # dynamic port
+./copilot-agent -addr 127.0.0.1:8088   # fixed port
 ```
+
+The service always prints `COPILOT_AGENT_ADDR=127.0.0.1:<PORT>` to stderr once the
+listener is bound. When `auto_start = true`, the plugin reads this line and
+configures its HTTP client automatically — no manual `base_url` needed.
 
 **Flags:**
 
-| Flag         | Default       | Description                                  |
-| ------------ | ------------- | -------------------------------------------- |
-| `-addr`      | `:8088`       | HTTP listen address                          |
-| `-cwd`       | current dir   | Default working directory for sessions       |
-| `-model`     | (sdk default) | Default model for new sessions               |
-| `-cli-path`  | auto-detected | Path to Copilot CLI binary/JS entrypoint     |
-| `-cli-url`   | —             | URL of an already-running Copilot CLI server |
-| `-log-level` | —             | Copilot CLI log level                        |
-| `-lsp`       | `true`        | Start LSP server on stdio                    |
+| Flag         | Default      | Description                                  |
+| ------------ | ------------ | -------------------------------------------- |
+| `-addr`      | (free port)  | HTTP listen address; empty or `:0` → OS picks |
+| `-cwd`       | current dir  | Default working directory for sessions       |
+| `-model`     | (sdk default)| Default model for new sessions               |
+| `-cli-path`  | auto-detected| Path to Copilot CLI binary/JS entrypoint     |
+| `-cli-url`   | —            | URL of an already-running Copilot CLI server |
+| `-log-level` | —            | Copilot CLI log level                        |
+| `-lsp`       | `true`       | Start LSP server on stdio                    |
 
 ---
 

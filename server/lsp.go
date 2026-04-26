@@ -140,14 +140,6 @@ type lspServer struct {
 	writer     io.Writer
 }
 
-// lspServiceURL converts a listen address (e.g. ":8088", "127.0.0.1:8088")
-// to a full HTTP URL for the LSP server to call back.
-func lspServiceURL(addr string) string {
-	if strings.HasPrefix(addr, ":") {
-		return "http://127.0.0.1" + addr
-	}
-	return "http://" + addr
-}
 
 func runLSPServer(ctx context.Context, serviceURL string) error {
 	srv := &lspServer{

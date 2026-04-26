@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -162,7 +163,8 @@ type service struct {
 }
 
 func main() {
-	addr := flag.String("addr", ":8088", "HTTP listen address")
+	addr := flag.String("addr", "", "HTTP listen address (host:port). Leave empty or use port 0 to let the OS assign a free port (default).")
+	portRange := flag.String("port-range", "", "Port range to try when -addr is not set, e.g. 18000-19000. The first available port in the range is used.")
 	cliPath := flag.String("cli-path", defaultCLIPath(), "path to Copilot CLI binary or JS entrypoint")
 	cliURL := flag.String("cli-url", "", "URL for an already-running Copilot CLI server")
 	model := flag.String("model", defaultModel, "default model for new sessions; empty uses the Copilot CLI account default")
@@ -213,8 +215,29 @@ func main() {
 	mux.HandleFunc("POST /sessions/{id}/permission/{requestID}", svc.handleAnswerPermission)
 	mux.HandleFunc("POST /sessions/{id}/permission-mode", svc.handleSetPermissionMode)
 
+	// Resolve listen address. When -addr is not set, honour -port-range if
+	// provided, otherwise let the OS assign a free port (127.0.0.1:0).
+	listenAddr := strings.TrimSpace(*addr)
+	var listener net.Listener
+	if listenAddr == "" || listenAddr == ":0" {
+		if pr := strings.TrimSpace(*portRange); pr != "" {
+			listener, err = listenInRange("127.0.0.1", pr)
+		} else {
+			listener, err = net.Listen("tcp", "127.0.0.1:0")
+		}
+	} else {
+		listener, err = net.Listen("tcp", listenAddr)
+	}
+	if err != nil {
+		log.Fatalf("listen %s: %v", listenAddr, err)
+	}
+	boundAddr := listener.Addr().String()
+	// Ensure LSP proxy always has a full host:port (handles bare ":PORT" case).
+	if strings.HasPrefix(boundAddr, ":") {
+		boundAddr = "127.0.0.1" + boundAddr
+	}
+
 	server := &http.Server{
-		Addr:              *addr,
 		Handler:           withCORS(loggingMiddleware(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -231,7 +254,7 @@ func main() {
 
 	// Start the LSP server on stdio concurrently with the HTTP service.
 	if *lspMode {
-		serviceURL := lspServiceURL(*addr)
+		serviceURL := "http://" + boundAddr
 		go func() {
 			if err := runLSPServer(ctx, serviceURL); err != nil && err != context.Canceled {
 				log.Printf("lsp server: %v", err)
@@ -239,7 +262,7 @@ func main() {
 		}()
 	}
 
-	log.Printf("Neovim Copilot service listening on %s", *addr)
+	log.Printf("Neovim Copilot service listening on %s", boundAddr)
 	log.Printf("Default workspace: %s", workingDirectory)
 	if strings.TrimSpace(*cliURL) != "" {
 		log.Printf("Using external Copilot CLI server at %s", strings.TrimSpace(*cliURL))
@@ -247,13 +270,40 @@ func main() {
 		log.Printf("Using Copilot CLI at %s", strings.TrimSpace(*cliPath))
 	}
 
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	// Print the machine-readable address to stderr so it doesn't pollute the
+	// LSP stdio stream. The Neovim plugin reads it from on_stderr.
+	fmt.Fprintf(os.Stderr, "COPILOT_AGENT_ADDR=%s\n", boundAddr)
+
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
 
 func (s *service) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// listenInRange tries each port in "lo-hi" (inclusive) on the given host and
+// returns the first listener that succeeds. Returns an error if no port in the
+// range is available.
+func listenInRange(host, portRange string) (net.Listener, error) {
+	parts := strings.SplitN(portRange, "-", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid port range %q: expected \"lo-hi\"", portRange)
+	}
+	lo, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	hi, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || lo < 1 || hi > 65535 || lo > hi {
+		return nil, fmt.Errorf("invalid port range %q", portRange)
+	}
+	for port := lo; port <= hi; port++ {
+		addr := fmt.Sprintf("%s:%d", host, port)
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			return ln, nil
+		}
+	}
+	return nil, fmt.Errorf("no available port in range %s", portRange)
 }
 
 func (s *service) handleListModels(w http.ResponseWriter, r *http.Request) {

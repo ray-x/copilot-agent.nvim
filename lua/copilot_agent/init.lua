@@ -13,6 +13,9 @@ local prompt_supported_model_selection
 local render_chat
 
 local defaults = {
+  -- Default base_url is used when connecting to a pre-built / externally-started
+  -- service. When auto_start=true the Go process prints COPILOT_AGENT_ADDR= to
+  -- stdout and this value is overwritten with the actual bound address.
   base_url = 'http://127.0.0.1:8088',
   curl_bin = 'curl',
   client_name = 'nvim-copilot',
@@ -24,6 +27,7 @@ local defaults = {
     command = { 'go', 'run', '.' },
     cwd = nil,  -- defaults to <plugin_root>/server
     env = nil,
+    port_range = nil,  -- e.g. '18000-19000'; appended as --port-range when set
     healthcheck_path = '/healthz',
     startup_timeout_ms = 15000,
     startup_poll_interval_ms = 250,
@@ -61,6 +65,7 @@ local state = {
   input_winid = nil,
   service_job_id = nil,
   service_starting = false,
+  service_addr_known = false,   -- set true when COPILOT_AGENT_ADDR= line received
   pending_service_callbacks = {},
   service_output = {},
   model_cache = {},
@@ -311,15 +316,33 @@ local function service_command()
   if type(value) == 'function' then
     value = value()
   end
+  -- Append --port-range when configured and the command doesn't already set --addr.
+  local pr = state.config.service.port_range
+  if pr and pr ~= '' and type(value) == 'table' then
+    local has_addr = false
+    for _, arg in ipairs(value) do
+      if arg == '--addr' or arg == '-addr' then has_addr = true; break end
+    end
+    if not has_addr then
+      value = vim.list_extend(vim.deepcopy(value), { '--port-range', pr })
+    end
+  end
   return value
 end
 
 local function remember_service_output(data)
-  if not data then
-    return
-  end
+  if not data then return end
   for _, line in ipairs(data) do
     if line and line ~= '' then
+      -- Machine-readable address announcement from the Go service.
+      -- Printed to stdout once the TCP listener is bound (port 0 → actual port).
+      local addr = line:match('^COPILOT_AGENT_ADDR=(.+)$')
+      if addr then
+        state.config.base_url = 'http://' .. addr
+        -- Service is already listening; mark it ready immediately so the
+        -- health-check polling loop resolves on its next tick.
+        state.service_addr_known = true
+      end
       table.insert(state.service_output, line)
     end
   end
@@ -1429,6 +1452,12 @@ ensure_service_running = function(callback)
   end
 
   local function poll_service_health(attempts_left)
+    -- Short-circuit: Go printed COPILOT_AGENT_ADDR= so the port is known and
+    -- the listener is already bound. Finish immediately.
+    if state.service_addr_known then
+      finish(nil)
+      return
+    end
     raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
       if err == nil and status and status < 400 then
         finish(nil)
@@ -1451,6 +1480,7 @@ ensure_service_running = function(callback)
 
   state.service_starting = true
   state.service_output = {}
+  state.service_addr_known = false
 
   raw_request('GET', state.config.service.healthcheck_path, nil, function(_, health_err, status)
     if health_err == nil and status and status < 400 then
@@ -2375,19 +2405,11 @@ M.statusline_permission  = statusline_permission
 M.statusline             = statusline_component
 
 -- Build the command list for the LSP server process.
--- It reuses the same binary as the HTTP service but with --lsp.
--- Build the command for the combined HTTP+LSP service process.
--- --lsp is now the default in the binary; we pass --addr to bind the HTTP server.
+-- We do NOT pass --addr so the OS assigns a free port.
+-- The bound address is announced via COPILOT_AGENT_ADDR= on stdout.
 local function lsp_command()
 	local cmd = service_command()
-	local result = vim.deepcopy(cmd)
-	local base_url = normalize_base_url(state.config.base_url)
-	local addr = base_url:gsub("^https?://", "")  -- strip scheme, keep host:port
-	if addr ~= "" then
-		table.insert(result, "--addr")
-		table.insert(result, addr)
-	end
-	return result
+	return vim.deepcopy(cmd)
 end
 
 -- Start the Copilot agent as a single process that runs both the HTTP bridge
@@ -2406,9 +2428,23 @@ function M.start_lsp(opts)
 
 	local cmd = lsp_command()
 
+	-- Wrap cmd in a shell that tees stderr so COPILOT_AGENT_ADDR= is captured.
+	-- stdout is kept clean for the LSP protocol.
+	local stderr_fifo = vim.fn.tempname()
+	local wrapped_cmd = {
+		'sh', '-c',
+		table.concat(vim.tbl_map(vim.fn.shellescape, cmd), ' ')
+		  .. ' 2>' .. vim.fn.shellescape(stderr_fifo),
+	}
+	-- Read the tee'd stderr in a background job so we can parse COPILOT_AGENT_ADDR.
+	vim.fn.jobstart({ 'tail', '-F', stderr_fifo }, {
+		on_stdout = function(_, data)
+			vim.schedule(function() remember_service_output(data) end)
+		end,
+	})
 	local client_id = vim.lsp.start({
 		name = "copilot-agent",
-		cmd = cmd,
+		cmd = wrapped_cmd,
 		cmd_cwd = service_cwd(),
 		root_dir = root,
 		capabilities = vim.lsp.protocol.make_client_capabilities(),
@@ -2421,6 +2457,7 @@ function M.start_lsp(opts)
 		end,
 		on_exit = function(code, signal)
 			state.lsp_client_id = nil
+			pcall(os.remove, stderr_fifo)
 			if code ~= 0 then
 				notify("Copilot agent exited: code=" .. code .. " signal=" .. tostring(signal), vim.log.levels.WARN)
 			end
@@ -2432,5 +2469,8 @@ function M.start_lsp(opts)
 	end
 	return client_id
 end
+
+-- Expose internal state for :checkhealth and debugging.
+M.state = state
 
 return M

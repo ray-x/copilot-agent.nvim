@@ -23,6 +23,7 @@ import (
 	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 )
 
 const (
@@ -57,7 +58,6 @@ type createSessionRequest struct {
 
 type sendMessageRequest struct {
 	Prompt         string               `json:"prompt"`
-	Mode           string               `json:"mode,omitempty"`
 	Attachments    []copilot.Attachment `json:"attachments,omitempty"`
 	RequestHeaders map[string]string    `json:"requestHeaders,omitempty"`
 }
@@ -74,6 +74,7 @@ type answerUserInputRequest struct {
 type sessionSummary struct {
 	SessionID         string                      `json:"sessionId"`
 	Model             string                      `json:"model,omitempty"`
+	AgentMode         string                      `json:"agentMode,omitempty"`
 	WorkingDirectory  string                      `json:"workingDirectory,omitempty"`
 	WorkspacePath     string                      `json:"workspacePath,omitempty"`
 	PermissionMode    string                      `json:"permissionMode"`
@@ -141,6 +142,7 @@ type sseMessage struct {
 type managedSession struct {
 	session              *copilot.Session
 	model                string
+	agentMode            string // "interactive", "plan", or "autopilot"
 	workingDirectory     string
 	permissionMode       string
 	excludedTools        []string
@@ -214,6 +216,7 @@ func main() {
 	mux.HandleFunc("GET /sessions/{id}", svc.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", svc.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/model", svc.handleSetModel)
+	mux.HandleFunc("POST /sessions/{id}/mode", svc.handleSetAgentMode)
 	mux.HandleFunc("GET /sessions/{id}/messages", svc.handleGetMessages)
 	mux.HandleFunc("POST /sessions/{id}/messages", svc.handleSendMessage)
 	mux.HandleFunc("GET /sessions/{id}/events", svc.handleEvents)
@@ -565,7 +568,6 @@ func (s *service) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	messageID, err := managed.session.Send(r.Context(), copilot.MessageOptions{
 		Prompt:         req.Prompt,
 		Attachments:    req.Attachments,
-		Mode:           req.Mode,
 		RequestHeaders: req.RequestHeaders,
 	})
 	if err != nil {
@@ -713,6 +715,57 @@ func (s *service) handleSetPermissionMode(w http.ResponseWriter, r *http.Request
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{"sessionId": managed.session.SessionID, "mode": req.Mode})
+}
+
+// handleSetAgentMode changes the agent mode (interactive / plan / autopilot) for a session
+// by calling the SDK's session.mode.set RPC.
+func (s *service) handleSetAgentMode(w http.ResponseWriter, r *http.Request) {
+	managed, ok := s.getManagedSession(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session is not attached to this service")
+		return
+	}
+
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	sdkMode, ok := toSDKAgentMode(req.Mode)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "mode must be one of: ask, plan, agent (or: interactive, plan, autopilot)")
+		return
+	}
+
+	if _, err := managed.session.RPC.Mode.Set(r.Context(), &rpc.ModeSetRequest{Mode: sdkMode}); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("set agent mode: %v", err))
+		return
+	}
+
+	managed.agentMode = req.Mode
+	managed.broadcastHostEvent("host.agent_mode_changed", map[string]any{
+		"sessionId": managed.session.SessionID,
+		"mode":      req.Mode,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{"sessionId": managed.session.SessionID, "mode": req.Mode})
+}
+
+// toSDKAgentMode maps user-facing mode names to SDK SessionMode constants.
+func toSDKAgentMode(mode string) (rpc.SessionMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "ask", "interactive":
+		return rpc.SessionModeInteractive, true
+	case "plan":
+		return rpc.SessionModePlan, true
+	case "agent", "autopilot":
+		return rpc.SessionModeAutopilot, true
+	default:
+		return "", false
+	}
 }
 
 // handleSetTools updates the locally-tracked excluded-tools list for the session.
@@ -975,6 +1028,7 @@ func (m *managedSession) summary() sessionSummary {
 	return sessionSummary{
 		SessionID:         m.session.SessionID,
 		Model:             m.model,
+		AgentMode:         m.agentMode,
 		WorkingDirectory:  m.workingDirectory,
 		WorkspacePath:     m.session.WorkspacePath(),
 		PermissionMode:    m.permissionMode,

@@ -1114,6 +1114,18 @@ end
 local input_modes = { 'ask', 'plan', 'agent' }
 local _perm_cycle = { 'interactive', 'approve-all', 'autopilot' }
 
+-- Notify the server of the new agent mode so the SDK switches behaviour.
+local function set_agent_mode(mode)
+  if not state.session_id then
+    return
+  end
+  request('POST', string.format('/sessions/%s/mode', state.session_id), { mode = mode }, function(_, err)
+    if err then
+      notify('Failed to set agent mode: ' .. err, vim.log.levels.WARN)
+    end
+  end)
+end
+
 -- Keymaps shared by both the chat output buffer and the input buffer.
 -- The input buffer overrides <C-s> (submit) and <C-t> (also refreshes prompt).
 local function setup_action_keymaps(bufnr)
@@ -1159,6 +1171,7 @@ local function setup_action_keymaps(bufnr)
       end
     end
     state.input_mode = input_modes[(idx % #input_modes) + 1]
+    set_agent_mode(state.input_mode)
     refresh_statuslines()
     notify('Mode: ' .. state.input_mode, vim.log.levels.INFO)
   end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent)' })
@@ -1523,12 +1536,11 @@ local function create_input_buffer()
     vim.fn.prompt_setprompt(bufnr, (state.input_mode or 'agent') .. '❯ ')
     vim.cmd('startinsert')
     if text ~= '' then
-      local mode = state.input_mode or 'agent'
       local attachments = vim.deepcopy(state.pending_attachments)
       state.pending_attachments = {}
       state.chat_busy = true
       refresh_statuslines()
-      M.ask(text, { mode = mode, attachments = attachments })
+      M.ask(text, { attachments = attachments })
     end
   end
 
@@ -1562,6 +1574,7 @@ local function create_input_buffer()
       end
     end
     state.input_mode = input_modes[(idx % #input_modes) + 1]
+    set_agent_mode(state.input_mode)
     refresh_prompt()
     vim.cmd('startinsert!')
   end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent)' })
@@ -2475,6 +2488,10 @@ create_session = function(callback, opts)
     end
 
     start_event_stream(state.session_id)
+    -- Sync the agent mode with the server if the user already picked one.
+    if state.input_mode and state.input_mode ~= 'agent' then
+      set_agent_mode(state.input_mode)
+    end
     on_session_ready(state.session_id)
     if callback then
       callback(state.session_id)
@@ -2710,9 +2727,6 @@ function M.ask(prompt, opts)
       return
     end
     local body = { prompt = text }
-    if opts.mode and opts.mode ~= '' then
-      body.mode = opts.mode
-    end
     if #api_attachments > 0 then
       body.attachments = api_attachments
     end

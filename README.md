@@ -5,6 +5,7 @@ A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/
 ## Cool features
 
 - Full agentic tool execution (file read/write, terminal, web search, ask user)
+- Real agentic loop with per-tool-call approval and autopilot mode
 - Granular permission management (interactive, approve-all, reject-all, autopilot)
 - Sub-agent streaming event
 - Custom agents and skill directories. Fully compatible with vscode copilot chat setup
@@ -57,21 +58,21 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 
 [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) calls the Copilot (or other) LLM REST APIs directly from Lua. It supports multiple providers but has no agent runtime of its own — tool execution and the agentic loop are implemented in Lua above the client.
 
-| Feature                   | **copilot-agent.nvim**                                | CopilotChat.nvim          |
-| ------------------------- | ----------------------------------------------------- | ------------------------- |
-| Backend                   | Official Copilot SDK (Go)                             | Direct LLM REST API (Lua) |
-| Agent / tool-use mode     | ✅ full agentic (file edits, terminal, web search, …) | ❌ chat only              |
-| Chat modes                | ask · plan · **agent**                                | ask only                  |
-| Permission management     | ✅ interactive / approve-all / autopilot / reject-all | ❌                        |
+| Feature                   | **copilot-agent.nvim**                                       | CopilotChat.nvim          |
+| ------------------------- | ------------------------------------------------------------ | ------------------------- |
+| Backend                   | Official Copilot SDK (Go)                                    | Direct LLM REST API (Lua) |
+| Agent / tool-use mode     | ✅ full agentic (file edits, terminal, web search, …)        | ❌ chat only              |
+| Chat modes                | ask · plan · **agent**                                       | ask only                  |
+| Permission management     | ✅ interactive / approve-all / autopilot / reject-all        | ❌                        |
 | File & folder attachments | ✅ (buffer, selection, file, folder, image, clipboard paste) | ✅ (buffer context)       |
-| Session persistence       | ✅ per working directory                              | ❌                        |
-| Model switching (live)    | ✅ mid-session with tab-complete                      | ✅                        |
-| LSP code actions          | ✅ (explain / fix / add tests / add docs)             | ❌                        |
-| ACP / MCP support         | ❌                                                    | ❌                        |
-| Custom agents / skills    | ✅                                                    | ❌                        |
-| SSE streaming             | ✅ native                                             | ✅                        |
-| Multi-provider            | ❌ (Copilot only, or Bring your own key)              | ✅ (provider_resolver)    |
-| Dependencies              | Go 1.24 + curl                                        | Pure Lua (plenary)        |
+| Session persistence       | ✅ per working directory                                     | ❌                        |
+| Model switching (live)    | ✅ mid-session with tab-complete                             | ✅                        |
+| LSP code actions          | ✅ (explain / fix / add tests / add docs)                    | ❌                        |
+| ACP / MCP support         | ❌                                                           | ❌                        |
+| Custom agents / skills    | ✅                                                           | ❌                        |
+| SSE streaming             | ✅ native                                                    | ✅                        |
+| Multi-provider            | ❌ (Copilot only, or Bring your own key)                     | ✅ (provider_resolver)    |
+| Dependencies              | Go 1.24 + curl                                               | Pure Lua (plenary)        |
 
 **When to choose CopilotChat.nvim**: zero-binary Lua setup, just want Copilot chat with buffer context, happy with a Lua-managed tool loop.
 
@@ -139,13 +140,13 @@ No Go toolchain required.
 
 Supported platforms:
 
-| Platform | Binary |
-|---|---|
-| Linux x86_64 | `copilot-agent-linux-amd64` |
-| Linux aarch64 | `copilot-agent-linux-arm64` |
-| Windows x86_64 | `copilot-agent-windows-amd64.exe` |
-| Windows aarch64 | `copilot-agent-windows-arm64.exe` |
-| macOS Apple Silicon | `copilot-agent-darwin-arm64` |
+| Platform            | Binary                            |
+| ------------------- | --------------------------------- |
+| Linux x86_64        | `copilot-agent-linux-amd64`       |
+| Linux aarch64       | `copilot-agent-linux-arm64`       |
+| Windows x86_64      | `copilot-agent-windows-amd64.exe` |
+| Windows aarch64     | `copilot-agent-windows-arm64.exe` |
+| macOS Apple Silicon | `copilot-agent-darwin-arm64`      |
 
 You can also download manually from the
 [releases page](https://github.com/ray-x/copilot-agent.nvim/releases/tag/latest)
@@ -236,16 +237,16 @@ go build -o copilot-agent .
 
 **Flags:**
 
-| Flag            | Default       | Description                                             |
-| --------------- | ------------- | ------------------------------------------------------- |
-| `-addr`         | (free port)   | HTTP listen address; empty or `:0` → OS picks           |
-| `-port-range`   | —             | Try ports lo–hi (e.g. `18000-19000`); first free wins   |
-| `-cwd`          | current dir   | Default working directory for sessions                  |
-| `-model`        | (sdk default) | Default model for new sessions                          |
-| `-cli-path`     | auto-detected | Path to Copilot CLI binary/JS entrypoint                |
-| `-cli-url`      | —             | URL of an already-running Copilot CLI server            |
-| `-log-level`    | —             | Copilot CLI log level                                   |
-| `-lsp`          | `true`        | Start LSP server on stdio                               |
+| Flag          | Default       | Description                                           |
+| ------------- | ------------- | ----------------------------------------------------- |
+| `-addr`       | (free port)   | HTTP listen address; empty or `:0` → OS picks         |
+| `-port-range` | —             | Try ports lo–hi (e.g. `18000-19000`); first free wins |
+| `-cwd`        | current dir   | Default working directory for sessions                |
+| `-model`      | (sdk default) | Default model for new sessions                        |
+| `-cli-path`   | auto-detected | Path to Copilot CLI binary/JS entrypoint              |
+| `-cli-url`    | —             | URL of an already-running Copilot CLI server          |
+| `-log-level`  | —             | Copilot CLI log level                                 |
+| `-lsp`        | `true`        | Start LSP server on stdio                             |
 
 The service always prints `COPILOT_AGENT_ADDR=127.0.0.1:<PORT>` to stderr once the
 listener is bound. When `auto_start = true`, the plugin reads this line and
@@ -276,36 +277,36 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 
 ### Keybindings
 
-| Key               | Action                                                                         |
-| ----------------- | ------------------------------------------------------------------------------ |
-| `<CR>` / `<C-s>`  | Send message                                                                   |
-| `q` / `<Esc>`     | Close input (normal mode)                                                      |
-| `<C-t>`           | Cycle chat mode: **ask → plan → agent**                                        |
-| `<M-m>`           | Open model picker                                                              |
-| `<M-a>`           | Cycle permission mode: **🔐 interactive → ✅ approve-all → 🤖 autopilot**      |
-| `<C-a>`           | Attach resource — opens picker menu (see below)                                |
-| `<M-v>`           | Paste image from clipboard as attachment                                       |
-| `<C-x>`           | Toggle session tools (enable/disable individual tools)                         |
-| `<Tab>`           | Trigger completion (`@file` or `/slash-command`)                               |
-| `@<path>`         | Attach a file by path (autocomplete from working directory)                    |
-| `/<cmd>`          | Slash command (autocomplete from 50+ supported commands)                       |
-| `<C-p>` / `<M-p>` | Previous prompt from history                                                   |
-| `<C-n>` / `<M-n>` | Next prompt from history                                                       |
-| `?` (normal)      | Show help float                                                                |
+| Key               | Action                                                                    |
+| ----------------- | ------------------------------------------------------------------------- |
+| `<CR>` / `<C-s>`  | Send message                                                              |
+| `q` / `<Esc>`     | Close input (normal mode)                                                 |
+| `<C-t>`           | Cycle chat mode: **ask → plan → agent**                                   |
+| `<M-m>`           | Open model picker                                                         |
+| `<M-a>`           | Cycle permission mode: **🔐 interactive → ✅ approve-all → 🤖 autopilot** |
+| `<C-a>`           | Attach resource — opens picker menu (see below)                           |
+| `<M-v>`           | Paste image from clipboard as attachment                                  |
+| `<C-x>`           | Toggle session tools (enable/disable individual tools)                    |
+| `<Tab>`           | Trigger completion (`@file` or `/slash-command`)                          |
+| `@<path>`         | Attach a file by path (autocomplete from working directory)               |
+| `/<cmd>`          | Slash command (autocomplete from 50+ supported commands)                  |
+| `<C-p>` / `<M-p>` | Previous prompt from history                                              |
+| `<C-n>` / `<M-n>` | Next prompt from history                                                  |
+| `?` (normal)      | Show help float                                                           |
 
 ### Attaching Files and Images
 
 Press `<C-a>` in the input buffer to open the resource picker:
 
-| Choice                      | What it does                                                    |
-| --------------------------- | --------------------------------------------------------------- |
-| Current buffer              | Attaches the previously focused file buffer                     |
-| Visual selection            | Attaches the last visual selection with file path + line range  |
-| File                        | Opens fuzzy picker → select one or more files (multi-select)    |
-| Folder                      | Opens fuzzy picker / `vim.ui.input` to pick a directory         |
-| Instructions file           | Same as File but marked as an instructions context file (📋)    |
-| Image file                  | Opens fuzzy picker to select an image (png/jpg/gif/…)           |
-| Paste image from clipboard  | Saves clipboard image to a temp PNG and attaches it (🖼️)        |
+| Choice                     | What it does                                                   |
+| -------------------------- | -------------------------------------------------------------- |
+| Current buffer             | Attaches the previously focused file buffer                    |
+| Visual selection           | Attaches the last visual selection with file path + line range |
+| File                       | Opens fuzzy picker → select one or more files (multi-select)   |
+| Folder                     | Opens fuzzy picker / `vim.ui.input` to pick a directory        |
+| Instructions file          | Same as File but marked as an instructions context file (📋)   |
+| Image file                 | Opens fuzzy picker to select an image (png/jpg/gif/…)          |
+| Paste image from clipboard | Saves clipboard image to a temp PNG and attaches it (🖼️)       |
 
 `<M-v>` is a direct shortcut for **Paste image from clipboard** without opening the menu.
 `:CopilotAgentPasteImage` is the equivalent command.
@@ -316,13 +317,13 @@ Pending attachments appear in the input statusline as `📎 N`. Each attachment 
 
 The File / Folder / Image / Instructions choices auto-detect and use the best available picker — no extra configuration needed:
 
-| Priority | Picker | Notes |
-| -------- | ------ | ----- |
-| 1 | **snacks.picker** | `snacks.picker.files` / `snacks.picker.directories` |
-| 2 | **telescope** | `find_files`; `telescope-file-browser` for directories |
-| 3 | **fzf-lua** | `fzf.files`; `fzf_exec fd --type d` for directories |
-| 4 | **mini.pick** | `mp.builtin.files` (files only) |
-| 5 | **vim.ui.input** | Fallback — type the path with completion |
+| Priority | Picker            | Notes                                                  |
+| -------- | ----------------- | ------------------------------------------------------ |
+| 1        | **snacks.picker** | `snacks.picker.files` / `snacks.picker.directories`    |
+| 2        | **telescope**     | `find_files`; `telescope-file-browser` for directories |
+| 3        | **fzf-lua**       | `fzf.files`; `fzf_exec fd --type d` for directories    |
+| 4        | **mini.pick**     | `mp.builtin.files` (files only)                        |
+| 5        | **vim.ui.input**  | Fallback — type the path with completion               |
 
 Override the picker or force the native fallback via config:
 
@@ -335,11 +336,11 @@ chat = { file_picker = 'native' }     -- always use vim.ui.input
 
 #### Clipboard Image Requirements
 
-| Platform      | Tool required | Install |
-| ------------- | ------------- | ------- |
-| macOS         | `pngpaste`    | `brew install pngpaste` |
-| Linux/Wayland | `wl-paste`    | `sudo apt install wl-clipboard` |
-| Linux/X11     | `xclip` or `xsel` | `sudo apt install xclip` |
+| Platform      | Tool required     | Install                         |
+| ------------- | ----------------- | ------------------------------- |
+| macOS         | `pngpaste`        | `brew install pngpaste`         |
+| Linux/Wayland | `wl-paste`        | `sudo apt install wl-clipboard` |
+| Linux/X11     | `xclip` or `xsel` | `sudo apt install xclip`        |
 
 ### Chat Modes
 

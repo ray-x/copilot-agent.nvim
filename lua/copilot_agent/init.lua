@@ -655,6 +655,27 @@ end
 
 local HEADER_LINES = 5 -- title, service, session, commands, separator
 
+-- Highlight namespace for chat buffer role labels and completion markers.
+local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
+
+-- Apply (or refresh) highlights for role labels and "Done." in the chat buffer.
+-- Pass from_row (0-indexed) to restrict work to a tail of the buffer (streaming).
+local function apply_chat_highlights(bufnr, from_row)
+  from_row = from_row or 0
+  vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, -1)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, -1, false)
+  for i, line in ipairs(lines) do
+    local row = from_row + i - 1
+    if line == 'User:' then
+      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentUser', row, 0, -1)
+    elseif line == 'Assistant:' then
+      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
+    elseif line:match('^%s*Done%.$') then
+      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
+    end
+  end
+end
+
 render_chat = function()
   state.render_pending = false
   local bufnr = state.chat_bufnr
@@ -704,6 +725,7 @@ render_chat = function()
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
   vim.bo[bufnr].modified = false
+  apply_chat_highlights(bufnr)
 
   if at_bottom then
     scroll_to_bottom()
@@ -751,6 +773,7 @@ local function stream_update(entry, idx)
     vim.bo[bufnr].modifiable = false
     vim.bo[bufnr].readonly = true
     vim.bo[bufnr].modified = false
+    apply_chat_highlights(bufnr, state.stream_line_start)
     if at_bottom then
       scroll_to_bottom()
     end
@@ -2506,6 +2529,12 @@ function M.setup(opts)
   state.config.base_url = normalize_base_url(state.config.base_url)
   -- Initialize runtime permission mode from config.
   state.permission_mode = state.config.permission_mode or 'interactive'
+
+  -- Default highlight groups for the chat buffer (link targets can be overridden
+  -- by the user's colorscheme or config before calling setup()).
+  vim.api.nvim_set_hl(0, 'CopilotAgentUser', { link = 'Title', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentAssistant', { link = 'Function', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentDone', { link = 'DiagnosticOk', default = true })
   -- Clean up clipboard temp files if Neovim exits before they were sent.
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = vim.api.nvim_create_augroup('CopilotAgentCleanup', { clear = true }),

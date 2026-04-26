@@ -290,6 +290,21 @@ local function refresh_input_statusline()
     string.format(' %s %s  %s  %s%s  (? for help)', statusline_mode(), statusline_busy(), statusline_model(), statusline_permission(), att ~= '' and ('  ' .. att) or '')
 end
 
+-- Rebuild the chat output window's statusline.
+local function refresh_chat_statusline()
+  if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then
+    return
+  end
+  vim.wo[state.chat_winid].statusline =
+    string.format(' %s %s  %s  %s%s', statusline_mode(), statusline_busy(), statusline_model(), statusline_permission(), state.session_id and ('  #' .. state.session_id:sub(1, 8)) or '')
+end
+
+-- Refresh both window statuslines at once.
+local function refresh_statuslines()
+  refresh_input_statusline()
+  refresh_chat_statusline()
+end
+
 local function cwd()
   return (uv and uv.cwd and uv.cwd()) or vim.fn.getcwd()
 end
@@ -726,6 +741,7 @@ render_chat = function()
   vim.bo[bufnr].readonly = true
   vim.bo[bufnr].modified = false
   apply_chat_highlights(bufnr)
+  refresh_chat_statusline()
 
   if at_bottom then
     scroll_to_bottom()
@@ -1026,6 +1042,7 @@ local function ensure_chat_window()
       win = 0,
     })
     render_chat()
+    refresh_chat_statusline()
     scroll_to_bottom()
     return state.chat_bufnr
   end
@@ -1047,6 +1064,7 @@ local function ensure_chat_window()
     split = 'right',
     win = 0,
   })
+  refresh_chat_statusline()
 
   -- Tell render-markdown.nvim (and similar) to enable on this buffer.
   -- It defaults to skipping nofile buffers, so we explicitly enable it.
@@ -1109,7 +1127,7 @@ local function create_input_buffer()
 
   local function refresh_prompt()
     vim.fn.prompt_setprompt(bufnr, prompt_prefix())
-    refresh_input_statusline()
+    refresh_statuslines()
   end
 
   local function get_input_text()
@@ -1199,7 +1217,7 @@ local function create_input_buffer()
       local attachments = vim.deepcopy(state.pending_attachments)
       state.pending_attachments = {}
       state.chat_busy = true
-      refresh_input_statusline()
+      refresh_statuslines()
       M.ask(text, { mode = mode, attachments = attachments })
     end
   end
@@ -1277,7 +1295,7 @@ local function create_input_buffer()
       -- Helper: add one path to pending attachments and refresh statusline.
       local function add_attachment(att)
         table.insert(state.pending_attachments, att)
-        refresh_input_statusline()
+        refresh_statuslines()
         -- Return focus to the input window after picker closes.
         vim.schedule(function()
           if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
@@ -1431,7 +1449,7 @@ local function create_input_buffer()
         end
       end)
     end
-    refresh_input_statusline()
+    refresh_statuslines()
     notify('Permission mode: ' .. next_mode, vim.log.levels.INFO)
   end, { buffer = bufnr, silent = true, desc = 'Cycle permission mode' })
 
@@ -1595,7 +1613,7 @@ open_input_window = function()
   wo.relativenumber = false
   wo.signcolumn = 'no'
   -- Statusline is populated by refresh_input_statusline below.
-  refresh_input_statusline()
+  refresh_statuslines()
 
   vim.cmd('startinsert')
 
@@ -1650,7 +1668,7 @@ local function discard_pending_attachments()
     end
   end
   state.pending_attachments = {}
-  refresh_input_statusline()
+  refresh_statuslines()
 end
 
 local function stop_event_stream()
@@ -2039,7 +2057,7 @@ local function handle_host_event(event_name, payload)
     notify_transient('Permission ' .. tostring(data.decision or 'unknown') .. ' (' .. tostring(data.mode or '') .. ')', vim.log.levels.INFO)
   elseif event_name == 'host.permission_mode_changed' then
     state.permission_mode = data.mode or state.permission_mode
-    refresh_input_statusline()
+    refresh_statuslines()
   elseif event_name == 'host.session_disconnected' then
     append_entry('system', 'Session disconnected')
   end
@@ -2051,7 +2069,7 @@ local function handle_session_event(payload)
 
   if event_type == 'assistant.message_delta' then
     state.chat_busy = true
-    refresh_input_statusline()
+    refresh_statuslines()
     local key = data.messageId or ('assistant-' .. tostring(#state.entries + 1))
     local entry = ensure_assistant_entry(data.messageId)
     local delta = data.deltaContent or ''
@@ -2099,7 +2117,7 @@ local function handle_session_event(payload)
     stop_thinking_spinner()
     state.stream_line_start = nil
     state.chat_busy = false
-    refresh_input_statusline()
+    refresh_statuslines()
     render_chat() -- immediate full render on turn completion
     return
   end
@@ -2112,7 +2130,7 @@ local function handle_session_event(payload)
     stop_thinking_spinner()
     state.stream_line_start = nil
     state.chat_busy = false
-    refresh_input_statusline()
+    refresh_statuslines()
     append_entry('error', vim.inspect(data))
   end
 end
@@ -2502,7 +2520,7 @@ local function apply_model(model, callback, opts)
     end
     state.config.session.model = response and response.model or selected
     append_entry('system', 'Active model: ' .. state.config.session.model)
-    refresh_input_statusline()
+    refresh_statuslines()
     if callback then
       callback(state.config.session.model, nil)
     end
@@ -2594,7 +2612,7 @@ function M.ask(prompt, opts)
   append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
   -- Mark busy immediately so the spinner shows before the first delta arrives.
   state.chat_busy = true
-  refresh_input_statusline()
+  refresh_statuslines()
   schedule_render()
 
   -- Build attachment list for the API.
@@ -2619,7 +2637,7 @@ function M.ask(prompt, opts)
   with_session(function(session_id, err)
     if err then
       state.chat_busy = false
-      refresh_input_statusline()
+      refresh_statuslines()
       append_entry('error', err)
       return
     end
@@ -2637,7 +2655,7 @@ function M.ask(prompt, opts)
       end
       if request_err then
         state.chat_busy = false
-        refresh_input_statusline()
+        refresh_statuslines()
         append_entry('error', 'Failed to send prompt: ' .. request_err)
       end
     end)
@@ -2834,7 +2852,7 @@ function M.paste_clipboard_image()
           display = '🖼️ clipboard.png',
           temp = true, -- delete after send; see M.ask()
         })
-        refresh_input_statusline()
+        refresh_statuslines()
         notify('Image from clipboard added as attachment.', vim.log.levels.INFO)
         if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
           vim.api.nvim_set_current_win(state.input_winid)

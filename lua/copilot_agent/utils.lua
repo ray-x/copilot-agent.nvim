@@ -42,8 +42,8 @@ function M.normalize_model_entry(entry)
 
   local name = entry.name or entry.Name or id
   return {
-    id    = id,
-    name  = name,
+    id = id,
+    name = name,
     label = string.format('%s (%s)', name, id),
   }
 end

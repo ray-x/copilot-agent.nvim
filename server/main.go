@@ -190,7 +190,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := client.Start(ctx); err != nil {
+	if err = client.Start(ctx); err != nil {
 		log.Fatalf("start copilot client: %v", err)
 	}
 	defer client.Stop()
@@ -1161,10 +1161,7 @@ func parseNumericVersion(value string) ([]int, bool) {
 }
 
 func compareVersionParts(left, right []int) int {
-	limit := len(left)
-	if len(right) > limit {
-		limit = len(right)
-	}
+	limit := max(len(right), len(left))
 
 	for i := range limit {
 		leftPart := 0
@@ -1249,7 +1246,7 @@ func writeSSE(w http.ResponseWriter, eventName string, payload []byte) error {
 	if _, err := fmt.Fprintf(w, "event: %s\n", eventName); err != nil {
 		return err
 	}
-	for _, line := range strings.Split(string(payload), "\n") {
+	for line := range strings.SplitSeq(string(payload), "\n") {
 		if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
 			return err
 		}

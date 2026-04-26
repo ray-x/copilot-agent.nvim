@@ -1,0 +1,12 @@
+# Go build output
+server/copilot-agent
+server/copilot-agent.exe
+
+# Go test cache / coverage
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo

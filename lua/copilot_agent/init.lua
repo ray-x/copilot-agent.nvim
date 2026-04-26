@@ -2891,7 +2891,7 @@ function M.install_binary(opts)
   })
 end
 
- The Neovim LSP client owns the process
+-- service and the LSP server on stdio. The Neovim LSP client owns the process
 -- lifetime; ensure_service_running reuses it for HTTP health-checks.
 function M.start_lsp(opts)
   opts = opts or {}

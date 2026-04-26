@@ -81,12 +81,12 @@ type lspExecuteCommandParams struct {
 
 // lspCodeActionArg is passed as the single argument to workspace/executeCommand.
 type lspCodeActionArg struct {
-	Action       string     `json:"action"`
-	URI          string     `json:"uri"`
+	Action       string   `json:"action"`
+	URI          string   `json:"uri"`
 	Range        lspRange `json:"range"`
-	SelectedText string     `json:"selectedText"`
-	ServiceURL   string     `json:"serviceURL"`
-	SessionID    string     `json:"sessionId"`
+	SelectedText string   `json:"selectedText"`
+	ServiceURL   string   `json:"serviceURL"`
+	SessionID    string   `json:"sessionId"`
 }
 
 // ── Code actions ─────────────────────────────────────────────────────────────
@@ -142,6 +142,7 @@ type lspServer struct {
 	reader     *bufio.Reader
 	writer     io.Writer
 }
+
 func runLSPServer(ctx context.Context, serviceURL string) error {
 	srv := &lspServer{
 		serviceURL: serviceURL,

@@ -88,6 +88,7 @@ local state = {
   prompt_history = {},
   prompt_history_index = nil,
   prompt_history_draft = '',
+  prompt_prefill = nil, -- text to pre-populate the input buffer (set by chat-buffer history nav)
   lsp_client_id = nil,
   -- Input buffer UI state
   input_mode = 'agent', -- 'ask' | 'plan' | 'agent'
@@ -1102,9 +1103,319 @@ local function ensure_chat_window()
     })
   end
 
+  -- Shared action keymaps: mode, model, attachments, tools, permission, history, help.
+  setup_action_keymaps(bufnr)
+
   render_chat()
   scroll_to_bottom()
   return bufnr
+end
+
+local input_modes = { 'ask', 'plan', 'agent' }
+local _perm_cycle = { 'interactive', 'approve-all', 'autopilot' }
+
+-- Keymaps shared by both the chat output buffer and the input buffer.
+-- The input buffer overrides <C-s> (submit) and <C-t> (also refreshes prompt).
+local function setup_action_keymaps(bufnr)
+  -- Open input window (chat: always open; input: overridden to submit).
+  vim.keymap.set({ 'n', 'i' }, '<C-s>', function()
+    M.ask()
+  end, { buffer = bufnr, silent = true, desc = 'Open input / send message' })
+
+  -- History navigation: load entry into input buffer prefill then open it.
+  for _, map in ipairs({
+    { '<C-p>', -1 },
+    { '<M-p>', -1 },
+    { '<C-n>', 1 },
+    { '<M-n>', 1 },
+  }) do
+    local lhs, dir = map[1], map[2]
+    vim.keymap.set({ 'n', 'i' }, lhs, function()
+      if #state.prompt_history == 0 then
+        return
+      end
+      local draft_index = #state.prompt_history + 1
+      if state.prompt_history_index == nil then
+        state.prompt_history_index = draft_index
+      end
+      local next_index = math.max(1, math.min(draft_index, state.prompt_history_index + dir))
+      state.prompt_history_index = next_index
+      if next_index == draft_index then
+        state.prompt_prefill = state.prompt_history_draft
+      else
+        state.prompt_prefill = state.prompt_history[next_index]
+      end
+      M.ask()
+    end, { buffer = bufnr, silent = true, desc = dir < 0 and 'Previous prompt' or 'Next prompt' })
+  end
+
+  -- Cycle input mode (ask / plan / agent).
+  vim.keymap.set({ 'n', 'i' }, '<C-t>', function()
+    local idx = 1
+    for i, m in ipairs(input_modes) do
+      if m == state.input_mode then
+        idx = i
+        break
+      end
+    end
+    state.input_mode = input_modes[(idx % #input_modes) + 1]
+    refresh_statuslines()
+    notify('Mode: ' .. state.input_mode, vim.log.levels.INFO)
+  end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent)' })
+
+  -- Quick model switch.
+  vim.keymap.set({ 'n', 'i' }, '<M-m>', function()
+    M.select_model()
+  end, { buffer = bufnr, silent = true, desc = 'Switch Copilot model' })
+
+  -- Paste image from clipboard.
+  vim.keymap.set({ 'n', 'i' }, '<M-v>', function()
+    M.paste_clipboard_image()
+  end, { buffer = bufnr, silent = true, desc = 'Paste image from clipboard as attachment' })
+
+  -- Cycle permission mode.
+  vim.keymap.set({ 'n', 'i' }, '<M-a>', function()
+    local current = state.permission_mode or 'interactive'
+    local next_mode = 'interactive'
+    for i, m in ipairs(_perm_cycle) do
+      if m == current then
+        next_mode = _perm_cycle[(i % #_perm_cycle) + 1]
+        break
+      end
+    end
+    state.permission_mode = next_mode
+    if state.session_id then
+      request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = next_mode }, function(_, err)
+        if err then
+          notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+        end
+      end)
+    end
+    refresh_statuslines()
+    notify('Permission mode: ' .. next_mode, vim.log.levels.INFO)
+  end, { buffer = bufnr, silent = true, desc = 'Cycle permission mode' })
+
+  -- Resource / attachment picker.
+  vim.keymap.set({ 'n', 'i' }, '<C-a>', function()
+    local choices = {
+      'Current buffer',
+      'Visual selection',
+      'File',
+      'Folder',
+      'Instructions file',
+      'Image file',
+      'Paste image from clipboard',
+    }
+    vim.ui.select(choices, { prompt = 'Add resource' }, function(choice)
+      if not choice then
+        return
+      end
+
+      local function add_attachment(att)
+        table.insert(state.pending_attachments, att)
+        refresh_statuslines()
+        vim.schedule(function()
+          if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+            vim.api.nvim_set_current_win(state.input_winid)
+            vim.cmd('startinsert!')
+          elseif state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
+            vim.api.nvim_set_current_win(state.chat_winid)
+          end
+        end)
+      end
+
+      if choice == 'Current buffer' then
+        local path = vim.api.nvim_buf_get_name(vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0)
+        if path ~= '' then
+          add_attachment({ type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') })
+        end
+      elseif choice == 'Visual selection' then
+        local sel_buf = vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0
+        local start_line = vim.fn.line("'<", vim.fn.win_getid()) - 1
+        local end_line = vim.fn.line("'>", vim.fn.win_getid()) - 1
+        local lines = vim.api.nvim_buf_get_lines(sel_buf, start_line, end_line + 1, false)
+        local text = table.concat(lines, '\n')
+        local filepath = vim.api.nvim_buf_get_name(sel_buf)
+        if text ~= '' then
+          add_attachment({
+            type = 'selection',
+            path = filepath,
+            text = text,
+            start_line = start_line,
+            end_line = end_line,
+            display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
+          })
+        end
+      elseif choice == 'File' then
+        pick_path({ prompt = 'Attach file', type = 'file' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({ type = 'file', path = p, display = vim.fn.fnamemodify(p, ':t') })
+          end
+        end)
+      elseif choice == 'Folder' then
+        pick_path({ prompt = 'Attach folder', type = 'dir' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({
+              type = 'directory',
+              path = p,
+              display = vim.fn.fnamemodify(p:gsub('/$', ''), ':t') .. '/',
+            })
+          end
+        end)
+      elseif choice == 'Instructions file' then
+        pick_path({ prompt = 'Instructions file', type = 'file' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({ type = 'file', path = p, display = '📋' .. vim.fn.fnamemodify(p, ':t') })
+          end
+        end)
+      elseif choice == 'Image file' then
+        pick_path({ prompt = 'Attach image', type = 'file' }, function(paths)
+          for _, p in ipairs(paths) do
+            add_attachment({ type = 'image', path = p, display = '🖼️ ' .. vim.fn.fnamemodify(p, ':t') })
+          end
+        end)
+      elseif choice == 'Paste image from clipboard' then
+        M.paste_clipboard_image()
+      end
+
+      if choice == 'Current buffer' or choice == 'Visual selection' then
+        if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+          vim.api.nvim_set_current_win(state.input_winid)
+          vim.cmd('startinsert!')
+        end
+      end
+    end)
+  end, { buffer = bufnr, silent = true, desc = 'Add resource/attachment' })
+
+  -- Tool config: show available tools, toggle excluded.
+  vim.keymap.set({ 'n', 'i' }, '<C-x>', function()
+    if not state.session_id then
+      notify('No active session', vim.log.levels.WARN)
+      return
+    end
+    request('GET', '/sessions/' .. state.session_id, nil, function(session, err)
+      if err or not session then
+        notify('Failed to fetch session: ' .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      local caps = session.capabilities or {}
+      local tools = caps.availableTools or {}
+      local excluded = session.excludedTools or {}
+      local excluded_set = {}
+      for _, t in ipairs(excluded) do
+        excluded_set[t] = true
+      end
+      if #tools == 0 then
+        notify('No tools available in this session', vim.log.levels.INFO)
+        return
+      end
+      local items = {}
+      for _, t in ipairs(tools) do
+        table.insert(items, { name = t, excluded = excluded_set[t] == true })
+      end
+      vim.ui.select(items, {
+        prompt = 'Toggle tool (currently marked = excluded)',
+        format_item = function(item)
+          return (item.excluded and '✗ ' or '✓ ') .. item.name
+        end,
+      }, function(choice)
+        if not choice then
+          return
+        end
+        if choice.excluded then
+          excluded_set[choice.name] = nil
+        else
+          excluded_set[choice.name] = true
+        end
+        local new_excluded = vim.tbl_keys(excluded_set)
+        request('POST', '/sessions/' .. state.session_id .. '/tools', { excludedTools = new_excluded }, function(_, req_err)
+          if req_err then
+            notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
+          else
+            notify('Tools updated', vim.log.levels.INFO)
+          end
+        end)
+      end)
+    end)
+  end, { buffer = bufnr, silent = true, desc = 'Configure session tools' })
+
+  -- Help popup (? in normal mode).
+  vim.keymap.set('n', '?', function()
+    local help_lines = {
+      ' Copilot Agent – Keybindings ',
+      string.rep('─', 44),
+      '',
+      '  Send / Open input',
+      '    <CR> / i / a    Open input buffer (output pane)',
+      '    <C-s>           Send message / open input',
+      '',
+      '  Mode  (<C-t> to cycle)',
+      '    ask             Standard Q&A',
+      '    plan            Create an implementation plan',
+      '    agent           Autonomous agent mode',
+      '',
+      '  Model',
+      '    <M-m>           Open model picker',
+      '',
+      '  Permission  (<M-a> to cycle)',
+      '    🔐 interactive   Prompt for each tool use',
+      '    ✅ approve-all   Auto-approve everything',
+      '    🤖 autopilot     Approve + auto-answer inputs',
+      '',
+      '  Attachments  (<C-a> to open menu)',
+      '    Current buffer, visual selection,',
+      '    file, folder, instructions file,',
+      '    image file',
+      '    <M-v>           Paste image from clipboard',
+      '',
+      '  Tools',
+      '    <C-x>           Toggle session tools',
+      '',
+      '  History  (input buffer)',
+      '    <C-p> / <M-p>   Previous prompt',
+      '    <C-n> / <M-n>   Next prompt',
+      '',
+      '  Completion  (input buffer)',
+      '    <Tab>           Trigger completion',
+      '    @<path>         Attach a file',
+      '    /<cmd>          Slash command',
+      '',
+      '  Output pane',
+      '    q               Close chat window',
+      '    R               Refresh/re-render',
+      '    ?               This help',
+      '',
+      '  Press any key to close',
+    }
+    local max_w = 0
+    for _, l in ipairs(help_lines) do
+      max_w = math.max(max_w, vim.fn.strdisplaywidth(l))
+    end
+    local win_h = #help_lines
+    local win_w = max_w + 2
+    local row = math.max(0, (vim.o.lines - win_h) / 2)
+    local col = math.max(0, (vim.o.columns - win_w) / 2)
+    local help_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(help_buf, 0, -1, false, help_lines)
+    vim.bo[help_buf].modifiable = false
+    local help_win = vim.api.nvim_open_win(help_buf, true, {
+      relative = 'editor',
+      row = row,
+      col = col,
+      width = win_w,
+      height = win_h,
+      style = 'minimal',
+      border = 'rounded',
+      title = ' Help ',
+      title_pos = 'center',
+    })
+    vim.wo[help_win].cursorline = false
+    for _, key in ipairs({ '<Space>', '<CR>', '<Esc>', 'q', '?' }) do
+      vim.keymap.set('n', key, function()
+        vim.api.nvim_win_close(help_win, true)
+      end, { buffer = help_buf, silent = true, nowait = true })
+    end
+  end, { buffer = bufnr, silent = true, desc = 'Show keybinding help' })
 end
 
 local function create_input_buffer()
@@ -1119,7 +1430,6 @@ local function create_input_buffer()
   vim.bo[bufnr].filetype = 'markdown'
   -- copilot.lua skips prompt buffers by default; this explicit flag overrides it.
   vim.b[bufnr].copilot_enabled = true
-  local input_modes = { 'ask', 'plan', 'agent' }
 
   local function prompt_prefix()
     return (state.input_mode or 'agent') .. '❯ '
@@ -1234,25 +1544,15 @@ local function create_input_buffer()
     submit(vim.trim(get_input_text()))
   end
 
+  -- Apply all shared action keymaps, then override the ones that differ in input context.
+  setup_action_keymaps(bufnr)
+
   -- <C-s> submits in prompt mode; <CR> submits via prompt_setcallback().
   vim.keymap.set({ 'n', 'i' }, '<C-s>', submit_buffer, { buffer = bufnr, silent = true, desc = 'Submit prompt to Copilot' })
   vim.keymap.set('n', 'q', cancel, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('n', '<Esc>', cancel, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('i', '<Esc>', '<Esc>', { buffer = bufnr, silent = true, desc = 'Switch to normal mode' })
-  vim.keymap.set({ 'n', 'i' }, '<C-p>', function()
-    navigate_prompt_history(-1)
-  end, { buffer = bufnr, silent = true, desc = 'Previous Copilot prompt' })
-  vim.keymap.set({ 'n', 'i' }, '<C-n>', function()
-    navigate_prompt_history(1)
-  end, { buffer = bufnr, silent = true, desc = 'Next Copilot prompt' })
-  vim.keymap.set({ 'n', 'i' }, '<M-p>', function()
-    navigate_prompt_history(-1)
-  end, { buffer = bufnr, silent = true, desc = 'Previous Copilot prompt' })
-  vim.keymap.set({ 'n', 'i' }, '<M-n>', function()
-    navigate_prompt_history(1)
-  end, { buffer = bufnr, silent = true, desc = 'Next Copilot prompt' })
-
-  -- Cycle through ask / plan / agent modes.
+  -- <C-t> in input also refreshes the prompt prefix and returns to insert mode.
   vim.keymap.set({ 'n', 'i' }, '<C-t>', function()
     local idx = 1
     for i, m in ipairs(input_modes) do
@@ -1265,265 +1565,19 @@ local function create_input_buffer()
     refresh_prompt()
     vim.cmd('startinsert!')
   end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent)' })
-
-  -- Quick model switch.
-  vim.keymap.set({ 'n', 'i' }, '<M-m>', function()
-    M.select_model()
-  end, { buffer = bufnr, silent = true, desc = 'Switch Copilot model' })
-
-  -- Paste image from clipboard directly into pending attachments.
-  vim.keymap.set({ 'n', 'i' }, '<M-v>', function()
-    M.paste_clipboard_image()
-  end, { buffer = bufnr, silent = true, desc = 'Paste image from clipboard as attachment' })
-
-  -- Resource / attachment picker.
-  vim.keymap.set({ 'n', 'i' }, '<C-a>', function()
-    local choices = {
-      'Current buffer',
-      'Visual selection',
-      'File',
-      'Folder',
-      'Instructions file',
-      'Image file',
-      'Paste image from clipboard',
-    }
-    vim.ui.select(choices, { prompt = 'Add resource' }, function(choice)
-      if not choice then
-        return
-      end
-
-      -- Helper: add one path to pending attachments and refresh statusline.
-      local function add_attachment(att)
-        table.insert(state.pending_attachments, att)
-        refresh_statuslines()
-        -- Return focus to the input window after picker closes.
-        vim.schedule(function()
-          if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
-            vim.api.nvim_set_current_win(state.input_winid)
-            vim.cmd('startinsert!')
-          end
-        end)
-      end
-
-      if choice == 'Current buffer' then
-        local path = vim.api.nvim_buf_get_name(vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0)
-        if path ~= '' then
-          add_attachment({ type = 'file', path = path, display = vim.fn.fnamemodify(path, ':t') })
-        end
-      elseif choice == 'Visual selection' then
-        local sel_buf = vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0
-        local start_line = vim.fn.line("'<", vim.fn.win_getid()) - 1
-        local end_line = vim.fn.line("'>", vim.fn.win_getid()) - 1
-        local lines = vim.api.nvim_buf_get_lines(sel_buf, start_line, end_line + 1, false)
-        local text = table.concat(lines, '\n')
-        local filepath = vim.api.nvim_buf_get_name(sel_buf)
-        if text ~= '' then
-          add_attachment({
-            type = 'selection',
-            path = filepath,
-            text = text,
-            start_line = start_line,
-            end_line = end_line,
-            display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
-          })
-        end
-      elseif choice == 'File' then
-        pick_path({ prompt = 'Attach file', type = 'file' }, function(paths)
-          for _, p in ipairs(paths) do
-            add_attachment({ type = 'file', path = p, display = vim.fn.fnamemodify(p, ':t') })
-          end
-        end)
-      elseif choice == 'Folder' then
-        pick_path({ prompt = 'Attach folder', type = 'dir' }, function(paths)
-          for _, p in ipairs(paths) do
-            add_attachment({
-              type = 'directory',
-              path = p,
-              display = vim.fn.fnamemodify(p:gsub('/$', ''), ':t') .. '/',
-            })
-          end
-        end)
-      elseif choice == 'Instructions file' then
-        pick_path({ prompt = 'Instructions file', type = 'file' }, function(paths)
-          for _, p in ipairs(paths) do
-            add_attachment({
-              type = 'file',
-              path = p,
-              display = '📋' .. vim.fn.fnamemodify(p, ':t'),
-            })
-          end
-        end)
-      elseif choice == 'Image file' then
-        pick_path({ prompt = 'Attach image', type = 'file' }, function(paths)
-          for _, p in ipairs(paths) do
-            add_attachment({
-              type = 'image',
-              path = p,
-              display = '🖼️ ' .. vim.fn.fnamemodify(p, ':t'),
-            })
-          end
-        end)
-      elseif choice == 'Paste image from clipboard' then
-        M.paste_clipboard_image()
-      end
-
-      -- For non-async choices (buffer, selection) return focus immediately.
-      -- Async choices (pick_path, paste) schedule their own focus restoration above.
-      if choice == 'Current buffer' or choice == 'Visual selection' then
-        if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
-          vim.api.nvim_set_current_win(state.input_winid)
-          vim.cmd('startinsert!')
-        end
-      end
-    end)
-  end, { buffer = bufnr, silent = true, desc = 'Add resource/attachment' })
-
-  -- Tool config: show available tools, toggle excluded.
-  vim.keymap.set({ 'n', 'i' }, '<C-x>', function()
-    if not state.session_id then
-      notify('No active session', vim.log.levels.WARN)
-      return
-    end
-    request('GET', '/sessions/' .. state.session_id, nil, function(session, err)
-      if err or not session then
-        notify('Failed to fetch session: ' .. tostring(err), vim.log.levels.ERROR)
-        return
-      end
-      local caps = session.capabilities or {}
-      local tools = caps.availableTools or {}
-      local excluded = session.excludedTools or {}
-      local excluded_set = {}
-      for _, t in ipairs(excluded) do
-        excluded_set[t] = true
-      end
-      if #tools == 0 then
-        notify('No tools available in this session', vim.log.levels.INFO)
-        return
-      end
-      local items = {}
-      for _, t in ipairs(tools) do
-        table.insert(items, { name = t, excluded = excluded_set[t] == true })
-      end
-      vim.ui.select(items, {
-        prompt = 'Toggle tool (currently marked = excluded)',
-        format_item = function(item)
-          return (item.excluded and '✗ ' or '✓ ') .. item.name
-        end,
-      }, function(choice)
-        if not choice then
-          return
-        end
-        if choice.excluded then
-          excluded_set[choice.name] = nil
-        else
-          excluded_set[choice.name] = true
-        end
-        local new_excluded = vim.tbl_keys(excluded_set)
-        request('POST', '/sessions/' .. state.session_id .. '/tools', { excludedTools = new_excluded }, function(_, req_err)
-          if req_err then
-            notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
-          else
-            notify('Tools updated', vim.log.levels.INFO)
-          end
-        end)
-      end)
-    end)
-  end, { buffer = bufnr, silent = true, desc = 'Configure session tools' })
-
-  -- <M-a>: cycle permission mode interactive → approve-all → autopilot → interactive
-  local _perm_cycle = { 'interactive', 'approve-all', 'autopilot' }
-  vim.keymap.set({ 'n', 'i' }, '<M-a>', function()
-    local current = state.permission_mode or 'interactive'
-    local next_mode = 'interactive'
-    for i, m in ipairs(_perm_cycle) do
-      if m == current then
-        next_mode = _perm_cycle[(i % #_perm_cycle) + 1]
-        break
-      end
-    end
-    state.permission_mode = next_mode
-    if state.session_id then
-      request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = next_mode }, function(_, err)
-        if err then
-          notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
-        end
-      end)
-    end
-    refresh_statuslines()
-    notify('Permission mode: ' .. next_mode, vim.log.levels.INFO)
-  end, { buffer = bufnr, silent = true, desc = 'Cycle permission mode' })
-
-  -- Show help in a floating window (? in normal mode).
-  vim.keymap.set('n', '?', function()
-    local help_lines = {
-      ' Copilot Agent – Input Buffer Help ',
-      string.rep('─', 44),
-      '',
-      '  Submission',
-      '    <CR> / <C-s>   Send message',
-      '    q / <Esc>      Close input (normal mode)',
-      '',
-      '  Mode  (<C-t> to cycle)',
-      '    ask            Standard Q&A',
-      '    plan           Create an implementation plan',
-      '    agent          Autonomous agent mode',
-      '',
-      '  Model',
-      '    <M-m>          Open model picker',
-      '',
-      '  Permission  (<M-a> to cycle)',
-      '    🔐 interactive  Prompt for each tool use',
-      '    ✅ approve-all  Auto-approve everything',
-      '    🤖 autopilot    Approve + auto-answer inputs',
-      '',
-      '  Resources  (<C-a>)',
-      '    Current buffer, visual selection,',
-      '    file, folder, or instructions file',
-      '',
-      '  Tools',
-      '    <C-x>          Toggle session tools',
-      '',
-      '  Completion',
-      '    <Tab>          Trigger completion',
-      '    @<path>        Attach a file',
-      '    /<cmd>         Slash command',
-      '',
-      '  History',
-      '    <C-p> / <M-p>  Previous prompt',
-      '    <C-n> / <M-n>  Next prompt',
-      '',
-      '  Press any key to close',
-    }
-    local max_w = 0
-    for _, l in ipairs(help_lines) do
-      max_w = math.max(max_w, vim.fn.strdisplaywidth(l))
-    end
-    local win_h = #help_lines
-    local win_w = max_w + 2
-    local row = math.max(0, (vim.o.lines - win_h) / 2)
-    local col = math.max(0, (vim.o.columns - win_w) / 2)
-    local help_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(help_buf, 0, -1, false, help_lines)
-    vim.bo[help_buf].modifiable = false
-    local help_win = vim.api.nvim_open_win(help_buf, true, {
-      relative = 'editor',
-      row = row,
-      col = col,
-      width = win_w,
-      height = win_h,
-      style = 'minimal',
-      border = 'rounded',
-      title = ' Help ',
-      title_pos = 'center',
-    })
-    vim.wo[help_win].cursorline = false
-    -- Close on any keypress.
-    for _, key in ipairs({ '<Space>', '<CR>', '<Esc>', 'q', '?' }) do
-      vim.keymap.set('n', key, function()
-        vim.api.nvim_win_close(help_win, true)
-      end, { buffer = help_buf, silent = true, nowait = true })
-    end
-  end, { buffer = bufnr, silent = true, desc = 'Show input buffer help' })
+  -- History navigation replaces buffer content directly in input context.
+  vim.keymap.set({ 'n', 'i' }, '<C-p>', function()
+    navigate_prompt_history(-1)
+  end, { buffer = bufnr, silent = true, desc = 'Previous Copilot prompt' })
+  vim.keymap.set({ 'n', 'i' }, '<C-n>', function()
+    navigate_prompt_history(1)
+  end, { buffer = bufnr, silent = true, desc = 'Next Copilot prompt' })
+  vim.keymap.set({ 'n', 'i' }, '<M-p>', function()
+    navigate_prompt_history(-1)
+  end, { buffer = bufnr, silent = true, desc = 'Previous Copilot prompt' })
+  vim.keymap.set({ 'n', 'i' }, '<M-n>', function()
+    navigate_prompt_history(1)
+  end, { buffer = bufnr, silent = true, desc = 'Next Copilot prompt' })
 
   -- Set the initial prompt prefix to reflect the current mode.
   refresh_prompt()
@@ -1589,9 +1643,22 @@ local function create_input_buffer()
 end
 
 open_input_window = function()
+  local function apply_prefill()
+    if state.prompt_prefill and state.input_bufnr and vim.api.nvim_buf_is_valid(state.input_bufnr) then
+      local text = state.prompt_prefill
+      state.prompt_prefill = nil
+      vim.schedule(function()
+        vim.api.nvim_buf_set_lines(state.input_bufnr, 0, -1, false, { text })
+        vim.cmd('normal! $')
+        vim.cmd('startinsert!')
+      end)
+    end
+  end
+
   if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
     vim.api.nvim_set_current_win(state.input_winid)
     vim.cmd('startinsert')
+    apply_prefill()
     return
   end
 
@@ -1616,6 +1683,7 @@ open_input_window = function()
   refresh_statuslines()
 
   vim.cmd('startinsert')
+  apply_prefill()
 
   -- copilot.lua's default should_attach rejects buftype='prompt' and buflisted=false.
   -- Force-attach the LSP client directly so virtual-text suggestions work.

@@ -1,6 +1,6 @@
 # copilot-agent.nvim
 
-A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/copilot-sdk) to Neovim via a lightweight Go HTTP service. Persistent sessions, streamed responses, LSP code actions, and a rich input buffer — all without a heavy Lua HTTP dependency.
+A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/copilot-sdk) to Neovim via a lightweight Go HTTP service. Persistent sessions, streamed responses, LSP code actions, and a rich input buffer with SSE/HTTP.
 
 ---
 
@@ -39,7 +39,7 @@ flowchart TD
 
 The Go binary runs a **single process** that serves both the HTTP bridge (sessions, SSE, user-input, permissions) and an LSP server on stdio. Neovim starts it as an LSP client (`vim.lsp.start`), which owns the process lifetime. The Lua plugin communicates via `curl` shell-outs for all HTTP and SSE traffic.
 
-**Why curl?** Neovim has no built-in HTTP client. `vim.uv` (libuv) exposes raw TCP sockets but requires a manual HTTP/1.1 implementation — headers, chunked encoding, SSE framing — adding ~200 lines of fragile Lua for zero user-visible benefit. `curl` is universally available on macOS and Linux, handles SSE natively via a single persistent `jobstart()` process (no repeated spawning), and keeps the Lua layer thin and dependency-free. The per-request process-spawn overhead (~5–20 ms) is imperceptible against LLM response latency.
+**Why curl?** Neovim has no built-in HTTP client. `vim.uv` (libuv) exposes raw TCP sockets but requires a manual HTTP/1.1 implementation — headers, chunked encoding, SSE framing. `curl` is universally available on macOS and Linux, handles SSE natively, and keeps the Lua layer thin and dependency-free. The per-request process-spawn overhead (~5–20 ms) is imperceptible against LLM response latency.
 
 ---
 
@@ -62,7 +62,7 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 | ACP / MCP support         | ❌                                                    | ❌                        |
 | Custom agents / skills    | ✅                                                    | ❌                        |
 | SSE streaming             | ✅ native                                             | ✅                        |
-| Multi-provider            | ❌ (Copilot only)                                     | ✅ (provider_resolver)    |
+| Multi-provider            | ❌ (Copilot only, or Bring your own key)              | ✅ (provider_resolver)    |
 | Dependencies              | Go 1.24 + curl                                        | Pure Lua (plenary)        |
 
 **When to choose CopilotChat.nvim**: zero-binary Lua setup, just want Copilot chat with buffer context, happy with a Lua-managed tool loop.
@@ -71,9 +71,9 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 
 ---
 
-### vs ACP plugins (codecompanion.nvim, avante.nvim)
+### vs ACP plugins (codecompanion.nvim, avante.nvim in ACP mode)
 
-[**ACP (Agent Client Protocol)**](https://agentclientprotocol.com) is an open protocol that lets a Neovim plugin act as a client to any external CLI agent — Claude Code, Copilot CLI, Codex, Gemini CLI, Goose, and more. The plugin sends prompts and streams back results; the CLI agent owns the tool execution and agentic loop. Both codecompanion.nvim and avante.nvim support ACP, giving them access to the full capability of whichever CLI agent you point them at.
+[**ACP (Agent Client Protocol)**](https://agentclientprotocol.com) lets a Neovim plugin act as a client to any external CLI agent. it supported by Claude Code, Copilot CLI, Codex, Gemini CLI, Goose, and more. The plugin sends prompts and streams back results; the CLI agent owns the tool execution and agentic loop. Both codecompanion.nvim and avante.nvim support ACP, giving them access to the full capability of whichever CLI agent you point them at.
 
 Beyond ACP, these plugins also support direct LLM API calls (multi-provider adapters) and MCP (Model Context Protocol) tool servers, making them highly general-purpose.
 
@@ -108,7 +108,7 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 - Go 1.24+
 - `curl` on `PATH`
 - GitHub Copilot CLI runtime (`@github/copilot/index.js`) or access via `-cli-url`
-- Neovim 0.10+ (0.12 recommended for `nvim_open_win` split API)
+- Neovim 0.11+ (0.12+ recommended)
 
 ---
 
@@ -184,15 +184,15 @@ configures its HTTP client automatically — no manual `base_url` needed.
 
 **Flags:**
 
-| Flag         | Default      | Description                                  |
-| ------------ | ------------ | -------------------------------------------- |
-| `-addr`      | (free port)  | HTTP listen address; empty or `:0` → OS picks |
-| `-cwd`       | current dir  | Default working directory for sessions       |
-| `-model`     | (sdk default)| Default model for new sessions               |
-| `-cli-path`  | auto-detected| Path to Copilot CLI binary/JS entrypoint     |
-| `-cli-url`   | —            | URL of an already-running Copilot CLI server |
-| `-log-level` | —            | Copilot CLI log level                        |
-| `-lsp`       | `true`       | Start LSP server on stdio                    |
+| Flag         | Default       | Description                                   |
+| ------------ | ------------- | --------------------------------------------- |
+| `-addr`      | (free port)   | HTTP listen address; empty or `:0` → OS picks |
+| `-cwd`       | current dir   | Default working directory for sessions        |
+| `-model`     | (sdk default) | Default model for new sessions                |
+| `-cli-path`  | auto-detected | Path to Copilot CLI binary/JS entrypoint      |
+| `-cli-url`   | —             | URL of an already-running Copilot CLI server  |
+| `-log-level` | —             | Copilot CLI log level                         |
+| `-lsp`       | `true`        | Start LSP server on stdio                     |
 
 ---
 

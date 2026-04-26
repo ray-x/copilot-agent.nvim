@@ -647,7 +647,12 @@ render_chat = function()
   vim.bo[bufnr].modified = false
 
   lazy_scroll(bufnr)
-  notify_render_plugins(bufnr)
+  -- Only notify render-markdown once streaming is done. Calling rm.refresh()
+  -- on every delta causes the plugin to re-parse and re-decorate the entire
+  -- buffer at streaming speed, producing visible flickering and text jumps.
+  if not state.chat_busy then
+    notify_render_plugins(bufnr)
+  end
 end
 
 -- Debounced render: coalesces rapid calls (e.g. streaming deltas) to ~25fps.
@@ -681,7 +686,9 @@ local function stream_update(entry, idx)
     vim.bo[bufnr].readonly = true
     vim.bo[bufnr].modified = false
     lazy_scroll(bufnr)
-    notify_render_plugins(bufnr)
+    -- Do NOT call notify_render_plugins here — render-markdown refreshing on
+    -- every streaming delta is the primary cause of visual jumping. The final
+    -- render_chat() call (after turn_end) will trigger it once per turn.
   else
     -- First delta for this entry: do a full render to establish position, then cache.
     render_chat()

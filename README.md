@@ -2,6 +2,14 @@
 
 A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/copilot-sdk) to Neovim via a lightweight Go HTTP service. Persistent sessions, streamed responses, LSP code actions, and a rich input buffer with SSE/HTTP.
 
+## Cool features
+
+- Full agentic tool execution (file read/write, terminal, web search, ask user)
+- Granular permission management (interactive, approve-all, reject-all, autopilot)
+- Sub-agent streaming event
+- Custom agents and skill directories. Fully compatible with vscode copilot chat setup
+- LSP code actions
+
 ---
 
 ## Architecture

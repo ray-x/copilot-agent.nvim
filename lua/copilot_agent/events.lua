@@ -566,13 +566,33 @@ function M.start_event_stream(session_id)
     build_url(string.format('/sessions/%s/events?history=true', session_id)),
   }
 
+  -- Batch incoming SSE chunks to avoid flooding the Neovim event loop.
+  -- on_stdout fires for every curl output chunk (potentially hundreds/sec);
+  -- we accumulate chunks and drain them on a debounced timer.
+  local uv = vim.uv or vim.loop
+  local sse_batch = {}
+  local sse_batch_timer = uv.new_timer()
+  local sse_batch_pending = false
+  local SSE_BATCH_MS = 50
+
+  local function drain_sse_batch()
+    sse_batch_pending = false
+    local chunks = sse_batch
+    sse_batch = {}
+    for _, chunk in ipairs(chunks) do
+      handle_sse_chunk(chunk)
+    end
+  end
+
   state.events_job_id = vim.fn.jobstart(args, {
     stdout_buffered = false,
     stderr_buffered = false,
     on_stdout = function(_, data)
-      vim.schedule(function()
-        handle_sse_chunk(data)
-      end)
+      table.insert(sse_batch, data)
+      if not sse_batch_pending then
+        sse_batch_pending = true
+        sse_batch_timer:start(SSE_BATCH_MS, 0, vim.schedule_wrap(drain_sse_batch))
+      end
     end,
     on_stderr = function(_, data)
       if data and not vim.tbl_isempty(data) then
@@ -585,7 +605,17 @@ function M.start_event_stream(session_id)
       end
     end,
     on_exit = function(_, code)
+      -- Drain any remaining chunks before handling exit.
+      sse_batch_timer:stop()
+      pcall(function()
+        sse_batch_timer:close()
+      end)
       vim.schedule(function()
+        -- Process any remaining buffered chunks.
+        for _, chunk in ipairs(sse_batch) do
+          handle_sse_chunk(chunk)
+        end
+        sse_batch = {}
         state.events_job_id = nil
         if code ~= 0 and state.session_id == session_id then
           append_entry('error', 'Event stream stopped with exit code ' .. tostring(code))

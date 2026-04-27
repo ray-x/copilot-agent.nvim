@@ -257,6 +257,8 @@ function M.render_chat()
   end
 
   state.stream_line_start = nil
+  -- Cache the total rendered line count so incremental updates can use it.
+  state._rendered_line_count = #lines
 
   vim.bo[bufnr].modifiable = true
   vim.bo[bufnr].readonly = false
@@ -322,27 +324,23 @@ function M.stream_update(entry, idx)
         new_lines[1] = ''
       end
 
-      if state.stream_line_start then
-        local at_bottom = M.chat_at_bottom()
-        vim.bo[bufnr].modifiable = true
-        vim.bo[bufnr].readonly = false
-        vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, -1, false, new_lines)
-        vim.bo[bufnr].modifiable = false
-        vim.bo[bufnr].readonly = true
-        vim.bo[bufnr].modified = false
-        M.apply_chat_highlights(bufnr, state.stream_line_start)
-        if at_bottom then
-          M.scroll_to_bottom()
-        end
-      else
-        M.render_chat()
-        local offset = HEADER_LINES
-        for j = 1, i - 1 do
-          if state.entries[j] then
-            offset = offset + #M.entry_lines(state.entries[j], j)
-          end
-        end
-        state.stream_line_start = offset
+      if not state.stream_line_start then
+        -- First update for this entry: use cached line count or buffer line count
+        -- to find where to start appending — avoids a full render_chat().
+        local total = state._rendered_line_count or vim.api.nvim_buf_line_count(bufnr)
+        state.stream_line_start = total
+      end
+
+      local at_bottom = M.chat_at_bottom()
+      vim.bo[bufnr].modifiable = true
+      vim.bo[bufnr].readonly = false
+      vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, -1, false, new_lines)
+      vim.bo[bufnr].modifiable = false
+      vim.bo[bufnr].readonly = true
+      vim.bo[bufnr].modified = false
+      M.apply_chat_highlights(bufnr, state.stream_line_start)
+      if at_bottom then
+        M.scroll_to_bottom()
       end
     end)
   )
@@ -351,14 +349,41 @@ end
 -- ── Transcript helpers ────────────────────────────────────────────────────────
 
 function M.append_entry(kind, content, attachments)
-  table.insert(state.entries, {
+  local entry = {
     kind = kind,
     content = content or '',
     attachments = attachments,
-  })
+  }
+  table.insert(state.entries, entry)
+  local idx = #state.entries
   state.stream_line_start = nil
-  M.schedule_render()
-  return #state.entries
+
+  -- Try incremental append instead of full re-render.
+  local bufnr = state.chat_bufnr
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    local new_lines = M.entry_lines(entry, idx)
+    if #new_lines > 0 then
+      if kind == 'assistant' and not is_thinking_content(content) and M.should_merge_assistant(idx) then
+        new_lines[1] = ''
+      end
+      local at_bottom = M.chat_at_bottom()
+      local lc = vim.api.nvim_buf_line_count(bufnr)
+      vim.bo[bufnr].modifiable = true
+      vim.bo[bufnr].readonly = false
+      vim.api.nvim_buf_set_lines(bufnr, lc, -1, false, new_lines)
+      vim.bo[bufnr].modifiable = false
+      vim.bo[bufnr].readonly = true
+      vim.bo[bufnr].modified = false
+      M.apply_chat_highlights(bufnr, lc)
+      state._rendered_line_count = lc + #new_lines
+      if at_bottom then
+        M.scroll_to_bottom()
+      end
+    end
+  else
+    M.schedule_render()
+  end
+  return idx
 end
 
 function M.ensure_assistant_entry(message_id)

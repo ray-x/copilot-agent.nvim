@@ -113,7 +113,9 @@ function M.should_merge_assistant(idx)
     if e.kind ~= 'assistant' then
       return false
     end
-    if not is_thinking_content(e.content) then
+    -- Skip entries that are thinking-only or whitespace-only.
+    local trimmed = (e.content or ''):match('^%s*(.-)%s*$')
+    if not is_thinking_content(e.content) and trimmed ~= '' then
       return true
     end
   end
@@ -136,11 +138,15 @@ function M.entry_lines(entry, idx)
         out[#out + 1] = ''
       end
     else
-      out[#out + 1] = 'Assistant:'
-      for _, l in ipairs(split_lines(entry.content)) do
-        out[#out + 1] = '  ' .. l
+      -- Skip entries whose content is only whitespace after trimming.
+      local trimmed = (entry.content or ''):match('^%s*(.-)%s*$')
+      if trimmed ~= '' then
+        out[#out + 1] = 'Assistant:'
+        for _, l in ipairs(split_lines(entry.content)) do
+          out[#out + 1] = '  ' .. l
+        end
+        out[#out + 1] = ''
       end
-      out[#out + 1] = ''
     end
   else
     out[#out + 1] = 'User:'

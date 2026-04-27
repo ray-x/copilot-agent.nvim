@@ -24,6 +24,25 @@ local working_directory = service.working_directory
 
 local refresh_statuslines = sl.refresh_statuslines
 
+-- Debounced statusline refresh — avoids expensive redraws on every SSE token.
+local uv = vim.uv or vim.loop
+local _sl_timer = uv.new_timer()
+local _sl_pending = false
+local function debounced_refresh_statuslines()
+  if _sl_pending then
+    return
+  end
+  _sl_pending = true
+  _sl_timer:start(
+    200,
+    0,
+    vim.schedule_wrap(function()
+      _sl_pending = false
+      refresh_statuslines()
+    end)
+  )
+end
+
 local render_chat = render.render_chat
 local schedule_render = render.schedule_render
 local stream_update = render.stream_update
@@ -375,7 +394,7 @@ local function handle_session_event(payload)
 
   if event_type == 'assistant.message_delta' then
     state.chat_busy = true
-    refresh_statuslines()
+    debounced_refresh_statuslines()
     local key = data.messageId or ('assistant-' .. tostring(#state.entries + 1))
     local entry = ensure_assistant_entry(data.messageId)
     local delta = data.deltaContent or ''

@@ -15,7 +15,9 @@ local M = {}
 local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local HEADER_LINES = 5
 local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
-local RENDER_DEBOUNCE_MS = 40
+local RENDER_DEBOUNCE_MS = 150
+local STREAM_DEBOUNCE_MS = 80
+local SPINNER_INTERVAL_MS = 500
 
 local is_thinking_content = utils.is_thinking_content
 local split_lines = utils.split_lines
@@ -43,7 +45,7 @@ function M.start_thinking_spinner(entry_key)
   state.thinking_timer = timer
   timer:start(
     0,
-    100,
+    SPINNER_INTERVAL_MS,
     vim.schedule_wrap(function()
       if not state.thinking_timer then
         return
@@ -253,42 +255,65 @@ function M.schedule_render()
   vim.defer_fn(M.render_chat, RENDER_DEBOUNCE_MS)
 end
 
+-- Debounced stream update: buffers rapid token deltas instead of rendering each one.
+local stream_timer = uv.new_timer()
+local stream_pending = false
+
 function M.stream_update(entry, idx)
   if state.history_loading then
     return
   end
-  local bufnr = state.chat_bufnr
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+  -- Stash latest entry/idx so the deferred callback uses the most recent data.
+  state._stream_entry = entry
+  state._stream_idx = idx
+  if stream_pending then
     return
   end
-
-  local new_lines = M.entry_lines(entry, idx)
-  if entry.kind == 'assistant' and not is_thinking_content(entry.content) and M.should_merge_assistant(idx) and #new_lines > 0 then
-    new_lines[1] = ''
-  end
-
-  if state.stream_line_start then
-    local at_bottom = M.chat_at_bottom()
-    vim.bo[bufnr].modifiable = true
-    vim.bo[bufnr].readonly = false
-    vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, -1, false, new_lines)
-    vim.bo[bufnr].modifiable = false
-    vim.bo[bufnr].readonly = true
-    vim.bo[bufnr].modified = false
-    M.apply_chat_highlights(bufnr, state.stream_line_start)
-    if at_bottom then
-      M.scroll_to_bottom()
-    end
-  else
-    M.render_chat()
-    local offset = HEADER_LINES
-    for i = 1, idx - 1 do
-      if state.entries[i] then
-        offset = offset + #M.entry_lines(state.entries[i], i)
+  stream_pending = true
+  stream_timer:start(
+    STREAM_DEBOUNCE_MS,
+    0,
+    vim.schedule_wrap(function()
+      stream_pending = false
+      local e = state._stream_entry
+      local i = state._stream_idx
+      if not e or not i then
+        return
       end
-    end
-    state.stream_line_start = offset
-  end
+      local bufnr = state.chat_bufnr
+      if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+
+      local new_lines = M.entry_lines(e, i)
+      if e.kind == 'assistant' and not is_thinking_content(e.content) and M.should_merge_assistant(i) and #new_lines > 0 then
+        new_lines[1] = ''
+      end
+
+      if state.stream_line_start then
+        local at_bottom = M.chat_at_bottom()
+        vim.bo[bufnr].modifiable = true
+        vim.bo[bufnr].readonly = false
+        vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, -1, false, new_lines)
+        vim.bo[bufnr].modifiable = false
+        vim.bo[bufnr].readonly = true
+        vim.bo[bufnr].modified = false
+        M.apply_chat_highlights(bufnr, state.stream_line_start)
+        if at_bottom then
+          M.scroll_to_bottom()
+        end
+      else
+        M.render_chat()
+        local offset = HEADER_LINES
+        for j = 1, i - 1 do
+          if state.entries[j] then
+            offset = offset + #M.entry_lines(state.entries[j], j)
+          end
+        end
+        state.stream_line_start = offset
+      end
+    end)
+  )
 end
 
 -- ── Transcript helpers ────────────────────────────────────────────────────────

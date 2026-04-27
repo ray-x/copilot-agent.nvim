@@ -41,6 +41,7 @@ function M.start_thinking_spinner(entry_key)
   M.stop_thinking_spinner()
   state.thinking_entry_key = entry_key
   state.thinking_frame = 1
+  state._spinner_line = nil -- buffer row of the spinner text (0-indexed)
   local timer = uv.new_timer()
   state.thinking_timer = timer
   timer:start(
@@ -52,8 +53,33 @@ function M.start_thinking_spinner(entry_key)
       end
       state.thinking_frame = (state.thinking_frame % #SPINNER_FRAMES) + 1
       local bufnr = state.chat_bufnr
-      if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+      if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      local row = state._spinner_line
+      if row then
+        -- Fast path: just replace the single spinner line in-place.
+        local text = '  ' .. (SPINNER_FRAMES[state.thinking_frame] or '⠋') .. ' Thinking…'
+        pcall(function()
+          vim.bo[bufnr].modifiable = true
+          vim.bo[bufnr].readonly = false
+          vim.api.nvim_buf_set_lines(bufnr, row, row + 1, false, { text })
+          vim.bo[bufnr].modifiable = false
+          vim.bo[bufnr].readonly = true
+          vim.bo[bufnr].modified = false
+        end)
+      else
+        -- First tick: full render to place the spinner, then locate its row.
         pcall(M.render_chat)
+        -- Find the spinner line by scanning backward from the end.
+        local lc = vim.api.nvim_buf_line_count(bufnr)
+        for r = lc - 1, HEADER_LINES, -1 do
+          local line = vim.api.nvim_buf_get_lines(bufnr, r, r + 1, false)[1] or ''
+          if line:match('^  . Thinking…$') then
+            state._spinner_line = r
+            break
+          end
+        end
       end
     end)
   )

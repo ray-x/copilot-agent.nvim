@@ -29,6 +29,7 @@ local ensure_service_running = service.ensure_service_running
 local refresh_statuslines = sl.refresh_statuslines
 local append_entry = render.append_entry
 local clear_transcript = render.clear_transcript
+local schedule_render = render.schedule_render
 local show_user_input_picker = events.show_user_input_picker
 local discard_pending_attachments = session.discard_pending_attachments
 local disconnect_session = session.disconnect_session

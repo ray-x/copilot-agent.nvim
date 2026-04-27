@@ -71,3 +71,8 @@ The CLI backend is configured once at startup via `copilot.NewClient`. Sessions 
 - `host.*` events: `{ "timestamp": "...", "data": { ... } }`
 - `session.event` events: raw marshaled `copilot.SessionEvent` payloads
 - Keepalive comments (`: keepalive`) are sent every 15 seconds and should be ignored by the parser.
+
+## Git
+
+- Do not automatically commit changes
+- Do not add Co-authored-by trailers to commits

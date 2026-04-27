@@ -50,6 +50,67 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 
 **Why curl?** Neovim has no built-in HTTP client. `vim.uv` (libuv) exposes raw TCP sockets but requires a manual HTTP/1.1 implementation — headers, chunked encoding, SSE framing. `curl` is universally available on macOS and Linux, handles SSE natively, and keeps the Lua layer thin and dependency-free. The per-request process-spawn overhead (~5–20 ms) is imperceptible against LLM response latency.
 
+### Agent Tool Loop
+
+The agentic loop is what makes this plugin different from simple chat wrappers. The assistant doesn't just answer — it acts: reading files, running commands, writing code, and iterating until the task is done.
+
+```mermaid
+flowchart TD
+    User["👤 User sends prompt"] --> Send["Lua plugin POSTs\n/sessions/{id}/messages"]
+    Send --> SDK["Copilot SDK processes\nwith LLM"]
+
+    SDK --> Decision{LLM decides\nnext action}
+
+    Decision -->|"Text response"| Stream["SSE streams tokens\n→ chat buffer"]
+    Decision -->|"Tool call"| ToolReq["SDK requests tool use\n(read, write, shell, mcp, …)"]
+
+    ToolReq --> PermCheck{"Permission\nmode?"}
+
+    PermCheck -->|"approve-all / autopilot"| AutoApprove["Auto-approved ✅"]
+    PermCheck -->|"reject-all"| AutoReject["Auto-rejected 🚫"]
+    PermCheck -->|"interactive"| Prompt["Go → SSE → Lua\nhost.permission_requested"]
+
+    Prompt --> UISelect["vim.ui.select picker"]
+    UISelect -->|"Allow"| Approve["POST /permission/{id}\napproved: true"]
+    UISelect -->|"Deny"| Reject["POST /permission/{id}\napproved: false"]
+    UISelect -->|"Allow this dir"| AllowDir["Approve + /add-dir"]
+    UISelect -->|"Allow all"| AllowAll["Approve + switch to\napprove-all mode"]
+
+    Approve --> Execute
+    AllowDir --> Execute
+    AllowAll --> Execute
+    AutoApprove --> Execute
+    Reject --> SDK
+    AutoReject --> SDK
+
+    Execute["Tool executes\n(file I/O, terminal, web, …)"] --> Result["Result returned to SDK"]
+    Result --> SDK
+
+    Stream --> Render["Render in chat buffer\nwith treesitter highlights"]
+    Render --> Done{"Assistant says\nDone?"}
+    Done -->|"No — needs more tools"| SDK
+    Done -->|"Yes"| Complete["✅ Task complete\nUser can continue"]
+    Complete --> User
+
+    SDK -->|"ask_user"| AskUser["host.user_input_requested\n→ vim.ui.input/select"]
+    AskUser -->|"User answers"| AskReply["POST /user-input/{id}"]
+    AskReply --> SDK
+
+    style User fill:#4CAF50,color:#fff
+    style Complete fill:#4CAF50,color:#fff
+    style Stream fill:#2196F3,color:#fff
+    style Execute fill:#FF9800,color:#fff
+    style UISelect fill:#9C27B0,color:#fff
+    style AskUser fill:#9C27B0,color:#fff
+```
+
+**Key differentiators from simple chat plugins:**
+
+- **Real tool loop** — the LLM calls tools (read_file, write_file, terminal, web_search) and iterates autonomously until the task is complete
+- **Granular permission control** — interactive mode lets you approve/deny each tool call, with escalation options (allow directory, allow all) right in the picker
+- **ask_user integration** — the agent can ask clarifying questions mid-task via `vim.ui.input()` / `vim.ui.select()`
+- **Sub-agent streaming** — delegated sub-agents stream their progress in real-time
+
 ---
 
 ## Comparison with Alternatives

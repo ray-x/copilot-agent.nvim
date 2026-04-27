@@ -408,6 +408,14 @@ local function handle_session_event(payload)
     return
   end
 
+  if event_type == 'user.message' then
+    local content = type(data.content) == 'string' and data.content or ''
+    if content ~= '' then
+      append_entry('user', content)
+    end
+    return
+  end
+
   if event_type == 'assistant.message' then
     local entry = ensure_assistant_entry(data.messageId)
     if type(data.content) == 'string' and not is_thinking_content(data.content) then

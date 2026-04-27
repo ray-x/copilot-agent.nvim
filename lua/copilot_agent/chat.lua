@@ -274,16 +274,6 @@ function M.ensure_chat_window()
   vim.bo[bufnr].readonly = true
   vim.api.nvim_buf_set_name(bufnr, 'copilot-agent-chat')
 
-  -- Add chat-specific highlights on top of markdown treesitter.
-  -- syntax match rules coexist with treesitter and are viewport-based (zero cost).
-  vim.api.nvim_buf_call(bufnr, function()
-    vim.cmd([[
-      syntax match CopilotAgentUser /^User:$/
-      syntax match CopilotAgentAssistant /^Assistant:$/
-      syntax match CopilotAgentDone /^\s*Done\.$/
-    ]])
-  end)
-
   -- Open a vertical split window via the API — no throwaway buffer created.
   state.chat_winid = vim.api.nvim_open_win(bufnr, true, {
     split = 'right',

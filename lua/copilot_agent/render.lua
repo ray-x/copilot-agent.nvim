@@ -14,6 +14,7 @@ local M = {}
 
 local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local HEADER_LINES = 5
+local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
 local RENDER_DEBOUNCE_MS = 150
 local STREAM_DEBOUNCE_MS = 80
 local SPINNER_INTERVAL_MS = 500
@@ -76,6 +77,7 @@ function M.start_thinking_spinner(entry_key)
           vim.bo[bufnr].modifiable = true
           vim.bo[bufnr].readonly = false
           vim.api.nvim_buf_set_lines(bufnr, lc, -1, false, spinner_lines)
+          highlight_lines(bufnr, lc, lc + #spinner_lines)
           vim.bo[bufnr].modifiable = false
           vim.bo[bufnr].readonly = true
           vim.bo[bufnr].modified = false
@@ -151,6 +153,10 @@ function M.entry_lines(entry, idx)
       end
     end
   else
+    if idx > 1 then
+      out[#out + 1] = '---'
+      out[#out + 1] = ''
+    end
     out[#out + 1] = 'User:'
     for _, l in ipairs(split_lines(entry.content)) do
       out[#out + 1] = '  ' .. l
@@ -203,6 +209,24 @@ function M.scroll_to_bottom()
   end)
 end
 
+-- Highlight chat role headers using extmarks (works alongside treesitter).
+-- Only processes lines in [from_row, to_row); callers pass exact ranges
+-- so this never scans the full buffer.
+local function highlight_lines(bufnr, from_row, to_row)
+  vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, to_row)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, to_row, false)
+  for i, line in ipairs(lines) do
+    local row = from_row + i - 1
+    if line == 'User:' then
+      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentUser', row, 0, -1)
+    elseif line == 'Assistant:' then
+      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
+    elseif line:match('^%s*Done%.$') then
+      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
+    end
+  end
+end
+
 -- ── Full render ───────────────────────────────────────────────────────────────
 
 function M.render_chat()
@@ -253,6 +277,7 @@ function M.render_chat()
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
   vim.bo[bufnr].modified = false
+  highlight_lines(bufnr, 0, #lines)
   -- Refresh chat statusline via lazy require to avoid circular deps.
   local sl = require('copilot_agent.statusline')
   sl.refresh_chat_statusline()
@@ -321,6 +346,7 @@ function M.stream_update(entry, idx)
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
       vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, -1, false, new_lines)
+      highlight_lines(bufnr, state.stream_line_start, state.stream_line_start + #new_lines)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
       vim.bo[bufnr].modified = false
@@ -356,6 +382,7 @@ function M.append_entry(kind, content, attachments)
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
       vim.api.nvim_buf_set_lines(bufnr, lc, -1, false, new_lines)
+      highlight_lines(bufnr, lc, lc + #new_lines)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
       vim.bo[bufnr].modified = false

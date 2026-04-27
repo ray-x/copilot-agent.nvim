@@ -65,3 +65,7 @@ end, { desc = 'Paste image from clipboard and add as attachment to next Copilot 
 vim.api.nvim_create_user_command('CopilotAgentInstall', function()
   copilot_agent.install_binary()
 end, { desc = 'Download the pre-built copilot-agent binary for the current platform' })
+
+vim.api.nvim_create_user_command('CopilotAgentRetryInput', function()
+  copilot_agent.retry_input()
+end, { desc = 'Re-show the last dismissed ask_user prompt' })

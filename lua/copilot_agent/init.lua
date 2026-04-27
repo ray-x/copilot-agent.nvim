@@ -110,6 +110,7 @@ local state = {
   render_pending = false, -- true when a debounced render is scheduled
   stream_line_start = nil, -- 0-based buf line where current streaming entry content begins
   history_loading = false, -- true while replaying SSE history; suppresses render until done
+  pending_user_input = nil, -- last unanswered ask_user request (for retry on dismiss)
 }
 
 -- Static list of slash commands supported by the Copilot CLI backend.
@@ -2076,7 +2077,7 @@ local function on_session_ready(session_id, err)
   state.pending_session_callbacks = {}
 end
 
-local function handle_user_input(payload)
+local function show_user_input_picker(payload)
   local request_payload = payload and payload.data and payload.data.request or nil
   if type(request_payload) ~= 'table' or type(request_payload.id) ~= 'string' then
     return
@@ -2090,6 +2091,7 @@ local function handle_user_input(payload)
     if value == nil or value == '' then
       return
     end
+    state.pending_user_input = nil
     append_entry('user', value)
     request('POST', string.format('/sessions/%s/user-input/%s', session_id, request_payload.id), {
       answer = value,
@@ -2103,11 +2105,13 @@ local function handle_user_input(payload)
 
   local function ask_freeform()
     vim.ui.input({ prompt = request_payload.question .. ' ' }, function(input)
+      if input == nil or input == '' then
+        notify('Input dismissed — use :CopilotAgentRetryInput to try again', vim.log.levels.WARN)
+        return
+      end
       answer(input, true)
     end)
   end
-
-  append_entry('system', 'Input requested: ' .. request_payload.question)
 
   if #choices > 0 then
     local items = vim.deepcopy(choices)
@@ -2116,6 +2120,7 @@ local function handle_user_input(payload)
     end
     vim.ui.select(items, { prompt = request_payload.question }, function(choice)
       if choice == nil then
+        notify('Selection dismissed — use :CopilotAgentRetryInput to try again', vim.log.levels.WARN)
         return
       end
       if choice == 'Custom...' then
@@ -2130,6 +2135,19 @@ local function handle_user_input(payload)
   if allow_freeform then
     ask_freeform()
   end
+end
+
+local function handle_user_input(payload)
+  local request_payload = payload and payload.data and payload.data.request or nil
+  if type(request_payload) ~= 'table' or type(request_payload.id) ~= 'string' then
+    return
+  end
+
+  -- Store for retry if dismissed.
+  state.pending_user_input = payload
+
+  append_entry('system', 'Input requested: ' .. request_payload.question)
+  show_user_input_picker(payload)
 end
 
 local function handle_host_event(event_name, payload)
@@ -2337,6 +2355,7 @@ local function handle_host_event(event_name, payload)
     refresh_statuslines()
   elseif event_name == 'host.session_disconnected' then
     state.session_name = nil
+    state.pending_user_input = nil
     append_entry('system', 'Session disconnected')
   elseif event_name == 'host.history_done' then
     state.history_loading = false
@@ -3241,6 +3260,14 @@ function M.stop(delete_state)
     end
     append_entry('system', 'Disconnected session ' .. session_id)
   end)
+end
+
+function M.retry_input()
+  if not state.pending_user_input then
+    notify('No pending input request to retry', vim.log.levels.INFO)
+    return
+  end
+  show_user_input_picker(state.pending_user_input)
 end
 
 function M.status()

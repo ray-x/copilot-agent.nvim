@@ -2247,14 +2247,20 @@ local function handle_host_event(event_name, payload)
               end
             end)
           elseif choice:match('^Allow this directory') then
-            -- Approve this request, then send /add-dir as a user message.
+            -- Approve this request, then send /add-dir via the captured session.
             request('POST', '/sessions/' .. sid .. '/permission/' .. req_id, { approved = true }, function(_, err)
               if err then
                 notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
               end
             end)
-            if dir_path then
-              M.ask('/add-dir ' .. dir_path)
+            if dir_path and sid then
+              request('POST', '/sessions/' .. sid .. '/messages', { message = '/add-dir ' .. dir_path }, function(_, add_err)
+                if add_err then
+                  notify('Failed to add directory: ' .. tostring(add_err), vim.log.levels.WARN)
+                else
+                  notify('Added directory: ' .. dir_path, vim.log.levels.INFO)
+                end
+              end)
             end
           else
             local approved = (choice == 'Allow')
@@ -2896,6 +2902,7 @@ function M.switch_session()
       local previous_session_id = state.session_id
       state.session_id = nil
       state.session_name = nil
+      state.creating_session = true
       discard_pending_attachments()
       clear_transcript()
       ensure_chat_window()

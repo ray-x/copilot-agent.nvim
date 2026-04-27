@@ -173,6 +173,14 @@ optional — defaults are shown below: >lua
     Disconnect the current session and create a fresh one in the same
     working directory.
 
+                                                  *:CopilotAgentSwitchSession*
+:CopilotAgentSwitchSession
+    Show a picker of all persisted sessions (across all projects) and
+    switch to the selected one. Sessions are listed newest-first with
+    their auto-generated summary. The active session is marked with ●.
+    A "New session" option is available at the bottom of the list.
+    Rename the current session with the `/rename` slash command.
+
                                                   *:CopilotAgentModel*
 :CopilotAgentModel [id]
     Switch to model [id]. Without argument, opens an interactive picker.
@@ -315,6 +323,13 @@ buffer, or set via |copilot-agent-setup| or `POST /sessions/{id}/permission-mode
   autopilot     approve-all + auto-answer ask_user requests (🤖)
   reject-all    Reject all tool uses — safe read-only mode (🚫)
 
+In interactive mode, each permission prompt offers additional options:
+
+  Allow                    Approve this single request
+  Deny                     Reject this single request
+  Allow this directory     Approve + whitelist the directory (read/write only)
+  Allow all for session    Approve + switch to approve-all for the rest
+
 The current mode is shown by |copilot-agent-statusline| functions.
 
 ==============================================================================
@@ -339,9 +354,14 @@ automatically when there is only one matching session. With multiple sessions
 and `auto_resume = "prompt"`, a picker lets you choose which to
 resume.
 
-  :CopilotAgentNewSession   Start a fresh session in the same directory
-  :CopilotAgentStop         Disconnect (session state persisted on disk)
-  :CopilotAgentStop!        Disconnect and delete all persisted state
+  :CopilotAgentNewSession       Start a fresh session in the same directory
+  :CopilotAgentSwitchSession    Pick from all persisted sessions and switch
+  :CopilotAgentStop             Disconnect (session state persisted on disk)
+  :CopilotAgentStop!            Disconnect and delete all persisted state
+
+Sessions are auto-named by the SDK after the first conversation turn. You
+can rename a session by typing `/rename My Session Name` in the input
+buffer.
 
 The session ID is shown in the chat buffer header and by
 |copilot-agent-statusline|.
@@ -614,6 +634,10 @@ open_chat()                               *copilot-agent.open_chat()*
 
 new_session()                             *copilot-agent.new_session()*
   Disconnect the current session and start a fresh one.
+
+switch_session()                          *copilot-agent.switch_session()*
+  Show a picker of all persisted sessions and switch to the selected one.
+  See |:CopilotAgentSwitchSession|.
 
 ask({prompt}, {opts})                     *copilot-agent.ask()*
   Send {prompt} to the active session. {opts} may include:

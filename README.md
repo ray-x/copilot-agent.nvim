@@ -262,6 +262,7 @@ configures its HTTP client automatically — no manual `base_url` needed.
 | `:CopilotAgentChat`         | Open the chat buffer (creates session if needed)           |
 | `:CopilotAgentAsk [prompt]` | Send a prompt; no argument opens `vim.ui.input()`          |
 | `:CopilotAgentNewSession`   | Disconnect current session and start a fresh one           |
+| `:CopilotAgentSwitchSession` | Pick from all persisted sessions and switch               |
 | `:CopilotAgentModel [id]`   | Pick or set a model; tab-completes from service model list |
 | `:CopilotAgentStart`        | Manually start the Go service                              |
 | `:CopilotAgentStop`         | Disconnect the active session                              |
@@ -408,7 +409,9 @@ require("lualine").setup {
 
 ## Session Persistence
 
-Sessions are scoped per project: `pick_or_create_session` filters persisted sessions by working directory, so opening a different project starts a fresh session. Use `:CopilotAgentNewSession` to force a new one in the same directory.
+Sessions are scoped per project: `pick_or_create_session` filters persisted sessions by working directory, so opening a different project starts a fresh session. Use `:CopilotAgentNewSession` to force a new one in the same directory, or `:CopilotAgentSwitchSession` to pick from all persisted sessions across projects.
+
+Sessions are auto-named by the SDK after the first conversation turn. You can rename a session by typing `/rename My Session Name` in the input buffer.
 
 **Session selection behaviour:**
 

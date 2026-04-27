@@ -8,6 +8,13 @@ local service = require('copilot_agent.service')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 
+-- Register markdown treesitter parser for our custom chat filetype.
+-- This gives us full markdown highlighting plus custom rules from
+-- queries/copilot_agent_chat/highlights.scm.
+pcall(function()
+  vim.treesitter.language.register('markdown', 'copilot_agent_chat')
+end)
+
 local state = cfg.state
 local notify = cfg.notify
 
@@ -269,21 +276,10 @@ function M.ensure_chat_window()
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].bufhidden = 'hide'
   vim.bo[bufnr].swapfile = false
-  vim.bo[bufnr].filetype = 'markdown'
+  vim.bo[bufnr].filetype = 'copilot_agent_chat'
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
   vim.api.nvim_buf_set_name(bufnr, 'copilot-agent-chat')
-
-  -- Use Vim syntax rules for chat highlights instead of per-line Lua scans.
-  -- Syntax highlighting is viewport-based (only visible lines), so it's free
-  -- regardless of buffer size.
-  vim.api.nvim_buf_call(bufnr, function()
-    vim.cmd([[
-      syntax match CopilotAgentUser /^User:$/
-      syntax match CopilotAgentAssistant /^Assistant:$/
-      syntax match CopilotAgentDone /^\s*Done\.$/
-    ]])
-  end)
 
   -- Open a vertical split window via the API — no throwaway buffer created.
   state.chat_winid = vim.api.nvim_open_win(bufnr, true, {

@@ -91,6 +91,34 @@ function M.service_command()
   return value
 end
 
+-- Path where the bound service address is persisted across Neovim sessions.
+local function addr_state_file()
+  return vim.fn.stdpath('state') .. '/copilot-agent.addr'
+end
+
+local function save_service_addr(addr)
+  pcall(function()
+    local f = io.open(addr_state_file(), 'w')
+    if f then
+      f:write(addr)
+      f:close()
+    end
+  end)
+end
+
+local function load_service_addr()
+  local ok, data = pcall(function()
+    local f = io.open(addr_state_file(), 'r')
+    if not f then
+      return nil
+    end
+    local v = f:read('*l')
+    f:close()
+    return v
+  end)
+  return ok and data or nil
+end
+
 function M.remember_service_output(data)
   if not data then
     return
@@ -101,6 +129,7 @@ function M.remember_service_output(data)
       if addr then
         state.config.base_url = 'http://' .. addr
         state.service_addr_known = true
+        save_service_addr(addr)
       end
       table.insert(state.service_output, line)
     end
@@ -170,6 +199,17 @@ function M.ensure_service_running(callback)
   state.service_output = {}
   state.service_addr_known = false
 
+  -- Restore the address from a previous (detached) session so the health check
+  -- hits the right port even when port_range is set.
+  local saved_addr = load_service_addr()
+  if saved_addr and saved_addr ~= '' then
+    local current = state.config.base_url or ''
+    -- Only restore if the user has not explicitly configured a different base_url.
+    if current == '' or current == 'http://' .. (defaults.base_url or '') or current == defaults.base_url then
+      state.config.base_url = 'http://' .. saved_addr
+    end
+  end
+
   http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, health_err, status)
     if health_err == nil and status and status < 400 then
       finish(nil)
@@ -201,6 +241,7 @@ function M.ensure_service_running(callback)
     local service_job_id = vim.fn.jobstart(command, {
       cwd = M.service_cwd(),
       env = state.config.service.env,
+      detach = state.config.service.detach and 1 or 0,
       stdout_buffered = false,
       stderr_buffered = false,
       on_stdout = function(_, data)

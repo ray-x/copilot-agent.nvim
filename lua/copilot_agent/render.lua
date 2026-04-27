@@ -249,7 +249,13 @@ local function align_tables(lines)
   return out
 end
 
-function M.entry_lines(entry, idx)
+-- entry_lines: format one entry into a list of display lines.
+-- align: when true (default), apply align_tables. Pass false during streaming
+--        to skip the O(n) table scan on every incremental update.
+function M.entry_lines(entry, idx, align)
+  if align == nil then
+    align = true
+  end
   local out = {}
   if entry.kind == 'system' or entry.kind == 'error' then
     out[#out + 1] = (entry.kind == 'error' and 'Error' or 'System') .. ':'
@@ -291,7 +297,7 @@ function M.entry_lines(entry, idx)
     end
     out[#out + 1] = ''
   end
-  return align_tables(out)
+  return align and align_tables(out) or out
 end
 
 -- ── Scroll helpers ────────────────────────────────────────────────────────────
@@ -464,7 +470,7 @@ function M.stream_update(entry, idx)
         return
       end
 
-      local new_lines = M.entry_lines(e, i)
+      local new_lines = M.entry_lines(e, i, false) -- skip align_tables during streaming
       if e.kind == 'assistant' and not is_thinking_content(e.content) and M.should_merge_assistant(i) and #new_lines > 0 then
         new_lines[1] = ''
       end

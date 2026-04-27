@@ -24,8 +24,19 @@ local scroll_to_bottom = render.scroll_to_bottom
 
 local M = {}
 
-local input_modes = { 'ask', 'plan', 'agent' }
+local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
 local _perm_cycle = { 'interactive', 'approve-all', 'autopilot' }
+
+-- Natural permission mode for each input mode, mirroring VS Code behaviour:
+--   ask/plan  → interactive  (tools need explicit approval; plan rarely uses tools)
+--   agent     → interactive  (tools run but Neovim prompts per tool — VS Code agent)
+--   autopilot → approve-all  (tools auto-approved, no prompts — VS Code autopilot)
+local _mode_permission = {
+  ask = 'interactive',
+  plan = 'interactive',
+  agent = 'interactive',
+  autopilot = 'approve-all',
+}
 
 -- Open a fuzzy-finder to pick one or more files/directories.
 -- opts.prompt  string  prompt title
@@ -303,6 +314,10 @@ function M.ensure_chat_window()
     end
   end, { buffer = bufnr, silent = true })
 
+  vim.keymap.set('n', '<C-c>', function()
+    require('copilot_agent').cancel()
+  end, { buffer = bufnr, silent = true, desc = 'Cancel the current Copilot turn' })
+
   vim.keymap.set('n', 'R', function()
     render_chat()
   end, { buffer = bufnr, silent = true })
@@ -373,7 +388,7 @@ function M.setup_action_keymaps(bufnr)
     end, { buffer = bufnr, silent = true, desc = dir < 0 and 'Previous prompt' or 'Next prompt' })
   end
 
-  -- Cycle input mode (ask / plan / agent).
+  -- Cycle input mode (ask / plan / agent / autopilot) and apply its natural permission mode.
   vim.keymap.set({ 'n', 'i' }, '<C-t>', function()
     local idx = 1
     for i, m in ipairs(input_modes) do
@@ -382,11 +397,26 @@ function M.setup_action_keymaps(bufnr)
         break
       end
     end
-    state.input_mode = input_modes[(idx % #input_modes) + 1]
-    M.set_agent_mode(state.input_mode)
+    local new_mode = input_modes[(idx % #input_modes) + 1]
+    state.input_mode = new_mode
+    M.set_agent_mode(new_mode)
+
+    -- Apply the natural permission mode for this input mode.
+    local natural_perm = _mode_permission[new_mode]
+    if natural_perm and natural_perm ~= state.permission_mode then
+      state.permission_mode = natural_perm
+      if state.session_id then
+        request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)
+          if err then
+            notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+          end
+        end)
+      end
+    end
+
     refresh_statuslines()
-    notify('Mode: ' .. state.input_mode, vim.log.levels.INFO)
-  end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent)' })
+    notify('Mode: ' .. new_mode, vim.log.levels.INFO)
+  end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent/autopilot)' })
 
   -- Quick model switch.
   vim.keymap.set({ 'n', 'i' }, '<M-m>', function()

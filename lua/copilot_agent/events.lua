@@ -374,8 +374,14 @@ local function handle_session_event(payload)
   local data = payload and payload.data or {}
 
   if event_type == 'assistant.message_delta' then
+    -- Only redraw statuslines on the busy state *transition* (false→true).
+    -- Calling refresh_statuslines() on every token (potentially 50+/sec)
+    -- causes continuous Neovim statusline redraws and is a primary CPU hotspot.
+    local was_busy = state.chat_busy
     state.chat_busy = true
-    refresh_statuslines()
+    if not was_busy then
+      refresh_statuslines()
+    end
     local key = data.messageId or ('assistant-' .. tostring(#state.entries + 1))
     local entry = ensure_assistant_entry(data.messageId)
     local delta = data.deltaContent or ''

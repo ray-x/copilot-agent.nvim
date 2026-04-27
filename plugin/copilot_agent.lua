@@ -50,6 +50,10 @@ end, {
   desc = 'Disconnect the active Copilot Go session',
 })
 
+vim.api.nvim_create_user_command('CopilotAgentCancel', function()
+  copilot_agent.cancel()
+end, { desc = 'Cancel the current in-progress Copilot turn (abort mid-stream)' })
+
 vim.api.nvim_create_user_command('CopilotAgentStatus', function()
   copilot_agent.status()
 end, { desc = 'Show Copilot Go session state' })

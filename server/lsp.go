@@ -169,7 +169,11 @@ func (s *lspServer) serve(ctx context.Context) error {
 			if err == io.EOF {
 				return nil
 			}
-			return fmt.Errorf("read LSP message: %w", err)
+			// Soft protocol errors (e.g. a stray newline with no Content-Length
+			// sent by Neovim during startup) should not kill the server — just
+			// log and keep reading.
+			log.Printf("lsp server: skipping malformed message: %v", err)
+			continue
 		}
 
 		go s.handleMessage(ctx, msg)

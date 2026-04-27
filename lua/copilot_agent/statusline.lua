@@ -9,8 +9,17 @@ local state = cfg.state
 
 local M = {}
 
+local _mode_icon = {
+  ask = '💬',
+  plan = '📋',
+  agent = '🤖',
+  autopilot = '🚀',
+}
+
 function M.statusline_mode()
-  return '[' .. (state.input_mode or 'agent') .. ']'
+  local mode = state.input_mode or 'agent'
+  local icon = _mode_icon[mode] or ''
+  return icon .. mode
 end
 
 function M.statusline_model()
@@ -91,32 +100,40 @@ local function build_parts(...)
 end
 
 function M.statusline_component()
-  return table.concat(build_parts(
-    M.statusline_mode(),
-    M.statusline_busy(),
-    M.statusline_model(),
-    M.statusline_tool(),
-    M.statusline_intent(),
-    M.statusline_context(),
-    M.statusline_permission(),
-    M.statusline_attachments()
-  ), ' ')
+  return table.concat(
+    build_parts(
+      M.statusline_mode(),
+      M.statusline_busy(),
+      M.statusline_model(),
+      M.statusline_tool(),
+      M.statusline_intent(),
+      M.statusline_context(),
+      M.statusline_permission(),
+      M.statusline_attachments()
+    ),
+    ' '
+  )
 end
 
 function M.refresh_input_statusline()
   if not state.input_winid or not vim.api.nvim_win_is_valid(state.input_winid) then
     return
   end
-  local line = ' ' .. table.concat(build_parts(
-    M.statusline_mode(),
-    M.statusline_busy(),
-    M.statusline_model(),
-    M.statusline_tool(),
-    M.statusline_intent(),
-    M.statusline_context(),
-    M.statusline_permission(),
-    M.statusline_attachments()
-  ), '  ') .. '  (? for help)'
+  local line = ' '
+    .. table.concat(
+      build_parts(
+        M.statusline_mode(),
+        M.statusline_busy(),
+        M.statusline_model(),
+        M.statusline_tool(),
+        M.statusline_intent(),
+        M.statusline_context(),
+        M.statusline_permission(),
+        M.statusline_attachments()
+      ),
+      '  '
+    )
+    .. '  (? for help)'
   vim.wo[state.input_winid].statusline = line
 end
 
@@ -132,22 +149,29 @@ function M.refresh_chat_statusline()
       session_label = '#' .. state.session_id:sub(1, 8)
     end
   end
-  local line = ' ' .. table.concat(build_parts(
-    M.statusline_mode(),
-    M.statusline_busy(),
-    M.statusline_model(),
-    M.statusline_tool(),
-    M.statusline_intent(),
-    M.statusline_context(),
-    M.statusline_permission(),
-    session_label
-  ), '  ')
+  local line = ' '
+    .. table.concat(
+      build_parts(M.statusline_mode(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), M.statusline_permission(), session_label),
+      '  '
+    )
   vim.wo[state.chat_winid].statusline = line
 end
 
+local _sl_timer = nil
+local _sl_pending = false
+
 function M.refresh_statuslines()
-  M.refresh_input_statusline()
-  M.refresh_chat_statusline()
+  if _sl_pending then
+    return
+  end
+  _sl_pending = true
+  -- Debounce: at most one statusline redraw per 100 ms.
+  _sl_timer = vim.defer_fn(function()
+    _sl_pending = false
+    _sl_timer = nil
+    M.refresh_input_statusline()
+    M.refresh_chat_statusline()
+  end, 100)
 end
 
 return M

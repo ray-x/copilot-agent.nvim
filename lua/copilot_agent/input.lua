@@ -32,7 +32,21 @@ local setup_action_keymaps = chat.setup_action_keymaps
 
 local M = {}
 
-local input_modes = { 'ask', 'plan', 'agent' }
+local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
+
+local _mode_permission = {
+  ask = 'interactive',
+  plan = 'interactive',
+  agent = 'interactive',
+  autopilot = 'approve-all',
+}
+
+local _mode_icon = {
+  ask = '💬',
+  plan = '📋',
+  agent = '🤖',
+  autopilot = '🚀',
+}
 
 local function create_input_buffer()
   local bufnr = vim.api.nvim_create_buf(false, true)
@@ -48,7 +62,9 @@ local function create_input_buffer()
   vim.b[bufnr].copilot_enabled = true
 
   local function prompt_prefix()
-    return (state.input_mode or 'agent') .. '❯ '
+    local mode = state.input_mode or 'agent'
+    local icon = _mode_icon[mode] or ''
+    return icon .. mode .. '❯ '
   end
 
   local function refresh_prompt()
@@ -136,7 +152,7 @@ local function create_input_buffer()
     state.prompt_history_index = nil
     state.prompt_history_draft = ''
     -- Re-apply the prompt prefix (cleared by buf_set_lines).
-    vim.fn.prompt_setprompt(bufnr, (state.input_mode or 'agent') .. '❯ ')
+    vim.fn.prompt_setprompt(bufnr, prompt_prefix())
     vim.cmd('startinsert')
     if text ~= '' then
       local attachments = vim.deepcopy(state.pending_attachments)
@@ -176,11 +192,28 @@ local function create_input_buffer()
         break
       end
     end
-    state.input_mode = input_modes[(idx % #input_modes) + 1]
-    set_agent_mode(state.input_mode)
+    local new_mode = input_modes[(idx % #input_modes) + 1]
+    state.input_mode = new_mode
+    set_agent_mode(new_mode)
+
+    -- Apply the natural permission mode for this input mode.
+    local natural_perm = _mode_permission[new_mode]
+    if natural_perm and natural_perm ~= state.permission_mode then
+      state.permission_mode = natural_perm
+      if state.session_id then
+        local request = require('copilot_agent.http').request
+        request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)
+          if err then
+            cfg.notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+          end
+        end)
+      end
+    end
+
     refresh_prompt()
+    require('copilot_agent.statusline').refresh_statuslines()
     vim.cmd('startinsert!')
-  end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent)' })
+  end, { buffer = bufnr, silent = true, desc = 'Cycle Copilot input mode (ask/plan/agent/autopilot)' })
   -- History navigation replaces buffer content directly in input context.
   vim.keymap.set({ 'n', 'i' }, '<C-p>', function()
     navigate_prompt_history(-1)

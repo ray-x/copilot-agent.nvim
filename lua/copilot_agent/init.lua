@@ -369,6 +369,23 @@ function M.stop(delete_state)
   end)
 end
 
+function M.cancel()
+  if not state.session_id then
+    notify('No active session to cancel', vim.log.levels.WARN)
+    return
+  end
+  request('POST', '/sessions/' .. state.session_id .. '/abort', {}, function(_, err)
+    if err then
+      append_entry('error', 'Cancel failed: ' .. err)
+      return
+    end
+    state.chat_busy = false
+    refresh_statuslines()
+    append_entry('system', 'Turn cancelled')
+    schedule_render()
+  end)
+end
+
 function M.retry_input()
   if not state.pending_user_input then
     notify('No pending input request to retry', vim.log.levels.INFO)

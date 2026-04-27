@@ -20,6 +20,11 @@ local defaults = {
     cwd = nil, -- defaults to <plugin_root>/server
     env = nil,
     port_range = nil, -- e.g. '18000-19000'; appended as --port-range when set
+    -- detach: run the Go service in a new process group (setsid) so it survives
+    -- Neovim exit. On the next launch the health check finds it still running and
+    -- skips the start-up delay. The bound address is persisted to a state file so
+    -- dynamic-port setups also reconnect correctly.
+    detach = true,
     healthcheck_path = '/healthz',
     startup_timeout_ms = 15000,
     startup_poll_interval_ms = 250,

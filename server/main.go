@@ -246,6 +246,7 @@ func main() {
 	mux.HandleFunc("POST /sessions/{id}/user-input/{requestID}", svc.handleAnswerUserInput)
 	mux.HandleFunc("POST /sessions/{id}/permission/{requestID}", svc.handleAnswerPermission)
 	mux.HandleFunc("POST /sessions/{id}/permission-mode", svc.handleSetPermissionMode)
+	mux.HandleFunc("POST /sessions/{id}/abort", svc.handleAbortSession)
 	mux.HandleFunc("POST /sessions/{id}/tools", svc.handleSetTools)
 
 	// Resolve listen address. When -addr is not set, honour -port-range if
@@ -585,6 +586,20 @@ func (s *service) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+func (s *service) handleAbortSession(w http.ResponseWriter, r *http.Request) {
+	managed, ok := s.getManagedSession(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session is not attached to this service")
+		return
+	}
+	if err := managed.session.Abort(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("abort: %v", err))
+		return
+	}
+	managed.broadcastHostEvent("host.turn_aborted", map[string]any{"sessionId": r.PathValue("id")})
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 }
 
 func (s *service) handleSendMessage(w http.ResponseWriter, r *http.Request) {

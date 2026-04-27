@@ -126,6 +126,129 @@ function M.should_merge_assistant(idx)
   return false
 end
 
+-- Align markdown table columns in a list of lines.
+-- Detects consecutive pipe-delimited rows, computes max width per column,
+-- then pads each cell. Handles display-width for multibyte/emoji.
+local function align_tables(lines)
+  local out = {}
+  local i = 1
+  local n = #lines
+
+  -- Check if a line is a markdown table row (starts with optional whitespace then |)
+  local function is_table_row(line)
+    return line:match('^%s*|') ~= nil
+  end
+
+  -- Parse cells from a table row, trimming whitespace.
+  local function parse_cells(line)
+    -- Strip leading/trailing pipe
+    local inner = line:match('^%s*|(.+)|%s*$')
+    if not inner then
+      return nil
+    end
+    local raw = vim.split(inner, '|', { plain = true })
+    local cells = {}
+    for _, cell in ipairs(raw) do
+      cells[#cells + 1] = cell:match('^%s*(.-)%s*$') or ''
+    end
+    return cells
+  end
+
+  -- Check if a row is a separator (all cells are dashes/colons like ---, :--:, ---:)
+  local function is_separator_row(cells)
+    for _, c in ipairs(cells) do
+      if not c:match('^:?%-+:?$') then
+        return false
+      end
+    end
+    return true
+  end
+
+  -- Display width accounting for multibyte characters and concealed backticks.
+  -- At conceallevel=2, treesitter conceals backticks in inline code spans,
+  -- so they occupy zero display width.
+  local strdisplaywidth = vim.fn.strdisplaywidth
+  local function cell_width(text)
+    local w = strdisplaywidth(text)
+    -- Subtract width of backticks that treesitter will conceal.
+    local _, backtick_count = text:gsub('`', '')
+    return w - backtick_count
+  end
+
+  while i <= n do
+    if is_table_row(lines[i]) then
+      -- Collect the full table block.
+      local block_start = i
+      local rows = {} -- { cells = {...}, is_sep = bool, indent = str }
+      while i <= n and is_table_row(lines[i]) do
+        local indent = lines[i]:match('^(%s*)') or ''
+        local cells = parse_cells(lines[i])
+        if not cells then
+          break
+        end
+        local sep = is_separator_row(cells)
+        rows[#rows + 1] = { cells = cells, is_sep = sep, indent = indent }
+        i = i + 1
+      end
+
+      if #rows < 2 then
+        -- Not really a table, emit as-is.
+        for _, row in ipairs(rows) do
+          out[#out + 1] = lines[block_start]
+          block_start = block_start + 1
+        end
+      else
+        -- Compute max column count and widths.
+        local max_cols = 0
+        for _, row in ipairs(rows) do
+          if #row.cells > max_cols then
+            max_cols = #row.cells
+          end
+        end
+
+        local col_widths = {}
+        for c = 1, max_cols do
+          col_widths[c] = 0
+        end
+        for _, row in ipairs(rows) do
+          if not row.is_sep then
+            for c = 1, max_cols do
+              local cell = row.cells[c] or ''
+              local w = cell_width(cell)
+              if w > col_widths[c] then
+                col_widths[c] = w
+              end
+            end
+          end
+        end
+
+        -- Rebuild each row with padded cells.
+        for _, row in ipairs(rows) do
+          local parts = {}
+          for c = 1, max_cols do
+            local cell = row.cells[c] or ''
+            if row.is_sep then
+              -- Rebuild separator to match column width.
+              local prefix = cell:sub(1, 1) == ':' and ':' or ''
+              local suffix = cell:sub(-1) == ':' and ':' or ''
+              local dash_count = math.max(3, col_widths[c] - #prefix - #suffix)
+              parts[#parts + 1] = prefix .. string.rep('-', dash_count) .. suffix
+            else
+              local pad = col_widths[c] - cell_width(cell)
+              parts[#parts + 1] = cell .. string.rep(' ', math.max(0, pad))
+            end
+          end
+          out[#out + 1] = row.indent .. '| ' .. table.concat(parts, ' | ') .. ' |'
+        end
+      end
+    else
+      out[#out + 1] = lines[i]
+      i = i + 1
+    end
+  end
+  return out
+end
+
 function M.entry_lines(entry, idx)
   local out = {}
   if entry.kind == 'system' or entry.kind == 'error' then
@@ -168,7 +291,7 @@ function M.entry_lines(entry, idx)
     end
     out[#out + 1] = ''
   end
-  return out
+  return align_tables(out)
 end
 
 -- ── Scroll helpers ────────────────────────────────────────────────────────────
@@ -215,12 +338,23 @@ end
 local function highlight_lines(bufnr, from_row, to_row)
   vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, to_row)
   local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, to_row, false)
+  local win = state.chat_winid
+  local rule_width = 72
+  if win and vim.api.nvim_win_is_valid(win) then
+    rule_width = vim.api.nvim_win_get_width(win) - 2
+  end
+  local rule_text = string.rep('─', rule_width)
   for i, line in ipairs(lines) do
     local row = from_row + i - 1
     if line == 'User:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentUser', row, 0, -1)
     elseif line == 'Assistant:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
+    elseif line == '---' then
+      vim.api.nvim_buf_set_extmark(bufnr, CHAT_HL_NS, row, 0, {
+        virt_text = { { rule_text, 'CopilotAgentRule' } },
+        virt_text_pos = 'overlay',
+      })
     elseif line:match('^%s*Done%.$') then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
     end
@@ -416,6 +550,10 @@ function M.clear_transcript()
   state.entries = {}
   state.assistant_entries = {}
   state.stream_line_start = nil
+  state.active_tool = nil
+  state.current_intent = nil
+  state.context_tokens = nil
+  state.context_limit = nil
   M.schedule_render()
 end
 

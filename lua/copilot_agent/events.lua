@@ -409,9 +409,13 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'user.message' then
-    local content = type(data.content) == 'string' and data.content or ''
-    if content ~= '' then
-      append_entry('user', content)
+    -- Only add during history replay; during active conversation the input
+    -- handler already called append_entry('user', ...) before sending.
+    if state.history_loading then
+      local content = type(data.content) == 'string' and data.content or ''
+      if content ~= '' then
+        append_entry('user', content)
+      end
     end
     return
   end
@@ -431,8 +435,48 @@ local function handle_session_event(payload)
     stop_thinking_spinner()
     state.stream_line_start = nil
     state.chat_busy = false
+    state.active_tool = nil
+    state.current_intent = nil
     refresh_statuslines()
     render_chat() -- immediate full render on turn completion
+    return
+  end
+
+  if event_type == 'assistant.intent' then
+    state.current_intent = data.intent or nil
+    refresh_statuslines()
+    return
+  end
+
+  if event_type == 'assistant.turn_start' then
+    state.active_tool = nil
+    state.current_intent = nil
+    refresh_statuslines()
+    return
+  end
+
+  if event_type == 'tool.execution_start' then
+    state.active_tool = data.toolName or nil
+    refresh_statuslines()
+    return
+  end
+
+  if event_type == 'tool.execution_complete' then
+    state.active_tool = nil
+    refresh_statuslines()
+    return
+  end
+
+  if event_type == 'session.model_change' then
+    state.current_model = data.model or data.newModel or nil
+    refresh_statuslines()
+    return
+  end
+
+  if event_type == 'session.usage_info' then
+    state.context_tokens = data.currentTokens
+    state.context_limit = data.tokenLimit
+    refresh_statuslines()
     return
   end
 

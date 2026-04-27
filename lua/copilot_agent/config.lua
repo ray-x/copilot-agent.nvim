@@ -97,6 +97,12 @@ local state = {
   stream_line_start = nil, -- 0-based buf line where current streaming entry content begins
   history_loading = false, -- true while replaying SSE history; suppresses render until done
   pending_user_input = nil, -- last unanswered ask_user request (for retry on dismiss)
+  -- Live agent activity (updated from SSE events, shown in statusline)
+  current_model = nil, -- model ID from SDK events (overrides config default in display)
+  active_tool = nil, -- name of currently executing tool (nil when idle)
+  current_intent = nil, -- latest intent string from assistant.intent event
+  context_tokens = nil, -- current token count in context window
+  context_limit = nil, -- max token count for context window
 }
 
 -- Static list of slash commands supported by the Copilot CLI backend.

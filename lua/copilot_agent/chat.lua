@@ -279,6 +279,7 @@ function M.ensure_chat_window()
     split = 'right',
     win = 0,
   })
+  vim.wo[state.chat_winid].conceallevel = 2
   refresh_chat_statusline()
 
   -- Tell render-markdown.nvim (and similar) to enable on this buffer.

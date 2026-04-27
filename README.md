@@ -56,52 +56,30 @@ The agentic loop is what makes this plugin different from simple chat wrappers. 
 
 ```mermaid
 flowchart TD
-    User["👤 User sends prompt"] --> Send["Lua plugin POSTs\n/sessions/{id}/messages"]
-    Send --> SDK["Copilot SDK processes\nwith LLM"]
+    User["👤 User prompt"] --> LLM["🤖 LLM"]
+    LLM --> Decision{Next?}
 
-    SDK --> Decision{LLM decides\nnext action}
+    Decision -->|respond| Stream["💬 Stream to chat"]
+    Decision -->|tool call| Perm{"Permission?"}
+    Decision -->|ask user| Ask["❓ vim.ui.input"]
 
-    Decision -->|"Text response"| Stream["SSE streams tokens\n→ chat buffer"]
-    Decision -->|"Tool call"| ToolReq["SDK requests tool use\n(read, write, shell, mcp, …)"]
+    Perm -->|auto-approve| Exec["⚡ Execute tool"]
+    Perm -->|interactive| Pick["🔐 Allow / Deny\nAllow dir / Allow all"]
+    Perm -->|reject-all| LLM
 
-    ToolReq --> PermCheck{"Permission\nmode?"}
+    Pick -->|allow| Exec
+    Pick -->|deny| LLM
 
-    PermCheck -->|"approve-all / autopilot"| AutoApprove["Auto-approved ✅"]
-    PermCheck -->|"reject-all"| AutoReject["Auto-rejected 🚫"]
-    PermCheck -->|"interactive"| Prompt["Go → SSE → Lua\nhost.permission_requested"]
-
-    Prompt --> UISelect["vim.ui.select picker"]
-    UISelect -->|"Allow"| Approve["POST /permission/{id}\napproved: true"]
-    UISelect -->|"Deny"| Reject["POST /permission/{id}\napproved: false"]
-    UISelect -->|"Allow this dir"| AllowDir["Approve + /add-dir"]
-    UISelect -->|"Allow all"| AllowAll["Approve + switch to\napprove-all mode"]
-
-    Approve --> Execute
-    AllowDir --> Execute
-    AllowAll --> Execute
-    AutoApprove --> Execute
-    Reject --> SDK
-    AutoReject --> SDK
-
-    Execute["Tool executes\n(file I/O, terminal, web, …)"] --> Result["Result returned to SDK"]
-    Result --> SDK
-
-    Stream --> Render["Render in chat buffer\nwith treesitter highlights"]
-    Render --> Done{"Assistant says\nDone?"}
-    Done -->|"No — needs more tools"| SDK
-    Done -->|"Yes"| Complete["✅ Task complete\nUser can continue"]
-    Complete --> User
-
-    SDK -->|"ask_user"| AskUser["host.user_input_requested\n→ vim.ui.input/select"]
-    AskUser -->|"User answers"| AskReply["POST /user-input/{id}"]
-    AskReply --> SDK
+    Exec -->|result| LLM
+    Ask -->|answer| LLM
+    Stream --> Done["✅ Done"]
 
     style User fill:#4CAF50,color:#fff
-    style Complete fill:#4CAF50,color:#fff
+    style Done fill:#4CAF50,color:#fff
     style Stream fill:#2196F3,color:#fff
-    style Execute fill:#FF9800,color:#fff
-    style UISelect fill:#9C27B0,color:#fff
-    style AskUser fill:#9C27B0,color:#fff
+    style Exec fill:#FF9800,color:#fff
+    style Pick fill:#9C27B0,color:#fff
+    style Ask fill:#9C27B0,color:#fff
 ```
 
 **Key differentiators from simple chat plugins:**

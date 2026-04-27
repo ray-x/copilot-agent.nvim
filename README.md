@@ -4,7 +4,7 @@ A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/
 
 ## Cool features
 
-- Full agentic tool execution (file read/write, terminal, web search, ask user)
+- Full agentic tool execution (file read/write, terminal, web search, fetch web pages, run shell scripts...)
 - Real agentic loop with per-tool-call approval and autopilot mode
 - Granular permission management (interactive, approve-all, reject-all, autopilot)
 - Sub-agent streaming event
@@ -12,6 +12,45 @@ A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/
 - LSP code actions
 
 ---
+
+### Agent Tool Loop
+
+The agentic loop is what makes this plugin different from simple chat wrappers. The assistant doesn't just answer — it acts: reading files, fetch web pages, running commands, writing code, and iterating until the task is done.
+
+```mermaid
+flowchart TD
+    User["👤 User prompt"] --> LLM["🤖 LLM"]
+    LLM --> Decision{Next?}
+
+    Decision -->|respond| Stream["💬 Stream to chat"]
+    Decision -->|tool call| Perm{"Permission?"}
+    Decision -->|ask user| Ask["❓ vim.ui.input"]
+
+    Perm -->|auto-approve| Exec["⚡ Execute tool"]
+    Perm -->|interactive| Pick["🔐 Allow / Deny\nAllow dir / Allow all"]
+    Perm -->|reject-all| LLM
+
+    Pick -->|allow| Exec
+    Pick -->|deny| LLM
+
+    Exec -->|result| LLM
+    Ask -->|answer| LLM
+    Stream --> Done["✅ Done"]
+
+    style User fill:#4CAF50,color:#fff
+    style Done fill:#4CAF50,color:#fff
+    style Stream fill:#2196F3,color:#fff
+    style Exec fill:#FF9800,color:#fff
+    style Pick fill:#9C27B0,color:#fff
+    style Ask fill:#9C27B0,color:#fff
+```
+
+**Key differentiators from simple chat plugins:**
+
+- **Real tool loop** — the LLM calls tools (read_file, write_file, terminal, web_search) and iterates autonomously until the task is complete
+- **Granular permission control** — interactive mode lets you approve/deny each tool call, with escalation options (allow directory, allow all) right in the picker
+- **ask_user integration** — the agent can ask clarifying questions mid-task via `vim.ui.input()` / `vim.ui.select()`
+- **Sub-agent streaming** — delegated sub-agents stream their progress in real-time
 
 ## Architecture
 
@@ -49,45 +88,6 @@ flowchart TD
 The Go binary runs a **single process** that serves both the HTTP bridge (sessions, SSE, user-input, permissions) and an LSP server on stdio. Neovim starts it as an LSP client (`vim.lsp.start`), which owns the process lifetime. The Lua plugin communicates via `curl` shell-outs for all HTTP and SSE traffic.
 
 **Why curl?** Neovim has no built-in HTTP client. `vim.uv` (libuv) exposes raw TCP sockets but requires a manual HTTP/1.1 implementation — headers, chunked encoding, SSE framing. `curl` is universally available on macOS and Linux, handles SSE natively, and keeps the Lua layer thin and dependency-free. The per-request process-spawn overhead (~5–20 ms) is imperceptible against LLM response latency.
-
-### Agent Tool Loop
-
-The agentic loop is what makes this plugin different from simple chat wrappers. The assistant doesn't just answer — it acts: reading files, running commands, writing code, and iterating until the task is done.
-
-```mermaid
-flowchart TD
-    User["👤 User prompt"] --> LLM["🤖 LLM"]
-    LLM --> Decision{Next?}
-
-    Decision -->|respond| Stream["💬 Stream to chat"]
-    Decision -->|tool call| Perm{"Permission?"}
-    Decision -->|ask user| Ask["❓ vim.ui.input"]
-
-    Perm -->|auto-approve| Exec["⚡ Execute tool"]
-    Perm -->|interactive| Pick["🔐 Allow / Deny\nAllow dir / Allow all"]
-    Perm -->|reject-all| LLM
-
-    Pick -->|allow| Exec
-    Pick -->|deny| LLM
-
-    Exec -->|result| LLM
-    Ask -->|answer| LLM
-    Stream --> Done["✅ Done"]
-
-    style User fill:#4CAF50,color:#fff
-    style Done fill:#4CAF50,color:#fff
-    style Stream fill:#2196F3,color:#fff
-    style Exec fill:#FF9800,color:#fff
-    style Pick fill:#9C27B0,color:#fff
-    style Ask fill:#9C27B0,color:#fff
-```
-
-**Key differentiators from simple chat plugins:**
-
-- **Real tool loop** — the LLM calls tools (read_file, write_file, terminal, web_search) and iterates autonomously until the task is complete
-- **Granular permission control** — interactive mode lets you approve/deny each tool call, with escalation options (allow directory, allow all) right in the picker
-- **ask_user integration** — the agent can ask clarifying questions mid-task via `vim.ui.input()` / `vim.ui.select()`
-- **Sub-agent streaming** — delegated sub-agents stream their progress in real-time
 
 ---
 
@@ -295,19 +295,19 @@ configures its HTTP client automatically — no manual `base_url` needed.
 
 ## Commands
 
-| Command                     | Description                                                |
-| --------------------------- | ---------------------------------------------------------- |
-| `:CopilotAgentInstall`      | Download pre-built binary for the current platform         |
-| `:CopilotAgentChat`         | Open the chat buffer (creates session if needed)           |
-| `:CopilotAgentAsk [prompt]` | Send a prompt; no argument opens `vim.ui.input()`          |
-| `:CopilotAgentNewSession`   | Disconnect current session and start a fresh one           |
-| `:CopilotAgentSwitchSession` | Pick from all persisted sessions and switch               |
-| `:CopilotAgentModel [id]`   | Pick or set a model; tab-completes from service model list |
-| `:CopilotAgentStart`        | Manually start the Go service                              |
-| `:CopilotAgentStop`         | Disconnect the active session                              |
-| `:CopilotAgentStop!`        | Disconnect and delete persisted session state              |
-| `:CopilotAgentStatus`       | Show service URL, session id, stream status                |
-| `:CopilotAgentLsp`          | Start (or reuse) the LSP client for code actions           |
+| Command                      | Description                                                |
+| ---------------------------- | ---------------------------------------------------------- |
+| `:CopilotAgentInstall`       | Download pre-built binary for the current platform         |
+| `:CopilotAgentChat`          | Open the chat buffer (creates session if needed)           |
+| `:CopilotAgentAsk [prompt]`  | Send a prompt; no argument opens `vim.ui.input()`          |
+| `:CopilotAgentNewSession`    | Disconnect current session and start a fresh one           |
+| `:CopilotAgentSwitchSession` | Pick from all persisted sessions and switch                |
+| `:CopilotAgentModel [id]`    | Pick or set a model; tab-completes from service model list |
+| `:CopilotAgentStart`         | Manually start the Go service                              |
+| `:CopilotAgentStop`          | Disconnect the active session                              |
+| `:CopilotAgentStop!`         | Disconnect and delete persisted session state              |
+| `:CopilotAgentStatus`        | Show service URL, session id, stream status                |
+| `:CopilotAgentLsp`           | Start (or reuse) the LSP client for code actions           |
 
 ---
 
@@ -454,12 +454,12 @@ Sessions are auto-named by the SDK after the first conversation turn. You can re
 
 **Session selection behaviour:**
 
-| Matching sessions for project | Behaviour |
-|-------------------------------|-----------|
-| 0 | Creates a new session automatically |
-| 1 | Resumes it silently — no prompt |
+| Matching sessions for project          | Behaviour                                                         |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| 0                                      | Creates a new session automatically                               |
+| 1                                      | Resumes it silently — no prompt                                   |
 | 2+ (`auto_resume = 'prompt'`, default) | Shows `vim.ui.select` picker; most recent session is listed first |
-| 2+ (`auto_resume = 'auto'`) | Silently resumes the most recent session |
+| 2+ (`auto_resume = 'auto'`)            | Silently resumes the most recent session                          |
 
 To always skip the picker, set in your config:
 

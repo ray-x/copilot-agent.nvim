@@ -69,17 +69,21 @@ function M.start_thinking_spinner(entry_key)
           vim.bo[bufnr].modified = false
         end)
       else
-        -- First tick: full render to place the spinner, then locate its row.
-        pcall(M.render_chat)
-        -- Find the spinner line by scanning backward from the end.
-        local lc = vim.api.nvim_buf_line_count(bufnr)
-        for r = lc - 1, HEADER_LINES, -1 do
-          local line = vim.api.nvim_buf_get_lines(bufnr, r, r + 1, false)[1] or ''
-          if line:match('^  . Thinking…$') then
-            state._spinner_line = r
-            break
-          end
-        end
+        -- First tick: append the spinner lines at the end of the buffer
+        -- instead of doing a full render_chat().
+        local lc = state._rendered_line_count or vim.api.nvim_buf_line_count(bufnr)
+        local spinner_lines = { 'Assistant:', '  ' .. (SPINNER_FRAMES[1] or '⠋') .. ' Thinking…', '' }
+        pcall(function()
+          vim.bo[bufnr].modifiable = true
+          vim.bo[bufnr].readonly = false
+          vim.api.nvim_buf_set_lines(bufnr, lc, -1, false, spinner_lines)
+          vim.bo[bufnr].modifiable = false
+          vim.bo[bufnr].readonly = true
+          vim.bo[bufnr].modified = false
+        end)
+        -- The spinner text is the second line we just appended (0-indexed: lc + 1).
+        state._spinner_line = lc + 1
+        M.apply_chat_highlights(bufnr, lc, lc + #spinner_lines)
       end
     end)
   )
@@ -192,18 +196,22 @@ function M.scroll_to_bottom()
     return
   end
   local lc = vim.api.nvim_buf_line_count(bufnr)
+  -- Use API-only calls to avoid triggering extra redraws from normal-mode commands.
+  vim.api.nvim_win_set_cursor(winid, { lc, 0 })
+  local win_height = vim.api.nvim_win_get_height(winid)
+  local topline = math.max(1, lc - win_height + 1)
   vim.api.nvim_win_call(winid, function()
-    vim.api.nvim_win_set_cursor(0, { lc, 0 })
-    vim.cmd('normal! zb')
+    vim.fn.winrestview({ topline = topline })
   end)
 end
 
 -- ── Highlights ────────────────────────────────────────────────────────────────
 
-function M.apply_chat_highlights(bufnr, from_row)
+function M.apply_chat_highlights(bufnr, from_row, to_row)
   from_row = from_row or 0
-  vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, -1)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, -1, false)
+  to_row = to_row or -1
+  vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, to_row)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, to_row, false)
   for i, line in ipairs(lines) do
     local row = from_row + i - 1
     if line == 'User:' then
@@ -374,7 +382,7 @@ function M.append_entry(kind, content, attachments)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
       vim.bo[bufnr].modified = false
-      M.apply_chat_highlights(bufnr, lc)
+      M.apply_chat_highlights(bufnr, lc, lc + #new_lines)
       state._rendered_line_count = lc + #new_lines
       if at_bottom then
         M.scroll_to_bottom()

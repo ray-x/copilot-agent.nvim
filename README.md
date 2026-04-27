@@ -15,32 +15,41 @@ A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/
 
 ### Agent Tool Loop
 
-The agentic loop is what makes this plugin different from simple chat wrappers. The assistant doesn't just answer — it acts: reading files, fetch web pages, running commands, writing code, and iterating until the task is done.
+The agentic loop is what makes this plugin different from simple chat wrappers. The assistant doesn't just answer — it acts: reading files, fetching web pages, running commands, writing code, and iterating until the task is done.
 
 ```mermaid
 flowchart TD
-    User["👤 User prompt"] --> LLM["🤖 LLM"]
-    LLM --> Decision{Next?}
+    User(["👤 User prompt"]) --> LLM["🤖 Copilot LLM"]
+    LLM --> Decision{Response type}
 
-    Decision -->|respond| Stream["💬 Stream to chat"]
-    Decision -->|tool call| Perm{"Permission?"}
-    Decision -->|ask user| Ask["❓ vim.ui.input"]
+    Decision -->|"text"| Stream["💬 Stream to chat buffer"]
+    Decision -->|"tool call"| Tool["🔧 read_file · write_file\nterminal · web_search · mcp"]
+    Decision -->|"ask user"| Ask["❓ Clarifying question\nvim.ui.input / select"]
 
-    Perm -->|auto-approve| Exec["⚡ Execute tool"]
-    Perm -->|interactive| Pick["🔐 Allow / Deny\nAllow dir / Allow all"]
-    Perm -->|reject-all| LLM
+    Tool --> Perm{Permission mode}
 
-    Pick -->|allow| Exec
-    Pick -->|deny| LLM
+    Perm -->|"🔐 interactive"| Pick["Allow · Deny\nAllow dir · Allow all"]
+    Perm -->|"✅ approve-all"| Exec
+    Perm -->|"🤖 autopilot"| AutoExec["Auto-approve +\nauto-answer ask_user"]
+    Perm -->|"🚫 reject-all"| Denied["Rejected → back to LLM"]
 
-    Exec -->|result| LLM
-    Ask -->|answer| LLM
-    Stream --> Done["✅ Done"]
+    Pick -->|"allow"| Exec["⚡ Execute tool"]
+    Pick -->|"deny"| Denied
+
+    Exec -->|"return result"| LLM
+    AutoExec -->|"return result"| LLM
+    Denied --> LLM
+    Ask -->|"user answers"| LLM
+
+    Stream --> More{More work?}
+    More -->|"yes"| LLM
+    More -->|"no"| Done(["✅ Task complete"])
 
     style User fill:#4CAF50,color:#fff
     style Done fill:#4CAF50,color:#fff
     style Stream fill:#2196F3,color:#fff
     style Exec fill:#FF9800,color:#fff
+    style AutoExec fill:#FF9800,color:#fff
     style Pick fill:#9C27B0,color:#fff
     style Ask fill:#9C27B0,color:#fff
 ```
@@ -48,7 +57,7 @@ flowchart TD
 **Key differentiators from simple chat plugins:**
 
 - **Real tool loop** — the LLM calls tools (read_file, write_file, terminal, web_search) and iterates autonomously until the task is complete
-- **Granular permission control** — interactive mode lets you approve/deny each tool call, with escalation options (allow directory, allow all) right in the picker
+- **Four permission modes** — interactive (per-call approval with escalation), approve-all, autopilot (fully autonomous), reject-all (read-only)
 - **ask_user integration** — the agent can ask clarifying questions mid-task via `vim.ui.input()` / `vim.ui.select()`
 - **Sub-agent streaming** — delegated sub-agents stream their progress in real-time
 

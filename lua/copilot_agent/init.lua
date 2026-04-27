@@ -2090,6 +2090,7 @@ local function handle_user_input(payload)
     if value == nil or value == '' then
       return
     end
+    append_entry('user', value)
     request('POST', string.format('/sessions/%s/user-input/%s', session_id, request_payload.id), {
       answer = value,
       wasFreeform = was_freeform,

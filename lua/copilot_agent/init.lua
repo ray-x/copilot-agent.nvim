@@ -6,9 +6,7 @@ local uv = vim.uv or vim.loop
 local utils = require('copilot_agent.utils')
 
 local M = {}
-local fetch_models
 local open_input_window
-local prompt_supported_model_selection
 local setup_action_keymaps
 
 -- Aliases from http module (used as locals throughout for backward compat).
@@ -70,6 +68,8 @@ local service = require('copilot_agent.service')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 local events = require('copilot_agent.events')
+local session = require('copilot_agent.session')
+local mdl = require('copilot_agent.model')
 
 -- Aliases from events module.
 local stop_event_stream = events.stop_event_stream
@@ -86,64 +86,17 @@ local handle_sse_chunk = events.handle_sse_chunk
 local is_thinking_content = utils.is_thinking_content
 local split_lines = utils.split_lines
 
-local normalize_model_entry = utils.normalize_model_entry
+-- Aliases from session module.
+local discard_pending_attachments = session.discard_pending_attachments
+local disconnect_session = session.disconnect_session
+local resume_session = session.resume_session
+local with_session = session.with_session
 
-local function store_model_cache(models)
-  local items = {}
-  for _, entry in ipairs(models or {}) do
-    local item = normalize_model_entry(entry)
-    if item then
-      table.insert(items, item)
-    end
-  end
-
-  table.sort(items, function(left, right)
-    return left.label < right.label
-  end)
-  state.model_cache = items
-  return items
-end
-
-local function model_completion_items(arglead)
-  local prefix = vim.trim(arglead or ''):lower()
-  local matches = {}
-  local seen = {}
-
-  local function add(id)
-    if type(id) ~= 'string' or id == '' or seen[id] then
-      return
-    end
-    if prefix == '' or id:lower():find(prefix, 1, true) == 1 then
-      seen[id] = true
-      table.insert(matches, id)
-    end
-  end
-
-  add(state.config.session.model)
-  for _, item in ipairs(state.model_cache) do
-    add(item.id)
-  end
-
-  table.sort(matches)
-  return matches
-end
-
-local unavailable_model_from_error = utils.unavailable_model_from_error
-
-local function stale_service_hint(unavailable_model)
-  if type(unavailable_model) ~= 'string' or unavailable_model == '' then
-    return nil
-  end
-  if state.config.session.model ~= nil then
-    return nil
-  end
-  return string.format(
-    'The running Go host selected unavailable model "%s" even though the plugin did not configure a model. This usually means the service process is an older build. Restart `go run .` and reload Neovim.',
-    unavailable_model
-  )
-end
-
-local is_connection_error = utils.is_connection_error
+-- Aliases from model module.
+local store_model_cache = mdl.store_model_cache
+local model_completion_items = mdl.model_completion_items
+local apply_model = mdl.apply_model
+local fetch_models = mdl.fetch_models
 
 -- Open a fuzzy-finder to pick one or more files/directories.
 -- opts.prompt  string  prompt title
@@ -638,14 +591,14 @@ setup_action_keymaps = function(bufnr)
       notify('No active session', vim.log.levels.WARN)
       return
     end
-    request('GET', '/sessions/' .. state.session_id, nil, function(session, err)
-      if err or not session then
+    request('GET', '/sessions/' .. state.session_id, nil, function(sess_data, err)
+      if err or not sess_data then
         notify('Failed to fetch session: ' .. tostring(err), vim.log.levels.ERROR)
         return
       end
-      local caps = session.capabilities or {}
+      local caps = sess_data.capabilities or {}
       local tools = caps.availableTools or {}
-      local excluded = session.excludedTools or {}
+      local excluded = sess_data.excludedTools or {}
       local excluded_set = {}
       for _, t in ipairs(excluded) do
         excluded_set[t] = true
@@ -1041,358 +994,6 @@ open_input_window = function()
       pcall(copilot_client.buf_attach, true, state.input_bufnr)
     end
   end)
-end
-
--- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
-local function discard_pending_attachments()
-  for _, a in ipairs(state.pending_attachments) do
-    if a.temp and a.path then
-      pcall(os.remove, a.path)
-    end
-  end
-  state.pending_attachments = {}
-  refresh_statuslines()
-end
-
-local function disconnect_session(session_id, delete_state, callback)
-  stop_event_stream()
-  if not session_id then
-    if callback then
-      callback(nil)
-    end
-    return
-  end
-
-  request('DELETE', string.format('/sessions/%s%s', session_id, delete_state and '?delete=true' or ''), nil, function(_, err)
-    if callback then
-      callback(err)
-    end
-  end, { auto_start = false })
-end
-
-local function on_session_ready(session_id, err)
-  for _, callback in ipairs(state.pending_session_callbacks) do
-    callback(session_id, err)
-  end
-  state.pending_session_callbacks = {}
-end
-
-local function resume_session(session_id, callback)
-  request('POST', '/sessions', {
-    sessionId = session_id,
-    resume = true,
-    clientName = state.config.client_name,
-    permissionMode = state.config.permission_mode,
-    workingDirectory = working_directory(),
-    streaming = state.config.session.streaming,
-    enableConfigDiscovery = state.config.session.enable_config_discovery,
-    model = state.config.session.model,
-    agent = state.config.session.agent,
-  }, function(response, err)
-    state.creating_session = false
-    if err then
-      notify('Failed to resume session: ' .. err, vim.log.levels.ERROR)
-      append_entry('error', 'Failed to resume session: ' .. err)
-      on_session_ready(nil, err)
-      return
-    end
-    state.session_id = response and response.sessionId or nil
-    if not state.session_id then
-      local message = 'Server did not return a sessionId'
-      append_entry('error', message)
-      on_session_ready(nil, message)
-      return
-    end
-    start_event_stream(state.session_id)
-    on_session_ready(state.session_id)
-    if callback then
-      callback(state.session_id)
-    end
-  end)
-end
-
-local create_session
-
-local function pick_or_create_session(callback)
-  local wd = working_directory()
-  -- Show a connecting indicator immediately while the async fetch runs.
-  append_entry('system', 'Connecting…')
-  request('GET', '/sessions', nil, function(response, err)
-    if err then
-      create_session(callback)
-      return
-    end
-
-    local persisted = (response and response.persisted) or {}
-    local matching = {}
-    for _, s in ipairs(persisted) do
-      local s_cwd = s.context and s.context.cwd or nil
-      if s_cwd == wd then
-        table.insert(matching, s)
-      end
-    end
-
-    if #matching == 0 then
-      create_session(callback)
-      return
-    end
-
-    -- Auto-resume the single match silently — no need to prompt.
-    if #matching == 1 then
-      local s = matching[1]
-      append_entry('system', 'Resuming session ' .. s.sessionId)
-      resume_session(s.sessionId, callback)
-      return
-    end
-
-    -- Multiple matches: sort newest-first.
-    table.sort(matching, function(a, b)
-      local ta = a.modifiedTime or a.startTime or ''
-      local tb = b.modifiedTime or b.startTime or ''
-      return ta > tb
-    end)
-
-    -- auto_resume='auto': silently resume the most recent without prompting.
-    if state.config.session.auto_resume == 'auto' then
-      local s = matching[1]
-      append_entry('system', 'Resuming most recent session ' .. s.sessionId)
-      resume_session(s.sessionId, callback)
-      return
-    end
-
-    -- Show a picker; most recent session is listed first (default selection).
-    local choices = {}
-    for _, s in ipairs(matching) do
-      local label = s.sessionId
-      if s.summary and s.summary ~= '' then
-        label = s.summary .. ' [' .. s.sessionId:sub(1, 8) .. ']'
-      else
-        local ts = s.modifiedTime or s.startTime or ''
-        if ts ~= '' then
-          label = s.sessionId:sub(1, 8) .. ' (' .. ts .. ')'
-        end
-      end
-      table.insert(choices, { label = label, id = s.sessionId })
-    end
-    table.insert(choices, { label = 'Create new session', id = nil })
-
-    local display = vim.tbl_map(function(c)
-      return c.label
-    end, choices)
-
-    vim.ui.select(display, { prompt = 'Resume a session or start new?' }, function(_, idx)
-      if not idx then
-        create_session(callback)
-        return
-      end
-      local picked = choices[idx]
-      if picked.id then
-        append_entry('system', 'Resuming session ' .. picked.id)
-        resume_session(picked.id, callback)
-      else
-        create_session(callback)
-      end
-    end)
-  end)
-end
-
-create_session = function(callback, opts)
-  opts = opts or {}
-  request('POST', '/sessions', {
-    clientName = state.config.client_name,
-    permissionMode = state.permission_mode or state.config.permission_mode,
-    workingDirectory = working_directory(),
-    streaming = state.config.session.streaming,
-    enableConfigDiscovery = state.config.session.enable_config_discovery,
-    model = state.config.session.model,
-    agent = state.config.session.agent,
-  }, function(response, err)
-    state.creating_session = false
-    if err then
-      local unavailable_model = unavailable_model_from_error(err)
-      local stale_hint = stale_service_hint(unavailable_model)
-      if stale_hint then
-        notify(stale_hint, vim.log.levels.ERROR)
-        append_entry('error', stale_hint)
-        append_entry('error', 'Failed to create session: ' .. err)
-        on_session_ready(nil, err)
-        return
-      end
-      if unavailable_model and state.config.session.model == unavailable_model and opts.model_selection_attempts ~= false then
-        append_entry('system', string.format('Model "%s" is unavailable; choose a supported model.', unavailable_model))
-        prompt_supported_model_selection(unavailable_model, 'Select a supported Copilot model', function(reselected_model, prompt_err)
-          if prompt_err then
-            notify('Failed to create session: ' .. prompt_err, vim.log.levels.ERROR)
-            append_entry('error', 'Failed to create session: ' .. prompt_err)
-            on_session_ready(nil, prompt_err)
-            return
-          end
-          state.config.session.model = reselected_model
-          append_entry('system', 'Retrying session creation with model ' .. reselected_model)
-          state.creating_session = true
-          create_session(callback, { model_selection_attempts = false })
-        end)
-        return
-      end
-      notify('Failed to create session: ' .. err, vim.log.levels.ERROR)
-      append_entry('error', 'Failed to create session: ' .. err)
-      on_session_ready(nil, err)
-      return
-    end
-
-    state.session_id = response and response.sessionId or nil
-    if not state.session_id then
-      local message = 'Server did not return a sessionId'
-      append_entry('error', message)
-      on_session_ready(nil, message)
-      return
-    end
-
-    start_event_stream(state.session_id)
-    -- Sync the agent mode with the server if the user already picked one.
-    if state.input_mode and state.input_mode ~= 'agent' then
-      set_agent_mode(state.input_mode)
-    end
-    on_session_ready(state.session_id)
-    if callback then
-      callback(state.session_id)
-    end
-  end)
-end
-
-fetch_models = function(callback, on_error)
-  request('GET', '/models', nil, function(response, err, status)
-    if err then
-      if status == 404 then
-        err = err .. '. The running Go host does not expose /models; restart it so Neovim and the service use the same build.'
-      end
-      if on_error then
-        on_error(err)
-      else
-        callback(nil, err)
-      end
-      return
-    end
-    callback(store_model_cache(response and response.models or {}), nil)
-  end)
-end
-
-prompt_supported_model_selection = function(unavailable_model, prompt, callback)
-  fetch_models(function(models, err)
-    if err then
-      callback(nil, 'failed to list supported models: ' .. err)
-      return
-    end
-    if type(models) ~= 'table' or vim.tbl_isempty(models) then
-      callback(nil, 'no supported models returned by service')
-      return
-    end
-
-    vim.ui.select(models, {
-      prompt = prompt,
-      format_item = function(item)
-        return item.label
-      end,
-    }, function(choice)
-      if not choice then
-        callback(nil, string.format('model "%s" is unavailable and no replacement was selected', unavailable_model))
-        return
-      end
-      callback(choice.id, nil)
-    end)
-  end)
-end
-
-local function apply_model(model, callback, opts)
-  opts = opts or {}
-  local selected = vim.trim(model or '')
-  local previous_model = state.config.session.model
-  if selected == '' then
-    if callback then
-      callback(nil, 'model is required')
-    end
-    return
-  end
-
-  state.config.session.model = selected
-  local known = false
-  for _, item in ipairs(state.model_cache) do
-    if item.id == selected then
-      known = true
-      break
-    end
-  end
-  if not known then
-    table.insert(state.model_cache, 1, {
-      id = selected,
-      name = selected,
-      label = string.format('%s (%s)', selected, selected),
-    })
-  end
-  if not state.session_id then
-    append_entry('system', 'Model for next session: ' .. selected)
-    if callback then
-      callback(selected, nil)
-    end
-    return
-  end
-
-  local body = { model = selected }
-  if opts.reasoning_effort and opts.reasoning_effort ~= '' then
-    body.reasoningEffort = opts.reasoning_effort
-  end
-  request('POST', string.format('/sessions/%s/model', state.session_id), body, function(response, err)
-    if err then
-      local unavailable_model = unavailable_model_from_error(err)
-      if unavailable_model and opts.model_selection_attempts ~= false then
-        append_entry('system', string.format('Model "%s" is unavailable; choose a supported model.', unavailable_model))
-        prompt_supported_model_selection(unavailable_model, 'Select a supported Copilot model', function(reselected_model, prompt_err)
-          if prompt_err then
-            state.config.session.model = previous_model
-            if callback then
-              callback(nil, prompt_err)
-            end
-            return
-          end
-          apply_model(reselected_model, callback, {
-            model_selection_attempts = false,
-          })
-        end)
-        return
-      end
-      state.config.session.model = previous_model
-      if callback then
-        callback(nil, err)
-      end
-      return
-    end
-    state.config.session.model = response and response.model or selected
-    local msg = 'Active model: ' .. state.config.session.model
-    if opts.reasoning_effort and opts.reasoning_effort ~= '' then
-      state.reasoning_effort = opts.reasoning_effort
-      msg = msg .. ' (effort: ' .. opts.reasoning_effort .. ')'
-    end
-    append_entry('system', msg)
-    refresh_statuslines()
-    if callback then
-      callback(state.config.session.model, nil)
-    end
-  end)
-end
-
-local function with_session(callback)
-  if state.session_id then
-    callback(state.session_id)
-    return
-  end
-
-  table.insert(state.pending_session_callbacks, callback)
-  if state.creating_session then
-    return
-  end
-
-  state.creating_session = true
-  pick_or_create_session(nil)
 end
 
 -- Internal bridge for cross-module access to append_entry (used by service.lua).

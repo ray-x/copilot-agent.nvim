@@ -14,7 +14,6 @@ local M = {}
 
 local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local HEADER_LINES = 5
-local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
 local RENDER_DEBOUNCE_MS = 150
 local STREAM_DEBOUNCE_MS = 80
 local SPINNER_INTERVAL_MS = 500
@@ -83,7 +82,6 @@ function M.start_thinking_spinner(entry_key)
         end)
         -- The spinner text is the second line we just appended (0-indexed: lc + 1).
         state._spinner_line = lc + 1
-        M.apply_chat_highlights(bufnr, lc, lc + #spinner_lines)
       end
     end)
   )
@@ -205,25 +203,6 @@ function M.scroll_to_bottom()
   end)
 end
 
--- ── Highlights ────────────────────────────────────────────────────────────────
-
-function M.apply_chat_highlights(bufnr, from_row, to_row)
-  from_row = from_row or 0
-  to_row = to_row or -1
-  vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, to_row)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, to_row, false)
-  for i, line in ipairs(lines) do
-    local row = from_row + i - 1
-    if line == 'User:' then
-      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentUser', row, 0, -1)
-    elseif line == 'Assistant:' then
-      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
-    elseif line:match('^%s*Done%.$') then
-      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
-    end
-  end
-end
-
 -- ── Full render ───────────────────────────────────────────────────────────────
 
 function M.render_chat()
@@ -274,7 +253,6 @@ function M.render_chat()
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
   vim.bo[bufnr].modified = false
-  M.apply_chat_highlights(bufnr)
   -- Refresh chat statusline via lazy require to avoid circular deps.
   local sl = require('copilot_agent.statusline')
   sl.refresh_chat_statusline()
@@ -346,7 +324,6 @@ function M.stream_update(entry, idx)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
       vim.bo[bufnr].modified = false
-      M.apply_chat_highlights(bufnr, state.stream_line_start)
       if at_bottom then
         M.scroll_to_bottom()
       end
@@ -382,7 +359,6 @@ function M.append_entry(kind, content, attachments)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
       vim.bo[bufnr].modified = false
-      M.apply_chat_highlights(bufnr, lc, lc + #new_lines)
       state._rendered_line_count = lc + #new_lines
       if at_bottom then
         M.scroll_to_bottom()

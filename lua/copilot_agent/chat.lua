@@ -274,6 +274,17 @@ function M.ensure_chat_window()
   vim.bo[bufnr].readonly = true
   vim.api.nvim_buf_set_name(bufnr, 'copilot-agent-chat')
 
+  -- Use Vim syntax rules for chat highlights instead of per-line Lua scans.
+  -- Syntax highlighting is viewport-based (only visible lines), so it's free
+  -- regardless of buffer size.
+  vim.api.nvim_buf_call(bufnr, function()
+    vim.cmd([[
+      syntax match CopilotAgentUser /^User:$/
+      syntax match CopilotAgentAssistant /^Assistant:$/
+      syntax match CopilotAgentDone /^\s*Done\.$/
+    ]])
+  end)
+
   -- Open a vertical split window via the API — no throwaway buffer created.
   state.chat_winid = vim.api.nvim_open_win(bufnr, true, {
     split = 'right',

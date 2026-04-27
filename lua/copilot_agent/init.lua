@@ -2898,7 +2898,7 @@ function M.switch_session()
       state.session_name = nil
       discard_pending_attachments()
       clear_transcript()
-      M.open_chat()
+      ensure_chat_window()
       disconnect_session(previous_session_id, false, function(disconnect_err)
         if disconnect_err then
           append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)

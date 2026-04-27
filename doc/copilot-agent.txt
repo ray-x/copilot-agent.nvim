@@ -326,11 +326,24 @@ buffer, or set via |copilot-agent-setup| or `POST /sessions/{id}/permission-mode
 In interactive mode, each permission prompt offers additional options:
 
   Allow                    Approve this single request
+  Show diff                Preview unified diff in a float (write only)
   Deny                     Reject this single request
   Allow this directory     Approve + whitelist the directory (read/write only)
   Allow all for session    Approve + switch to approve-all for the rest
 
+When a write permission includes a diff, "Show diff" opens a floating
+window with syntax-highlighted unified diff. Press `q` or `<Esc>` to
+close the preview and return to the Allow/Deny picker.
+
 The current mode is shown by |copilot-agent-statusline| functions.
+
+                                                  *copilot-agent-file-changes*
+When the agent creates or modifies files, buffers are automatically
+reloaded via `:checktime`. For git-tracked files, a "Review changes?"
+prompt offers to open a vimdiff tab showing the HEAD version alongside
+the agent's changes. Disable with: >lua
+  chat = { diff_review = false }
+<
 
 ==============================================================================
 8. MODELS                                         *copilot-agent-models*

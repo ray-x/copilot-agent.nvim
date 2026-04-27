@@ -53,6 +53,10 @@ local defaults = {
     -- 'auto' detects in order: snacks → telescope → fzf-lua → mini.pick → vim.ui.input
     -- Set to 'native' to always use vim.ui.input (completion-based path entry).
     file_picker = 'auto',
+    -- Offer a vimdiff review when the agent modifies a git-tracked file.
+    -- true  = prompt 'Open diff / Skip' after each file update (default)
+    -- false = just notify and auto-reload the buffer
+    diff_review = true,
   },
   session = {
     working_directory = nil,
@@ -2209,6 +2213,7 @@ local function handle_host_event(event_name, payload)
       -- For read/write with a file path, also offer "Allow this directory".
       local choices = { 'Allow', 'Deny', 'Allow all for this session' }
       local dir_path = nil
+      local has_diff = kind == 'write' and perm.diff and perm.diff ~= ''
       if kind == 'read' or kind == 'write' then
         local file = perm.path or perm.fileName
         if file and file ~= '' then
@@ -2218,8 +2223,48 @@ local function handle_host_event(event_name, payload)
           end
         end
       end
+      if has_diff then
+        table.insert(choices, 2, 'Show diff')
+      end
 
-      vim.schedule(function()
+      -- Show the diff in a floating scratch buffer.
+      local function show_diff_float(diff_text, after_close)
+        local lines = vim.split(diff_text, '\n', { plain = true })
+        local buf = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        vim.bo[buf].buftype = 'nofile'
+        vim.bo[buf].bufhidden = 'wipe'
+        vim.bo[buf].swapfile = false
+        vim.bo[buf].filetype = 'diff'
+        vim.bo[buf].modifiable = false
+        local width = math.min(math.floor(vim.o.columns * 0.8), 120)
+        local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.7))
+        local win = vim.api.nvim_open_win(buf, true, {
+          relative = 'editor',
+          width = width,
+          height = height,
+          row = math.floor((vim.o.lines - height) / 2),
+          col = math.floor((vim.o.columns - width) / 2),
+          style = 'minimal',
+          border = 'rounded',
+          title = ' Proposed changes ',
+          title_pos = 'center',
+        })
+        -- Close on q or <Esc>, then re-show the permission picker.
+        local function close()
+          if vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_close(win, true)
+          end
+          if after_close then
+            after_close()
+          end
+        end
+        vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+        vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
+      end
+
+      -- Permission picker (extracted so "Show diff" can re-invoke it).
+      local function show_permission_picker()
         vim.ui.select(choices, { prompt = prompt_str }, function(choice)
           if not state.session_id then
             return
@@ -2229,6 +2274,13 @@ local function handle_host_event(event_name, payload)
           end
 
           local sid = state.session_id
+
+          if choice == 'Show diff' then
+            show_diff_float(perm.diff, function()
+              vim.schedule(show_permission_picker)
+            end)
+            return
+          end
 
           if choice == 'Allow all for this session' then
             -- Approve this request, then switch to approve-all mode.
@@ -2271,7 +2323,9 @@ local function handle_host_event(event_name, payload)
             end)
           end
         end)
-      end)
+      end
+
+      vim.schedule(show_permission_picker)
     else
       notify_transient('Permission requested; mode=' .. tostring(mode), vim.log.levels.INFO)
     end
@@ -2288,6 +2342,51 @@ local function handle_host_event(event_name, payload)
     render_chat()
     scroll_to_bottom()
   end
+end
+
+-- Open a diff split for a file that the agent just modified.
+-- Uses git to show the diff if the file is tracked; otherwise skips.
+local function offer_diff_review(abs_path, rel_path)
+  -- Only offer if file is git-tracked (has a HEAD version).
+  local wd = working_directory()
+  vim.fn.systemlist({ 'git', '-C', wd, 'cat-file', '-e', 'HEAD:' .. rel_path })
+  if vim.v.shell_error ~= 0 then
+    return -- not tracked or no HEAD version
+  end
+
+  vim.ui.select({ 'Open diff', 'Skip' }, {
+    prompt = 'Review changes to ' .. rel_path .. '?',
+  }, function(choice)
+    if choice ~= 'Open diff' then
+      return
+    end
+    -- Get the old (HEAD) version.
+    local old_lines = vim.fn.systemlist({ 'git', '-C', wd, 'show', 'HEAD:' .. rel_path })
+    if vim.v.shell_error ~= 0 then
+      notify('Could not read old version of ' .. rel_path, vim.log.levels.WARN)
+      return
+    end
+
+    -- Open the current file.
+    vim.cmd('tabnew ' .. vim.fn.fnameescape(abs_path))
+    vim.cmd('diffthis')
+
+    -- Create a scratch buffer with the old version.
+    vim.cmd('vnew')
+    local scratch = vim.api.nvim_get_current_buf()
+    vim.bo[scratch].buftype = 'nofile'
+    vim.bo[scratch].bufhidden = 'wipe'
+    vim.bo[scratch].swapfile = false
+    vim.api.nvim_buf_set_name(scratch, rel_path .. ' (before agent)')
+    vim.api.nvim_buf_set_lines(scratch, 0, -1, false, old_lines)
+    -- Set filetype from the original for syntax highlighting.
+    local ft = vim.filetype.match({ filename = abs_path }) or ''
+    if ft ~= '' then
+      vim.bo[scratch].filetype = ft
+    end
+    vim.bo[scratch].modifiable = false
+    vim.cmd('diffthis')
+  end)
 end
 
 local function handle_session_event(payload)
@@ -2350,6 +2449,49 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.reasoning_delta' or event_type == 'assistant.streaming_delta' then
+    return
+  end
+
+  if event_type == 'session.workspace_file_changed' then
+    local op = data.operation or 'update'
+    local rel_path = data.path or ''
+    if rel_path == '' then
+      return
+    end
+
+    -- Resolve to absolute path relative to working directory.
+    local wd = working_directory()
+    local abs_path = vim.fn.fnamemodify(wd .. '/' .. rel_path, ':p')
+
+    vim.schedule(function()
+      -- Find any loaded buffer for this file.
+      local bufnr_match = nil
+      for _, b in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_loaded(b) then
+          local bname = vim.api.nvim_buf_get_name(b)
+          if bname ~= '' and vim.fn.fnamemodify(bname, ':p') == abs_path then
+            bufnr_match = b
+            break
+          end
+        end
+      end
+
+      if op == 'create' then
+        notify('Agent created: ' .. rel_path, vim.log.levels.INFO)
+      elseif op == 'update' and bufnr_match then
+        -- Reload the buffer from disk.
+        vim.api.nvim_buf_call(bufnr_match, function()
+          vim.cmd('silent! checktime')
+        end)
+        notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
+        -- Offer diff review if the file is tracked by git.
+        if state.config.chat.diff_review ~= false then
+          offer_diff_review(abs_path, rel_path)
+        end
+      else
+        notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
+      end
+    end)
     return
   end
 

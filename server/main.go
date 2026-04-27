@@ -646,6 +646,14 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, event := range events {
+			// Skip empty assistant messages during history replay too.
+			if event.Type == copilot.SessionEventTypeAssistantMessage {
+				if data, ok := event.Data.(*copilot.AssistantMessageData); ok {
+					if strings.TrimSpace(data.Content) == "" && len(data.ToolRequests) == 0 {
+						continue
+					}
+				}
+			}
 			payload, err := (&event).Marshal()
 			if err != nil {
 				continue
@@ -918,6 +926,16 @@ func (s *service) disconnectAll() {
 }
 
 func (m *managedSession) handleSessionEvent(event copilot.SessionEvent) {
+	// Drop assistant.message events with empty or whitespace-only content
+	// so the client never sees bare "Assistant:" entries.
+	if event.Type == copilot.SessionEventTypeAssistantMessage {
+		if data, ok := event.Data.(*copilot.AssistantMessageData); ok {
+			if strings.TrimSpace(data.Content) == "" && len(data.ToolRequests) == 0 {
+				return
+			}
+		}
+	}
+
 	payload, err := (&event).Marshal()
 	if err != nil {
 		return

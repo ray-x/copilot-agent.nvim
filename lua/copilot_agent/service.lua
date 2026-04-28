@@ -14,8 +14,9 @@ local M = {}
 local _root_markers = { '.git', 'go.mod', 'package.json', 'Cargo.toml', 'pyproject.toml', '.hg', '.svn' }
 
 local function find_project_root(start_dir)
+  local home = vim.fn.expand('$HOME')
   local dir = start_dir
-  for _ = 1, 20 do -- max 20 levels up
+  while dir ~= home do
     for _, marker in ipairs(_root_markers) do
       if uv.fs_stat(dir .. '/' .. marker) then
         return dir
@@ -31,16 +32,11 @@ local function find_project_root(start_dir)
 end
 
 function M.cwd()
-  -- Try to find a project root from the current buffer's file first.
   local buf_path = vim.api.nvim_buf_get_name(0)
   if buf_path and buf_path ~= '' then
     local buf_dir = vim.fn.fnamemodify(buf_path, ':p:h')
-    local root = find_project_root(buf_dir)
-    if root then
-      return root
-    end
+    return find_project_root(buf_dir) or buf_dir
   end
-  -- Fall back to Neovim's cwd.
   return (uv and uv.cwd and uv.cwd()) or vim.fn.getcwd()
 end
 

@@ -255,21 +255,37 @@ function M.pick_path(opts, callback)
   use_native()
 end
 
-function M.ensure_chat_window()
-  if state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr) then
-    if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
-      vim.api.nvim_set_current_win(state.chat_winid)
-      return state.chat_bufnr
-    end
-    -- Buffer exists but window was closed/hidden — reopen with nvim_open_win
-    -- directly so we always get the right window without an orphan buffer.
-    state.chat_winid = vim.api.nvim_open_win(state.chat_bufnr, true, {
+-- Open the chat window. Respects chat.fullscreen and chat.buf_name config.
+local function open_chat_win(bufnr)
+  if state.config.chat and state.config.chat.fullscreen then
+    -- Full-screen: open in a new tab.
+    vim.cmd('tabnew')
+    vim.api.nvim_win_set_buf(0, bufnr)
+    state.chat_winid = vim.api.nvim_get_current_win()
+  else
+    state.chat_winid = vim.api.nvim_open_win(bufnr, true, {
       split = 'right',
       win = 0,
     })
+  end
+  vim.wo[state.chat_winid].conceallevel = 2
+end
+
+function M.ensure_chat_window()
+  local buf_name = (state.config.chat and state.config.chat.buf_name) or '*CopilotAgentChat*'
+
+  if state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr) then
+    if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
+      vim.api.nvim_set_current_win(state.chat_winid)
+      state._chat_was_open = true
+      return state.chat_bufnr
+    end
+    -- Buffer exists but window was closed — reopen it.
+    open_chat_win(state.chat_bufnr)
     render_chat()
     refresh_chat_statusline()
     scroll_to_bottom()
+    state._chat_was_open = true
     return state.chat_bufnr
   end
 
@@ -277,20 +293,15 @@ function M.ensure_chat_window()
   state.chat_bufnr = vim.api.nvim_create_buf(false, true)
   local bufnr = state.chat_bufnr
   vim.bo[bufnr].buftype = 'nofile'
-  vim.bo[bufnr].buflisted = false
+  vim.bo[bufnr].buflisted = true
   vim.bo[bufnr].bufhidden = 'hide'
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].filetype = 'markdown'
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
-  vim.api.nvim_buf_set_name(bufnr, 'copilot-agent-chat')
+  vim.api.nvim_buf_set_name(bufnr, buf_name)
 
-  -- Open a vertical split window via the API — no throwaway buffer created.
-  state.chat_winid = vim.api.nvim_open_win(bufnr, true, {
-    split = 'right',
-    win = 0,
-  })
-  vim.wo[state.chat_winid].conceallevel = 2
+  open_chat_win(bufnr)
   refresh_chat_statusline()
 
   -- Tell render-markdown.nvim (and similar) to enable on this buffer.
@@ -309,10 +320,8 @@ function M.ensure_chat_window()
   end
 
   vim.keymap.set('n', 'q', function()
-    if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
-      vim.api.nvim_win_close(state.chat_winid, true)
-    end
-  end, { buffer = bufnr, silent = true })
+    M.close_chat_window()
+  end, { buffer = bufnr, silent = true, desc = 'Close Copilot chat window' })
 
   vim.keymap.set('n', '<C-c>', function()
     require('copilot_agent').cancel()
@@ -338,7 +347,89 @@ function M.ensure_chat_window()
 
   render_chat()
   scroll_to_bottom()
+  state._chat_was_open = true
   return bufnr
+end
+
+-- Close the chat (and input) window without deleting the buffer.
+function M.close_chat_window()
+  if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+    vim.api.nvim_win_close(state.input_winid, true)
+  end
+  if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
+    vim.api.nvim_win_close(state.chat_winid, true)
+  end
+  state._chat_was_open = false
+end
+
+-- Toggle the chat window: close if visible, reopen if hidden.
+function M.toggle_chat()
+  if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
+    M.close_chat_window()
+  else
+    M.ensure_chat_window()
+  end
+end
+
+-- Focus picker: list all chat buffers and jump to the selected one.
+function M.focus_chat()
+  local buf_name = (state.config.chat and state.config.chat.buf_name) or '*CopilotAgentChat*'
+  -- Collect all matching buffers (handles multiple instances if ever created).
+  local candidates = {}
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(b) then
+      local name = vim.api.nvim_buf_get_name(b)
+      -- Match exact name or the configured pattern.
+      if name == buf_name or name:find(vim.pesc(buf_name), 1, true) then
+        local wins = vim.fn.win_findbuf(b)
+        local status = #wins > 0 and '(open)' or '(hidden)'
+        table.insert(candidates, { bufnr = b, label = name .. '  ' .. status })
+      end
+    end
+  end
+
+  if #candidates == 0 then
+    -- No existing chat buffer — open a fresh one.
+    M.ensure_chat_window()
+    return
+  end
+
+  if #candidates == 1 then
+    -- Single buffer: jump straight to it.
+    local c = candidates[1]
+    local wins = vim.fn.win_findbuf(c.bufnr)
+    if #wins > 0 then
+      vim.api.nvim_set_current_win(wins[1])
+    else
+      state.chat_bufnr = c.bufnr
+      open_chat_win(c.bufnr)
+      render_chat()
+      refresh_chat_statusline()
+      scroll_to_bottom()
+    end
+    return
+  end
+
+  -- Multiple buffers: show a picker.
+  local display = vim.tbl_map(function(c)
+    return c.label
+  end, candidates)
+  vim.ui.select(display, { prompt = 'Switch to chat buffer' }, function(_, idx)
+    if not idx then
+      return
+    end
+    local chosen = candidates[idx]
+    local wins = vim.fn.win_findbuf(chosen.bufnr)
+    if #wins > 0 then
+      vim.api.nvim_set_current_win(wins[1])
+    else
+      state.chat_bufnr = chosen.bufnr
+      open_chat_win(chosen.bufnr)
+      render_chat()
+      refresh_chat_statusline()
+      scroll_to_bottom()
+    end
+  end)
 end
 
 -- Notify the server of the new agent mode so the SDK switches behaviour.

@@ -50,6 +50,14 @@ M._set_agent_mode = set_agent_mode
 M._open_input_window = open_input_window
 M._pick_path = chat.pick_path
 
+function M.toggle_chat()
+  chat.toggle_chat()
+end
+
+function M.focus_chat()
+  chat.focus_chat()
+end
+
 function M.setup(opts)
   state.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
   state.config.base_url = normalize_base_url(state.config.base_url)

@@ -122,6 +122,8 @@ describe('user commands', function()
 
   local expected_commands = {
     'CopilotAgentChat',
+    'CopilotAgentChatToggle',
+    'CopilotAgentChatFocus',
     'CopilotAgentNewSession',
     'CopilotAgentStart',
     'CopilotAgentAsk',

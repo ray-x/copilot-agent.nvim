@@ -32,6 +32,11 @@ local defaults = {
   chat = {
     split = 'botright vnew',
     title = 'Copilot Chat',
+    -- buf_name: name assigned to the chat buffer. Use '*CopilotAgentChat*' (the
+    -- asterisks make it show as [CopilotAgentChat] in some UIs and easy to :b<Tab>).
+    buf_name = '*CopilotAgentChat*',
+    -- fullscreen: when true the chat opens in a new tab instead of a vertical split.
+    fullscreen = false,
     -- Noisy system messages (permission decisions, etc.) go to vim.notify instead
     -- of the chat buffer. Set to ms > 0 to auto-clear from the cmdline area.
     system_notify_timeout = 3000,

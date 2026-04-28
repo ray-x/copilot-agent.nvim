@@ -1,4 +1,4 @@
-.PHONY: build fmt fmt-lua fmt-go
+.PHONY: build fmt fmt-lua fmt-go test test-go test-lua lint lint-lua lint-go check
 
 ## build: compile the Go service binary to bin/copilot-agent
 build:
@@ -15,3 +15,29 @@ fmt-lua:
 ## fmt-go: format Go files with gofmt
 fmt-go:
 	gofmt -w ./server
+
+## test: run all tests (Go + Lua)
+test: test-go test-lua
+
+## test-go: run Go unit tests for the server
+test-go:
+	cd server && go test ./... -v
+
+## test-lua: run Lua integration tests with plenary
+test-lua:
+	nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedFile tests/integration/setup_spec.lua"
+
+## lint: run all linters (Lua + Go)
+lint: lint-lua lint-go
+
+## lint-lua: run luacheck and stylua --check on Lua sources
+lint-lua:
+	luacheck lua/ --globals vim --no-max-line-length
+	stylua --check lua/ plugin/
+
+## lint-go: run go vet on the server
+lint-go:
+	cd server && go vet ./...
+
+## check: lint + test (full CI gate)
+check: lint test

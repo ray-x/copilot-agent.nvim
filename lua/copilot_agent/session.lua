@@ -194,43 +194,43 @@ function M.pick_or_create_session(callback)
         -- Deferred so the first picker fully closes before the second opens
         -- (some picker backends need time to tear down their window).
         vim.defer_fn(function()
-        local all_choices = {}
-        table.sort(persisted, function(a, b)
-          return (a.modifiedTime or a.startTime or '') > (b.modifiedTime or b.startTime or '')
-        end)
-        for _, s in ipairs(persisted) do
-          local label = s.sessionId:sub(1, 8)
-          if s.summary and s.summary ~= '' then
-            label = s.summary .. ' [' .. label .. ']'
+          local all_choices = {}
+          table.sort(persisted, function(a, b)
+            return (a.modifiedTime or a.startTime or '') > (b.modifiedTime or b.startTime or '')
+          end)
+          for _, s in ipairs(persisted) do
+            local label = s.sessionId:sub(1, 8)
+            if s.summary and s.summary ~= '' then
+              label = s.summary .. ' [' .. label .. ']'
+            end
+            local cwd = s.context and s.context.cwd or ''
+            if cwd ~= '' then
+              label = label .. '  ' .. vim.fn.fnamemodify(cwd, ':~')
+            end
+            table.insert(all_choices, { label = label, id = s.sessionId })
           end
-          local cwd = s.context and s.context.cwd or ''
-          if cwd ~= '' then
-            label = label .. '  ' .. vim.fn.fnamemodify(cwd, ':~')
-          end
-          table.insert(all_choices, { label = label, id = s.sessionId })
-        end
-        table.insert(all_choices, { label = 'Create new session', id = nil })
-        local all_display = vim.tbl_map(function(c)
-          return c.label
-        end, all_choices)
-        vim.ui.select(all_display, { prompt = 'All sessions' }, function(_, idx2)
-          if not idx2 then
-            local def = all_choices[1]
-            if def and def.id then
-              M.resume_session(def.id, callback)
+          table.insert(all_choices, { label = 'Create new session', id = nil })
+          local all_display = vim.tbl_map(function(c)
+            return c.label
+          end, all_choices)
+          vim.ui.select(all_display, { prompt = 'All sessions' }, function(_, idx2)
+            if not idx2 then
+              local def = all_choices[1]
+              if def and def.id then
+                M.resume_session(def.id, callback)
+              else
+                create_session(callback)
+              end
+              return
+            end
+            local p = all_choices[idx2]
+            if p.id then
+              append_entry('system', 'Resuming session ' .. p.id)
+              M.resume_session(p.id, callback)
             else
               create_session(callback)
             end
-            return
-          end
-          local p = all_choices[idx2]
-          if p.id then
-            append_entry('system', 'Resuming session ' .. p.id)
-            M.resume_session(p.id, callback)
-          else
-            create_session(callback)
-          end
-        end)
+          end)
         end, 100)
       elseif picked.id then
         append_entry('system', 'Resuming session ' .. picked.id)

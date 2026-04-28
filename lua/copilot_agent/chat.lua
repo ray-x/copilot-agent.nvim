@@ -501,16 +501,11 @@ function M.setup_action_keymaps(bufnr)
     if natural_perm and not had_manual and natural_perm ~= state.permission_mode then
       state.permission_mode = natural_perm
       if state.session_id then
-        request(
-          'POST',
-          '/sessions/' .. state.session_id .. '/permission-mode',
-          { mode = natural_perm },
-          function(_, err)
-            if err then
-              notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
-            end
+        request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)
+          if err then
+            notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
           end
-        )
+        end)
       end
     end
 
@@ -599,12 +594,7 @@ function M.setup_action_keymaps(bufnr)
             text = text,
             start_line = start_line,
             end_line = end_line,
-            display = 'selection:'
-              .. vim.fn.fnamemodify(filepath, ':t')
-              .. ':'
-              .. (start_line + 1)
-              .. '-'
-              .. (end_line + 1),
+            display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
           })
         end
       elseif choice == 'File' then
@@ -689,18 +679,13 @@ function M.setup_action_keymaps(bufnr)
           excluded_set[choice.name] = true
         end
         local new_excluded = vim.tbl_keys(excluded_set)
-        request(
-          'POST',
-          '/sessions/' .. state.session_id .. '/tools',
-          { excludedTools = new_excluded },
-          function(_, req_err)
-            if req_err then
-              notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
-            else
-              notify('Tools updated', vim.log.levels.INFO)
-            end
+        request('POST', '/sessions/' .. state.session_id .. '/tools', { excludedTools = new_excluded }, function(_, req_err)
+          if req_err then
+            notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
+          else
+            notify('Tools updated', vim.log.levels.INFO)
           end
-        )
+        end)
       end)
     end)
   end, { buffer = bufnr, silent = true, desc = 'Configure session tools' })

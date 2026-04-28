@@ -16,10 +16,36 @@ local _mode_icon = {
   autopilot = '🚀',
 }
 
+-- SDK loop style per input mode.
+local _sdk_label = {
+  ask = 'single-turn',
+  plan = 'plan',
+  agent = 'loop',
+  autopilot = 'loop',
+}
+
+-- Human-readable permission label.
+local _perm_label = {
+  interactive    = 'prompt-all',
+  ['approve-reads'] = 'auto-read',
+  ['approve-all']   = 'approve-all',
+  autopilot      = 'fully-auto',
+  ['reject-all'] = 'reject-all',
+}
+
+-- Combined mode+permission description shown in the statusline.
+-- Examples:
+--   💬ask  (single-turn · prompt-all)
+--   🤖agent  (loop · auto-read)
+--   🤖agent  (loop · approve-all)   ← manual override
+--   🚀autopilot  (loop · fully-auto)
 function M.statusline_mode()
   local mode = state.input_mode or 'agent'
+  local perm = state.permission_mode or 'interactive'
   local icon = _mode_icon[mode] or ''
-  return icon .. mode
+  local sdk  = _sdk_label[mode] or mode
+  local pl   = _perm_label[perm] or perm
+  return icon .. mode .. ' (' .. sdk .. '·' .. pl .. ')'
 end
 
 function M.statusline_model()
@@ -78,6 +104,7 @@ end
 
 local _perm_icons = {
   interactive = '🔐',
+  ['approve-reads'] = '📂',
   ['approve-all'] = '✅',
   autopilot = '🤖',
   ['reject-all'] = '🚫',
@@ -108,7 +135,6 @@ function M.statusline_component()
       M.statusline_tool(),
       M.statusline_intent(),
       M.statusline_context(),
-      M.statusline_permission(),
       M.statusline_attachments()
     ),
     ' '
@@ -128,7 +154,6 @@ function M.refresh_input_statusline()
         M.statusline_tool(),
         M.statusline_intent(),
         M.statusline_context(),
-        M.statusline_permission(),
         M.statusline_attachments()
       ),
       '  '
@@ -151,7 +176,7 @@ function M.refresh_chat_statusline()
   end
   local line = ' '
     .. table.concat(
-      build_parts(M.statusline_mode(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), M.statusline_permission(), session_label),
+      build_parts(M.statusline_mode(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), session_label),
       '  '
     )
   vim.wo[state.chat_winid].statusline = line

@@ -110,7 +110,7 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 | ------------------------- | ------------------------------------------------------------ | ------------------------- |
 | Backend                   | Official Copilot SDK (Go)                                    | Direct LLM REST API (Lua) |
 | Agent / tool-use mode     | ✅ full agentic (file edits, terminal, web search, …)        | ❌ chat only              |
-| Chat modes                | ask · plan · **agent**                                       | ask only                  |
+| Chat modes                | ask · plan · **agent** · autopilot                           | ask only                  |
 | Permission management     | ✅ interactive / approve-all / autopilot / reject-all        | ❌                        |
 | File & folder attachments | ✅ (buffer, selection, file, folder, image, clipboard paste) | ✅ (buffer context)       |
 | Session persistence       | ✅ per working directory                                     | ❌                        |
@@ -149,7 +149,7 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 | Permission management        | ✅ interactive / approve-all / autopilot / reject-all       | ❌                                        | ❌                                     |
 | Session persistence          | ✅ per working directory                                    | ❌                                        | ❌                                     |
 | LSP code actions             | ✅ (explain / fix / add tests / add docs)                   | ✅ (via prompt library)                   | ❌                                     |
-| Chat modes                   | ask · plan · agent                                          | chat · inline · workflow                  | ask · edit (Cursor-style)              |
+| Chat modes                   | ask · plan · agent · autopilot                              | chat · inline · workflow                  | ask · edit (Cursor-style)              |
 | External binary required     | Go binary                                                   | Pure Lua (plenary + treesitter)           | Rust binary (compiled at install)      |
 | GitHub Copilot subscription  | Required                                                    | Optional (one of many providers)          | Optional (one of many providers)       |
 | Community / ecosystem        | Smaller                                                     | Large (adapters, prompts, extensions)     | Large (star count, active development) |
@@ -326,22 +326,23 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 
 ### Keybindings
 
-| Key               | Action                                                                    |
-| ----------------- | ------------------------------------------------------------------------- |
-| `<CR>` / `<C-s>`  | Send message                                                              |
-| `q` / `<Esc>`     | Close input (normal mode)                                                 |
-| `<C-t>`           | Cycle chat mode: **ask → plan → agent**                                   |
-| `<M-m>`           | Open model picker                                                         |
-| `<M-a>`           | Cycle permission mode: **🔐 interactive → ✅ approve-all → 🤖 autopilot** |
-| `<C-a>`           | Attach resource — opens picker menu (see below)                           |
-| `<M-v>`           | Paste image from clipboard as attachment                                  |
-| `<C-x>`           | Toggle session tools (enable/disable individual tools)                    |
-| `<Tab>`           | Trigger completion (`@file` or `/slash-command`)                          |
-| `@<path>`         | Attach a file by path (autocomplete from working directory)               |
-| `/<cmd>`          | Slash command (autocomplete from 50+ supported commands)                  |
-| `<C-p>` / `<M-p>` | Previous prompt from history                                              |
-| `<C-n>` / `<M-n>` | Next prompt from history                                                  |
-| `?` (normal)      | Show help float                                                           |
+| Key               | Action                                                                                       |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `<CR>` / `<C-s>`  | Send message                                                                                 |
+| `q` / `<Esc>`     | Close input (normal mode)                                                                    |
+| `<C-t>`           | Cycle chat mode: **💬 ask → 📋 plan → 🤖 agent → 🚀 autopilot**                              |
+| `<M-m>`           | Open model picker                                                                            |
+| `<M-a>`           | Cycle permission mode: **🔐 interactive → 📂 approve-reads → ✅ approve-all → 🤖 autopilot** |
+| `<C-a>`           | Attach resource — opens picker menu (see below)                                              |
+| `<M-v>`           | Paste image from clipboard as attachment                                                     |
+| `<C-x>`           | Toggle session tools (enable/disable individual tools)                                       |
+| `<Tab>`           | Trigger completion (`@file` or `/slash-command`)                                             |
+| `@<path>`         | Attach a file by path (autocomplete from working directory)                                  |
+| `/<cmd>`          | Slash command (autocomplete from 50+ supported commands)                                     |
+| `<C-p>` / `<M-p>` | Previous prompt from history                                                                 |
+| `<C-n>` / `<M-n>` | Next prompt from history                                                                     |
+| `<C-c>` (output)  | Cancel current turn                                                                          |
+| `?` (normal)      | Show help float                                                                              |
 
 ### Attaching Files and Images
 
@@ -393,11 +394,16 @@ chat = { file_picker = 'native' }     -- always use vim.ui.input
 
 ### Chat Modes
 
-The mode is shown in the statusline prefix (e.g. `ask❯`):
+Cycled with `<C-t>` in the chat/input buffer. The mode is shown in the statusline.
 
-- **ask** — Standard Q&A
-- **plan** — Ask Copilot to create an implementation plan
-- **agent** — Autonomous agent mode (runs tools, edits files)
+| Mode          | Icon | SDK session mode | Description                                                                                                                                                                                                                             |
+| ------------- | ---- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **ask**       | 💬   | `interactive`    | Single-turn Q&A. The model answers once and stops. Tools are available but each call requires approval. Use for questions, explanations, and code reviews.                                                                              |
+| **plan**      | 📋   | `plan`           | Like ask, but the model is guided to produce a structured implementation plan before taking any action. Good for scoping a task before committing to it.                                                                                |
+| **agent**     | 🤖   | `autopilot`      | Multi-step agentic loop. The model calls tools (read files, run commands, write code) repeatedly and iterates until the task is done. Pauses to prompt you before writes/shell commands. Read access to the workspace is auto-approved. |
+| **autopilot** | 🚀   | `autopilot`      | Same agentic loop as agent, but with `approve-all` permission — every tool call (reads _and_ writes) is silently approved. Fully autonomous.                                                                                            |
+
+**SDK note:** The Copilot SDK has three session modes — `interactive`, `plan`, and `autopilot`. VS Code's four-label model maps exactly onto these: ask → `interactive`, plan → `plan`, agent and autopilot both → `autopilot` (the difference is the permission mode, not the SDK mode).
 
 ### Performance Tips
 
@@ -407,12 +413,18 @@ The mode is shown in the statusline prefix (e.g. `ask❯`):
 
 ### Permission Modes
 
-Cycled with `<M-a>` in the input buffer, or set via config / `POST /sessions/{id}/permission-mode`:
+Cycled with `<M-a>` in the input buffer, or set via config / `POST /sessions/{id}/permission-mode`.
+Each chat mode sets a sensible default permission automatically; `<M-a>` overrides it for the current mode.
 
-- 🔐 **interactive** — Neovim prompts `Allow / Deny` for each tool use
-- ✅ **approve-all** — Auto-approve all tool uses silently (default)
-- 🤖 **autopilot** — Approve tools + auto-answer any `ask_user` requests (fully autonomous)
-- 🚫 **reject-all** — Reject all tool uses (safe read-only mode)
+| Icon | Mode              | Behaviour                                                                                                           |
+| ---- | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 🔐   | **interactive**   | Neovim prompts `Allow / Deny` for every tool call                                                                   |
+| 📂   | **approve-reads** | Workspace read-file requests are auto-approved; writes and shell commands still prompt. Default for **agent** mode. |
+| ✅   | **approve-all**   | All tool calls silently approved. Default for **autopilot** mode.                                                   |
+| 🤖   | **autopilot**     | Approve all + auto-answer any `ask_user` questions (fully autonomous)                                               |
+| 🚫   | **reject-all**    | Reject all tool calls (safe read-only mode)                                                                         |
+
+### Performance Tips
 
 ---
 

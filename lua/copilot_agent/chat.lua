@@ -25,16 +25,16 @@ local scroll_to_bottom = render.scroll_to_bottom
 local M = {}
 
 local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
-local _perm_cycle = { 'interactive', 'approve-all', 'autopilot' }
+local _perm_cycle = { 'interactive', 'approve-reads', 'approve-all', 'autopilot' }
 
 -- Natural permission mode for each input mode, mirroring VS Code behaviour:
---   ask/plan  → interactive  (tools need explicit approval; plan rarely uses tools)
---   agent     → interactive  (tools run but Neovim prompts per tool — VS Code agent)
---   autopilot → approve-all  (tools auto-approved, no prompts — VS Code autopilot)
+--   ask/plan  → interactive   (tools need explicit approval)
+--   agent     → approve-reads (workspace reads auto-approved; writes/shell prompt)
+--   autopilot → approve-all   (fully autonomous, no prompts)
 local _mode_permission = {
   ask = 'interactive',
   plan = 'interactive',
-  agent = 'interactive',
+  agent = 'approve-reads',
   autopilot = 'approve-all',
 }
 
@@ -401,9 +401,12 @@ function M.setup_action_keymaps(bufnr)
     state.input_mode = new_mode
     M.set_agent_mode(new_mode)
 
-    -- Apply the natural permission mode for this input mode.
+    -- Switching to a new mode clears any manual permission override, then
+    -- applies the natural permission for the new mode.
+    local had_manual = state.permission_mode_manual
+    state.permission_mode_manual = false
     local natural_perm = _mode_permission[new_mode]
-    if natural_perm and natural_perm ~= state.permission_mode then
+    if natural_perm and not had_manual and natural_perm ~= state.permission_mode then
       state.permission_mode = natural_perm
       if state.session_id then
         request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)
@@ -439,6 +442,7 @@ function M.setup_action_keymaps(bufnr)
       end
     end
     state.permission_mode = next_mode
+    state.permission_mode_manual = true  -- user explicitly chose; <C-t> won't auto-reset this
     if state.session_id then
       request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = next_mode }, function(_, err)
         if err then
@@ -598,24 +602,27 @@ function M.setup_action_keymaps(bufnr)
   vim.keymap.set('n', '?', function()
     local help_lines = {
       ' Copilot Agent – Keybindings ',
-      string.rep('─', 44),
+      string.rep('─', 52),
       '',
       '  Send / Open input',
       '    <CR> / i / a    Open input buffer (output pane)',
       '    <C-s>           Send message / open input',
       '',
       '  Mode  (<C-t> to cycle)',
-      '    ask             Standard Q&A',
-      '    plan            Create an implementation plan',
-      '    agent           Autonomous agent mode',
+      '    💬 ask           Single-turn Q&A; prompt all tools',
+      '    📋 plan          Structured plan; prompt all tools',
+      '    🤖 agent         Agentic loop; auto-read workspace',
+      '    🚀 autopilot     Agentic loop; approve everything',
       '',
       '  Model',
       '    <M-m>           Open model picker',
       '',
-      '  Permission  (<M-a> to cycle)',
-      '    🔐 interactive   Prompt for each tool use',
-      '    ✅ approve-all   Auto-approve everything',
-      '    🤖 autopilot     Approve + auto-answer inputs',
+      '  Permission  (<M-a> to override; auto-set by mode)',
+      '    🔐 interactive   Prompt for every tool use',
+      '    📂 approve-reads Auto-approve workspace reads only',
+      '    ✅ approve-all   Auto-approve all tool uses',
+      '    🤖 autopilot     Approve all + auto-answer inputs',
+      '    🚫 reject-all    Reject all tool uses (read-only)',
       '',
       '  Attachments  (<C-a> to open menu)',
       '    Current buffer, visual selection,',
@@ -637,6 +644,7 @@ function M.setup_action_keymaps(bufnr)
       '',
       '  Output pane',
       '    q               Close chat window',
+      '    <C-c>           Cancel current turn',
       '    R               Refresh/re-render',
       '    ?               This help',
       '',

@@ -27,10 +27,11 @@ import (
 )
 
 const (
-	permissionModeApproveAll  = "approve-all"
-	permissionModeRejectAll   = "reject-all"
-	permissionModeInteractive = "interactive" // routes each request to the Neovim UI
-	permissionModeAutopilot   = "autopilot"   // approve-all + auto-answer user inputs
+	permissionModeApproveAll   = "approve-all"
+	permissionModeRejectAll    = "reject-all"
+	permissionModeInteractive  = "interactive"   // routes each request to the Neovim UI
+	permissionModeAutopilot    = "autopilot"     // approve-all + auto-answer user inputs
+	permissionModeApproveReads = "approve-reads" // auto-approve workspace reads; prompt for writes/shell
 	defaultModel              = ""
 	defaultClientName         = "neovim-copilot-service"
 	defaultInputTimeout       = 15 * time.Minute
@@ -376,7 +377,7 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		req.PermissionMode = permissionModeApproveAll
 	}
 	if !isValidPermissionMode(req.PermissionMode) {
-		writeError(w, http.StatusBadRequest, "permissionMode must be one of: interactive, approve-all, autopilot, reject-all")
+		writeError(w, http.StatusBadRequest, "permissionMode must be one of: interactive, approve-all, approve-reads, autopilot, reject-all")
 		return
 	}
 
@@ -773,7 +774,7 @@ func (s *service) handleSetPermissionMode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !isValidPermissionMode(req.Mode) {
-		writeError(w, http.StatusBadRequest, "mode must be one of: interactive, approve-all, autopilot, reject-all")
+		writeError(w, http.StatusBadRequest, "mode must be one of: interactive, approve-all, approve-reads, autopilot, reject-all")
 		return
 	}
 
@@ -965,6 +966,32 @@ func (m *managedSession) handlePermissionRequest(req copilot.PermissionRequest, 
 			"sessionId": inv.SessionID, "request": req, "decision": "rejected", "mode": m.permissionMode,
 		})
 		return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindRejected}, nil
+
+	case permissionModeApproveReads:
+		// Auto-approve read requests whose path is within the working directory.
+		// Everything else (write, shell, url, mcp, hook, …) falls through to the
+		// interactive handler so the user is still prompted.
+		if req.Kind == copilot.PermissionRequestKindRead {
+			path := firstNonEmpty(stringOrEmpty(req.Path), stringOrEmpty(req.FileName))
+			if path != "" && m.workingDirectory != "" {
+				wd := m.workingDirectory
+				if !strings.HasSuffix(wd, "/") {
+					wd += "/"
+				}
+				absPath := path
+				if !strings.HasPrefix(absPath, "/") {
+					absPath = wd + absPath
+				}
+				if strings.HasPrefix(absPath, wd) {
+					m.broadcastHostEvent("host.permission_decision", map[string]any{
+						"sessionId": inv.SessionID, "request": req, "decision": "approved", "mode": m.permissionMode,
+					})
+					return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+				}
+			}
+		}
+		// Fall through to interactive for non-read or out-of-workspace paths.
+		fallthrough
 
 	case permissionModeInteractive:
 		pending := &pendingPermission{
@@ -1413,6 +1440,13 @@ func boolOrDefault(value *bool, fallback bool) bool {
 	return *value
 }
 
+func stringOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
@@ -1424,7 +1458,7 @@ func firstNonEmpty(values ...string) string {
 
 func isValidPermissionMode(value string) bool {
 	switch value {
-	case permissionModeApproveAll, permissionModeRejectAll, permissionModeInteractive, permissionModeAutopilot:
+	case permissionModeApproveAll, permissionModeRejectAll, permissionModeInteractive, permissionModeAutopilot, permissionModeApproveReads:
 		return true
 	default:
 		return false

@@ -8,16 +8,42 @@ local assert_eq, assert_true, assert_false, assert_not_nil
 do
   local ok, luassert = pcall(require, 'luassert')
   if ok then
-    assert_eq       = function(a, b, msg) luassert.equal(a, b, msg) end
-    assert_true     = function(v, msg)    luassert.is_true(v, msg) end
-    assert_false    = function(v, msg)    luassert.is_false(v, msg) end
-    assert_not_nil  = function(v, msg)    luassert.is_not_nil(v, msg) end
+    assert_eq = function(a, b, msg)
+      luassert.equal(a, b, msg)
+    end
+    assert_true = function(v, msg)
+      luassert.is_true(v, msg)
+    end
+    assert_false = function(v, msg)
+      luassert.is_false(v, msg)
+    end
+    assert_not_nil = function(v, msg)
+      luassert.is_not_nil(v, msg)
+    end
   else
-    local function fail(msg) error(msg, 3) end
-    assert_eq      = function(a, b, msg) if a ~= b then fail(msg or ('expected '..tostring(b)..' got '..tostring(a))) end end
-    assert_true    = function(v, msg)    if not v  then fail(msg or 'expected true') end end
-    assert_false   = function(v, msg)    if v      then fail(msg or 'expected false') end end
-    assert_not_nil = function(v, msg)    if v == nil then fail(msg or 'expected non-nil') end end
+    local function fail(msg)
+      error(msg, 3)
+    end
+    assert_eq = function(a, b, msg)
+      if a ~= b then
+        fail(msg or ('expected ' .. tostring(b) .. ' got ' .. tostring(a)))
+      end
+    end
+    assert_true = function(v, msg)
+      if not v then
+        fail(msg or 'expected true')
+      end
+    end
+    assert_false = function(v, msg)
+      if v then
+        fail(msg or 'expected false')
+      end
+    end
+    assert_not_nil = function(v, msg)
+      if v == nil then
+        fail(msg or 'expected non-nil')
+      end
+    end
   end
 end
 
@@ -165,5 +191,64 @@ describe('statusline API', function()
     local v = agent.statusline()
     assert_eq('string', type(v))
     assert_true(#v > 0)
+  end)
+end)
+
+describe('model state sync', function()
+  local agent
+  local events
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    events = require('copilot_agent.events')
+  end)
+
+  it('syncs model changes from host events', function()
+    agent.state.current_model = 'claude-sonnet-4.6'
+    agent.state.config.session.model = 'claude-sonnet-4.6'
+    agent.state.reasoning_effort = 'high'
+
+    events.handle_host_event('host.model_changed', {
+      data = {
+        model = 'gpt-5.5',
+      },
+    })
+
+    assert_eq('gpt-5.5', agent.state.current_model)
+    assert_eq('gpt-5.5', agent.state.config.session.model)
+    assert_eq(nil, agent.state.reasoning_effort)
+  end)
+
+  it('syncs attached session model state from host events', function()
+    events.handle_host_event('host.session_attached', {
+      data = {
+        sessionId = 'session-123',
+        model = 'claude-opus-4.7',
+        reasoningEffort = 'medium',
+        summary = 'Attached session',
+      },
+    })
+
+    assert_eq('claude-opus-4.7', agent.state.current_model)
+    assert_eq('claude-opus-4.7', agent.state.config.session.model)
+    assert_eq('medium', agent.state.reasoning_effort)
+    assert_eq('Attached session', agent.state.session_name)
+  end)
+
+  it('syncs model and reasoning effort from session events', function()
+    events.handle_session_event({
+      type = 'session.model_change',
+      data = {
+        newModel = 'claude-opus-4.7',
+        newReasoningEffort = 'medium',
+      },
+    })
+
+    assert_eq('claude-opus-4.7', agent.state.current_model)
+    assert_eq('claude-opus-4.7', agent.state.config.session.model)
+    assert_eq('medium', agent.state.reasoning_effort)
   end)
 end)

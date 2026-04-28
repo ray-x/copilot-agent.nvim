@@ -574,7 +574,13 @@ session = { auto_resume = 'auto' }
 
 ---
 
-## Quick Start Example
+## Tutorial
+
+📖 **[Build a To-Do App with Copilot Agent](doc/tutorial-flask.md)** — A step-by-step guide covering installation (Copilot CLI + Go binary + lazy.nvim config), then building a full-stack to-do list app with a REST API and responsive UI — all from an empty folder, without leaving Neovim.
+
+---
+
+## Quick Start (HTTP API)
 
 ```bash
 # Terminal 1: start the service using the pre-built binary (no Go needed)

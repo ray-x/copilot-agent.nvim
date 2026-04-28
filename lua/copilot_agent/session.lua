@@ -15,12 +15,10 @@ local utils = require('copilot_agent.utils')
 
 local state = cfg.state
 local notify = cfg.notify
-local normalize_base_url = cfg.normalize_base_url
 
 local request = http.request
 
 local working_directory = service.working_directory
-local ensure_service_running = service.ensure_service_running
 
 local refresh_statuslines = sl.refresh_statuslines
 
@@ -278,6 +276,7 @@ create_session = function(callback, opts)
             return
           end
           state.config.session.model = reselected_model
+          state.current_model = reselected_model
           append_entry('system', 'Retrying session creation with model ' .. reselected_model)
           state.creating_session = true
           create_session(callback, { model_selection_attempts = false })

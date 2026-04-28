@@ -35,6 +35,21 @@ local is_thinking_content = utils.is_thinking_content
 
 local M = {}
 
+local function sync_model_state(model, reasoning_effort)
+  if type(model) == 'string' and model ~= '' then
+    state.current_model = model
+    state.config.session.model = model
+  elseif model == '' or model == nil then
+    state.current_model = nil
+  end
+
+  if type(reasoning_effort) == 'string' and reasoning_effort ~= '' then
+    state.reasoning_effort = reasoning_effort
+  elseif reasoning_effort == '' or reasoning_effort == nil then
+    state.reasoning_effort = nil
+  end
+end
+
 local function show_user_input_picker(payload)
   local request_payload = payload and payload.data and payload.data.request or nil
   if type(request_payload) ~= 'table' or type(request_payload.id) ~= 'string' then
@@ -116,15 +131,18 @@ local function handle_host_event(event_name, payload)
 
   local data = payload and payload.data or {}
   if event_name == 'host.session_attached' then
+    sync_model_state(data.model, data.reasoningEffort)
     if data.summary and data.summary ~= '' then
       state.session_name = data.summary
-      refresh_statuslines()
     end
+    refresh_statuslines()
     append_entry('system', 'Connected to session ' .. (data.sessionId or state.session_id or '<unknown>'))
   elseif event_name == 'host.session_name_updated' then
     state.session_name = data.name or state.session_name
     refresh_statuslines()
   elseif event_name == 'host.model_changed' then
+    sync_model_state(data.model, data.reasoningEffort)
+    refresh_statuslines()
     append_entry('system', 'Model changed to ' .. tostring(data.model or '<unknown>'))
   elseif event_name == 'host.permission_requested' then
     -- In interactive mode, Go sends a request object with an ID; ask the user.
@@ -248,7 +266,8 @@ local function handle_host_event(event_name, payload)
         if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 and vim.fn.executable(diff_cmd[1]) == 1 then
           local buf = vim.api.nvim_create_buf(false, true)
           local win = vim.api.nvim_open_win(buf, true, win_opts)
-          vim.fn.termopen(diff_cmd, {
+          vim.fn.jobstart(diff_cmd, {
+            term = true,
             on_exit = function()
               vim.schedule(function()
                 if vim.api.nvim_buf_is_valid(buf) then
@@ -260,10 +279,9 @@ local function handle_host_event(event_name, payload)
           -- Feed the diff text to the terminal's stdin.
           local chan = vim.bo[buf].channel
           if chan and chan > 0 then
-            vim.fn.chansend(chan, diff_text)
-            vim.fn.chanclose(chan, 'stdin')
+            pcall(vim.fn.chansend, chan, diff_text)
+            pcall(vim.fn.chanclose, chan, 'stdin')
           end
-          vim.cmd('startinsert') -- let terminal render
           return
         end
 
@@ -511,7 +529,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'session.model_change' then
-    state.current_model = data.model or data.newModel or nil
+    sync_model_state(data.model or data.newModel, data.reasoningEffort or data.newReasoningEffort)
     refresh_statuslines()
     return
   end

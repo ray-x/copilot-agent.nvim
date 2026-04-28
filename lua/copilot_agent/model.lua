@@ -188,10 +188,13 @@ function M.apply_model(model, callback, opts)
       return
     end
     state.config.session.model = response and response.model or selected
+    state.current_model = state.config.session.model
     local msg = 'Active model: ' .. state.config.session.model
     if opts.reasoning_effort and opts.reasoning_effort ~= '' then
       state.reasoning_effort = opts.reasoning_effort
       msg = msg .. ' (effort: ' .. opts.reasoning_effort .. ')'
+    else
+      state.reasoning_effort = nil
     end
     append_entry('system', msg)
     refresh_statuslines()

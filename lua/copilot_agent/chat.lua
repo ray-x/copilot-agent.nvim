@@ -786,7 +786,7 @@ function M.ask(prompt, opts)
     return
   end
 
-  require('copilot_agent').open_chat()
+  require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
   append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
   -- Mark busy immediately so the spinner shows before the first delta arrives.
   state.chat_busy = true

@@ -252,3 +252,77 @@ describe('model state sync', function()
     assert_eq('medium', agent.state.reasoning_effort)
   end)
 end)
+
+describe('chat session activation', function()
+  local agent
+  local session
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    session = require('copilot_agent.session')
+  end)
+
+  it('requests prompt activation when chat opens without a session', function()
+    local original_with_session = session.with_session
+    local captured_opts
+
+    session.with_session = function(_, opts)
+      captured_opts = opts
+    end
+
+    agent.state.config.auto_create_session = true
+    agent.open_chat()
+
+    session.with_session = original_with_session
+
+    assert_true(type(captured_opts) == 'table')
+    assert_true(captured_opts.open_input_on_session_ready)
+  end)
+
+  it('does not request prompt activation when sending a direct prompt', function()
+    local original_open_chat = agent.open_chat
+    local original_with_session = session.with_session
+    local captured_opts
+
+    agent.open_chat = function(opts)
+      captured_opts = opts
+    end
+    session.with_session = function(_, opts)
+      captured_opts = captured_opts or opts
+    end
+
+    agent.state.config.auto_create_session = true
+    agent.ask('hello')
+
+    agent.open_chat = original_open_chat
+    session.with_session = original_with_session
+
+    assert_true(type(captured_opts) == 'table')
+    assert_eq(false, captured_opts.activate_input_on_session_ready)
+  end)
+
+  it('opens the input window when the selected session becomes ready', function()
+    local original_open_input = agent._open_input_window
+    local opened = false
+
+    agent.open_chat()
+    agent.state.open_input_on_session_ready = true
+    agent._open_input_window = function()
+      opened = true
+    end
+
+    session._on_session_ready('session-123')
+
+    vim.wait(100, function()
+      return opened
+    end)
+
+    agent._open_input_window = original_open_input
+
+    assert_true(opened)
+    assert_false(agent.state.open_input_on_session_ready)
+  end)
+end)

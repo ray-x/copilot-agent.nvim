@@ -47,6 +47,19 @@ function M.discard_pending_attachments()
   refresh_statuslines()
 end
 
+local function focus_input_for_active_chat()
+  if not (state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid)) then
+    return
+  end
+
+  vim.schedule(function()
+    if not (state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid)) then
+      return
+    end
+    require('copilot_agent')._open_input_window()
+  end)
+end
+
 function M.disconnect_session(session_id, delete_state, callback)
   stop_event_stream()
   if not session_id then
@@ -64,10 +77,15 @@ function M.disconnect_session(session_id, delete_state, callback)
 end
 
 local function on_session_ready(session_id, err)
+  local should_open_input = session_id and not err and state.open_input_on_session_ready
+  state.open_input_on_session_ready = false
   for _, callback in ipairs(state.pending_session_callbacks) do
     callback(session_id, err)
   end
   state.pending_session_callbacks = {}
+  if should_open_input then
+    focus_input_for_active_chat()
+  end
 end
 
 function M.resume_session(session_id, callback)
@@ -327,13 +345,20 @@ function M.create_new_session(callback)
   create_session(callback)
 end
 
-function M.with_session(callback)
+function M.with_session(callback, opts)
+  opts = opts or {}
   if state.session_id then
+    if opts.open_input_on_session_ready then
+      focus_input_for_active_chat()
+    end
     callback(state.session_id)
     return
   end
 
   table.insert(state.pending_session_callbacks, callback)
+  if opts.open_input_on_session_ready then
+    state.open_input_on_session_ready = true
+  end
   if state.creating_session then
     return
   end
@@ -482,5 +507,8 @@ function M.cancel()
     schedule_render()
   end)
 end
+
+M._on_session_ready = on_session_ready
+M._focus_input_for_active_chat = focus_input_for_active_chat
 
 return M

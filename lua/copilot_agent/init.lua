@@ -74,8 +74,10 @@ end
 
 function M.open_chat(opts)
   ensure_chat_window(opts)
-  if state.config.auto_create_session and not state.session_id and not state.creating_session then
-    session.with_session(function() end)
+  if state.config.auto_create_session and not state.session_id then
+    session.with_session(function() end, {
+      open_input_on_session_ready = opts == nil or opts.activate_input_on_session_ready ~= false,
+    })
   end
   return state.chat_bufnr
 end

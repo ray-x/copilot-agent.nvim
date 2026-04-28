@@ -91,6 +91,7 @@ local state = {
   model_cache = {},
   creating_session = false,
   pending_session_callbacks = {},
+  open_input_on_session_ready = false,
   prompt_history = {},
   prompt_history_index = nil,
   prompt_history_draft = '',

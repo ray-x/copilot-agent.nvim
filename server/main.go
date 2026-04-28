@@ -32,9 +32,9 @@ const (
 	permissionModeInteractive  = "interactive"   // routes each request to the Neovim UI
 	permissionModeAutopilot    = "autopilot"     // approve-all + auto-answer user inputs
 	permissionModeApproveReads = "approve-reads" // auto-approve workspace reads; prompt for writes/shell
-	defaultModel              = ""
-	defaultClientName         = "neovim-copilot-service"
-	defaultInputTimeout       = 15 * time.Minute
+	defaultModel               = ""
+	defaultClientName          = "neovim-copilot-service"
+	defaultInputTimeout        = 15 * time.Minute
 )
 
 type createSessionRequest struct {

@@ -26,10 +26,10 @@ local _sdk_label = {
 
 -- Human-readable permission label.
 local _perm_label = {
-  interactive    = 'prompt-all',
+  interactive = 'prompt-all',
   ['approve-reads'] = 'auto-read',
-  ['approve-all']   = 'approve-all',
-  autopilot      = 'fully-auto',
+  ['approve-all'] = 'approve-all',
+  autopilot = 'fully-auto',
   ['reject-all'] = 'reject-all',
 }
 
@@ -43,8 +43,8 @@ function M.statusline_mode()
   local mode = state.input_mode or 'agent'
   local perm = state.permission_mode or 'interactive'
   local icon = _mode_icon[mode] or ''
-  local sdk  = _sdk_label[mode] or mode
-  local pl   = _perm_label[perm] or perm
+  local sdk = _sdk_label[mode] or mode
+  local pl = _perm_label[perm] or perm
   return icon .. mode .. ' (' .. sdk .. '·' .. pl .. ')'
 end
 
@@ -127,18 +127,7 @@ local function build_parts(...)
 end
 
 function M.statusline_component()
-  return table.concat(
-    build_parts(
-      M.statusline_mode(),
-      M.statusline_busy(),
-      M.statusline_model(),
-      M.statusline_tool(),
-      M.statusline_intent(),
-      M.statusline_context(),
-      M.statusline_attachments()
-    ),
-    ' '
-  )
+  return table.concat(build_parts(M.statusline_mode(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), M.statusline_attachments()), ' ')
 end
 
 function M.refresh_input_statusline()
@@ -146,18 +135,7 @@ function M.refresh_input_statusline()
     return
   end
   local line = ' '
-    .. table.concat(
-      build_parts(
-        M.statusline_mode(),
-        M.statusline_busy(),
-        M.statusline_model(),
-        M.statusline_tool(),
-        M.statusline_intent(),
-        M.statusline_context(),
-        M.statusline_attachments()
-      ),
-      '  '
-    )
+    .. table.concat(build_parts(M.statusline_mode(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), M.statusline_attachments()), '  ')
     .. '  (? for help)'
   vim.wo[state.input_winid].statusline = line
 end
@@ -174,11 +152,7 @@ function M.refresh_chat_statusline()
       session_label = '#' .. state.session_id:sub(1, 8)
     end
   end
-  local line = ' '
-    .. table.concat(
-      build_parts(M.statusline_mode(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), session_label),
-      '  '
-    )
+  local line = ' ' .. table.concat(build_parts(M.statusline_mode(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), session_label), '  ')
   vim.wo[state.chat_winid].statusline = line
 end
 

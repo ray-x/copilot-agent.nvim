@@ -442,7 +442,7 @@ function M.setup_action_keymaps(bufnr)
       end
     end
     state.permission_mode = next_mode
-    state.permission_mode_manual = true  -- user explicitly chose; <C-t> won't auto-reset this
+    state.permission_mode_manual = true -- user explicitly chose; <C-t> won't auto-reset this
     if state.session_id then
       request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = next_mode }, function(_, err)
         if err then

@@ -167,6 +167,11 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 - GitHub Copilot CLI runtime (`@github/copilot/index.js`) or access via `-cli-url`
 - Neovim 0.11+ (0.12+ recommended)
 
+**Optional:**
+- [`delta`](https://github.com/dandavison/delta) — rich diff viewer for permission "Show diff" (auto side-by-side for wide windows; falls back to builtin if not installed)
+- `pngpaste` / `wl-paste` / `xclip` — clipboard image paste
+- snacks.picker / telescope / fzf-lua / mini.pick — fuzzy file picker
+
 Run `:checkhealth copilot_agent` after installation to verify all requirements.
 
 ---
@@ -236,6 +241,8 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         title = "Copilot Chat",
         system_notify_timeout = 3000,    -- ms before auto-clearing transient notices
         render_markdown = true,          -- set false to disable render-markdown.nvim (faster on long responses)
+        diff_cmd = { 'delta' },          -- external diff viewer; false = builtin float
+        diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file
       },
       notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
     })
@@ -307,7 +314,7 @@ configures its HTTP client automatically — no manual `base_url` needed.
 | Command                      | Description                                                |
 | ---------------------------- | ---------------------------------------------------------- |
 | `:CopilotAgentInstall`       | Download pre-built binary for the current platform         |
-| `:CopilotAgentChat`          | Open the chat buffer (creates session if needed)           |
+| `:CopilotAgentChat [fullscreen]` | Open the chat buffer; `fullscreen` opens in a new tab       |
 | `:CopilotAgentAsk [prompt]`  | Send a prompt; no argument opens `vim.ui.input()`          |
 | `:CopilotAgentNewSession`    | Disconnect current session and start a fresh one           |
 | `:CopilotAgentSwitchSession` | Pick from all persisted sessions and switch                |
@@ -317,6 +324,7 @@ configures its HTTP client automatically — no manual `base_url` needed.
 | `:CopilotAgentStop!`         | Disconnect and delete persisted session state              |
 | `:CopilotAgentStatus`        | Show service URL, session id, stream status                |
 | `:CopilotAgentLsp`           | Start (or reuse) the LSP client for code actions           |
+| `:CopilotAgentCancel`        | Cancel the current agent turn                              |
 
 ---
 
@@ -475,11 +483,14 @@ Expose Copilot state in your statusline. Each function returns a short string.
 require("lualine").setup {
   sections = {
     lualine_x = {
-      require("copilot_agent").statusline_mode,        -- [ask] / [plan] / [agent]
+      require("copilot_agent").statusline_mode,        -- [ask] / [plan] / [agent] / [autopilot]
       require("copilot_agent").statusline_model,       -- claude-sonnet-4.6 / default
       require("copilot_agent").statusline_busy,        -- ✓ or ⏳
       require("copilot_agent").statusline_permission,  -- 🔐interactive / ✅approve-all / 🤖autopilot
       require("copilot_agent").statusline_attachments, -- 📎3 (when attachments pending)
+      require("copilot_agent").statusline_tool,        -- 🔧 read_file (active tool)
+      require("copilot_agent").statusline_intent,      -- current agent intent
+      require("copilot_agent").statusline_context,     -- 12k/200k (token usage)
     }
   }
 }

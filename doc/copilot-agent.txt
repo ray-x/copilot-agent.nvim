@@ -66,6 +66,7 @@ Optional:
   • pngpaste (macOS)      — clipboard image paste
   • wl-paste (Linux/Wayland) — clipboard image paste
   • xclip or xsel (Linux/X11) — clipboard image paste
+  • delta                  — rich diff viewer for permission "Show diff"
   • snacks.picker, telescope, fzf-lua, or mini.pick — fuzzy file picker
 
 Run |:checkhealth| copilot_agent to verify all requirements.
@@ -160,8 +161,9 @@ optional — defaults are shown below: >lua
     (no Go toolchain required). See |copilot-agent-installation|.
 
                                                   *:CopilotAgentChat*
-:CopilotAgentChat
+:CopilotAgentChat [fullscreen]
     Open the chat buffer. Creates a session if one does not exist.
+    With "fullscreen" argument, opens in a new tab instead of a split.
 
                                                   *:CopilotAgentAsk*
 :CopilotAgentAsk [prompt]
@@ -210,6 +212,11 @@ optional — defaults are shown below: >lua
     pending attachment. Equivalent to <M-v> in the input buffer.
     See |copilot-agent-clipboard|.
 
+                                                  *:CopilotAgentCancel*
+:CopilotAgentCancel
+    Cancel the current agent turn. Also mapped to <C-c> in the chat
+    buffer.
+
 ==============================================================================
 6. INPUT BUFFER                                   *copilot-agent-input*
 
@@ -223,7 +230,7 @@ Normal and insert mode (unless noted):
 
   <CR> / <C-s>        Send the prompt
   q / <Esc>           Close the input buffer (normal mode only)
-  <C-t>               Cycle chat mode: ask → plan → agent
+  <C-t>               Cycle chat mode: ask → plan → agent → autopilot
   <M-a>               Cycle permission mode (see |copilot-agent-permissions|)
   <M-m>               Open the model picker (see |copilot-agent-models|)
   <C-a>               Open the attachment picker menu
@@ -289,13 +296,14 @@ Required tools by platform:
 
 The current mode is shown in the prompt prefix (e.g. `agent❯`).
 
-  ask       Standard question-and-answer
-  plan      Ask Copilot to create an implementation plan
-  agent     Autonomous mode — Copilot runs tools and edits files
+  ask        💬  Standard question-and-answer (interactive permission)
+  plan       📋  Ask Copilot to create an implementation plan
+  agent      🤖  Agentic loop — reads auto-approved, writes prompt (approve-reads)
+  autopilot  🚀  Fully autonomous — all tools silently approved (approve-all)
 
-Cycle with <C-t> in the input buffer or set via config: >lua
-  permission_mode = "approve-all"
-<
+Cycle with <C-t> in the input buffer. Each mode sets a sensible default
+permission mode automatically; override with <M-a>.
+
 
 ------------------------------------------------------------------------------
 6.4 Slash Commands                                *copilot-agent-slash*
@@ -318,10 +326,11 @@ Type `@` followed by a file path for file attachments with autocomplete.
 Control how tool-use requests are handled. Cycle with <M-a> in the input
 buffer, or set via |copilot-agent-setup| or `POST /sessions/{id}/permission-mode`.
 
-  interactive   Neovim shows Allow / Deny for each tool use (🔐)
-  approve-all   Auto-approve all tool uses silently (✅) [default]
-  autopilot     approve-all + auto-answer ask_user requests (🤖)
-  reject-all    Reject all tool uses — safe read-only mode (🚫)
+  interactive     Neovim shows Allow / Deny for each tool use (🔐)
+  approve-reads   Auto-approve workspace reads; prompt for writes/shell (📂)
+  approve-all     Auto-approve all tool uses silently (✅) [default]
+  autopilot       approve-all + auto-answer ask_user requests (🤖)
+  reject-all      Reject all tool uses — safe read-only mode (🚫)
 
 In interactive mode, each permission prompt offers additional options:
 
@@ -331,9 +340,12 @@ In interactive mode, each permission prompt offers additional options:
   Allow this directory     Approve + whitelist the directory (read/write only)
   Allow all for session    Approve + switch to approve-all for the rest
 
-When a write permission includes a diff, "Show diff" opens a floating
-window with syntax-highlighted unified diff. Press `q` or `<Esc>` to
-close the preview and return to the Allow/Deny picker.
+When a write permission includes a diff, "Show diff" pipes it through the
+configured `chat.diff_cmd` (default: `delta`) in a floating terminal
+buffer. If the command is not found, falls back to a plain diff buffer.
+When delta is used and the window is ≥100 columns, `--side-by-side` is
+appended automatically. Press `q` or `<Esc>` to close and return to the
+Allow/Deny picker.
 
 The current mode is shown by |copilot-agent-statusline| functions.
 
@@ -412,11 +424,14 @@ Call `start_lsp()` in setup to make code actions available immediately: >lua
 
 Each function returns a short display string and is safe to call at any time.
 
-  require("copilot_agent").statusline_mode()        -- [ask] / [plan] / [agent]
+  require("copilot_agent").statusline_mode()        -- [ask] / [plan] / [agent] / [autopilot]
   require("copilot_agent").statusline_model()       -- claude-sonnet-4.6
   require("copilot_agent").statusline_busy()        -- ✓ or ⏳
   require("copilot_agent").statusline_permission()  -- 🔐interactive / ✅approve-all / …
   require("copilot_agent").statusline_attachments() -- 📎3 (only when N > 0)
+  require("copilot_agent").statusline_tool()        -- 🔧 read_file (active tool)
+  require("copilot_agent").statusline_intent()      -- current agent intent
+  require("copilot_agent").statusline_context()     -- 12k/200k (token usage)
 
 lualine example: >lua
   require("lualine").setup({
@@ -567,6 +582,29 @@ chat.file_picker ~
   Fuzzy picker to use for file/folder/image attachment.
   See |copilot-agent-picker|.
 
+chat.diff_review ~
+  Type: boolean
+  Default: `true`
+  When true, offer a vimdiff review after the agent modifies a git-tracked
+  file. Set false to just notify and auto-reload the buffer.
+
+chat.diff_cmd ~
+  Type: string[] | false
+  Default: `{ "delta" }`
+  External diff command for the permission "Show diff" viewer. The diff
+  text is piped via stdin. Examples: `{ "delta" }`,
+  `{ "delta", "--side-by-side" }`, `{ "diff-so-fancy" }`.
+  When set to `{ "delta" }` and the window is ≥100 columns,
+  `--side-by-side` is appended automatically.
+  Falls back to a builtin floating diff buffer if the command is not found.
+  Set to `false` to always use the builtin diff viewer.
+
+chat.fullscreen ~
+  Type: boolean
+  Default: `false`
+  When true, `:CopilotAgentChat` opens in a new tab by default.
+  Can also be triggered per-invocation: `:CopilotAgentChat fullscreen`.
+
 ==============================================================================
 13. HTTP API                                      *copilot-agent-api*
 
@@ -654,7 +692,7 @@ switch_session()                          *copilot-agent.switch_session()*
 
 ask({prompt}, {opts})                     *copilot-agent.ask()*
   Send {prompt} to the active session. {opts} may include:
-    mode        "ask" | "plan" | "agent"
+    mode        "ask" | "plan" | "agent" | "autopilot"
     attachments List of attachment tables (see source for schema)
 
 select_model({model})                     *copilot-agent.select_model()*
@@ -690,6 +728,9 @@ statusline_model()                        *copilot-agent.statusline_model()*
 statusline_busy()                         *copilot-agent.statusline_busy()*
 statusline_permission()                   *copilot-agent.statusline_permission()*
 statusline_attachments()                  *copilot-agent.statusline_attachments()*
+statusline_tool()                         *copilot-agent.statusline_tool()*
+statusline_intent()                       *copilot-agent.statusline_intent()*
+statusline_context()                      *copilot-agent.statusline_context()*
   Statusline helper functions. See |copilot-agent-statusline|.
 
 ==============================================================================
@@ -724,6 +765,23 @@ v0.4.0 ~
   • Fixed LSP race condition (sync.Mutex on sessionID)
   • Fixed URI percent-decoding in uriToFilename
   • Fixed missing POST /sessions/{id}/tools endpoint
+
+v0.5.0 ~
+  • Four chat modes: ask, plan, agent, autopilot (matching VS Code)
+  • Emoji icons in mode prompt prefix (💬 📋 🤖 🚀)
+  • `approve-reads` permission mode (auto-approve reads, prompt writes)
+  • Extmark-based role header highlights (works with treesitter)
+  • `User:` / `Assistant:` headers in chat history replay
+  • Horizontal rule separator between chat messages
+  • Markdown table column alignment (conceal-aware)
+  • Statusline: tool activity, agent intent, context token usage
+  • External diff viewer (`chat.diff_cmd`, default: `delta`)
+    — auto side-by-side for wide windows, fallback to builtin
+  • `:CopilotAgentChat fullscreen` command argument
+  • `:CopilotAgentCancel` / `<C-c>` to abort current turn
+  • `chat.diff_review` config for post-change vimdiff review
+  • Fixed duplicate user messages in active conversation
+  • Fixed nested session picker (deferred second `vim.ui.select`)
 
 ==============================================================================
 vim:tw=78:ts=8:ft=help:norl:

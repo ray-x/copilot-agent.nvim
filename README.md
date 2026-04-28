@@ -424,6 +424,29 @@ Each chat mode sets a sensible default permission automatically; `<M-a>` overrid
 | 🤖   | **autopilot**     | Approve all + auto-answer any `ask_user` questions (fully autonomous)                                               |
 | 🚫   | **reject-all**    | Reject all tool calls (safe read-only mode)                                                                         |
 
+#### `ask_user` requests — when will Copilot ask you a question?
+
+There are **two separate interruption points** in an agentic loop:
+
+1. **Tool-call approval** — before the SDK executes a tool (read file, run shell, write code, etc.).
+   Controlled entirely by the permission mode above.
+
+2. **`ask_user` requests** — the *model itself* decides to pause and ask you a clarifying question
+   mid-task (e.g. "Which branch should I target?" or "There are two test files — which one?").
+   This is independent of tool approval and happens at the model's discretion.
+
+| Permission mode   | Tool calls          | `ask_user` questions          |
+| ----------------- | ------------------- | ----------------------------- |
+| **interactive**   | prompt every call   | shown via `vim.ui.input/select` |
+| **approve-reads** | prompt writes/shell | shown via `vim.ui.input/select` |
+| **approve-all**   | silent              | shown via `vim.ui.input/select` |
+| **autopilot**     | silent              | **auto-answered** (first choice, silently) |
+| **reject-all**    | all rejected        | shown via `vim.ui.input/select` |
+
+> **Practical rule:** use **agent** mode (`approve-reads`) for day-to-day tasks — Copilot will still
+> ask you clarifying questions but won't prompt for every file read. Switch to **autopilot** permission
+> only when you are confident in the task scope and want zero interruptions.
+
 ### Performance Tips
 
 ---

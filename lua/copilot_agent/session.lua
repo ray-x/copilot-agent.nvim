@@ -15,14 +15,18 @@ local utils = require('copilot_agent.utils')
 
 local state = cfg.state
 local notify = cfg.notify
+local normalize_base_url = cfg.normalize_base_url
 
 local request = http.request
 
 local working_directory = service.working_directory
+local ensure_service_running = service.ensure_service_running
 
 local refresh_statuslines = sl.refresh_statuslines
 
 local append_entry = render.append_entry
+local clear_transcript = render.clear_transcript
+local schedule_render = render.schedule_render
 
 local stop_event_stream = events.stop_event_stream
 local start_event_stream = events.start_event_stream
@@ -337,6 +341,147 @@ function M.with_session(callback)
 
   state.creating_session = true
   M.pick_or_create_session(nil)
+end
+
+-- ── High-level session operations (moved from init.lua) ──────────────────────
+
+--- Create a new session, disconnecting the previous one.
+function M.new_session()
+  local previous_session_id = state.session_id
+  state.session_id = nil
+  state.session_name = nil
+  M.discard_pending_attachments()
+  clear_transcript()
+  -- Ensure chat window via lazy require to avoid circular dependency.
+  require('copilot_agent').open_chat()
+  M.disconnect_session(previous_session_id, false, function(err)
+    if err then
+      append_entry('error', 'Failed to disconnect previous session: ' .. err)
+      return
+    end
+    M.create_new_session(function(session_id, create_err)
+      if create_err then
+        append_entry('error', create_err)
+        return
+      end
+      append_entry('system', 'Created session ' .. session_id)
+    end)
+  end)
+end
+
+--- Show a picker of all persisted sessions and switch to the selected one.
+function M.switch_session()
+  request('GET', '/sessions', nil, function(response, err)
+    if err then
+      notify('Failed to list sessions: ' .. err, vim.log.levels.ERROR)
+      return
+    end
+
+    local persisted = (response and response.persisted) or {}
+    if #persisted == 0 then
+      notify('No sessions found. Use :CopilotAgentNewSession to create one.', vim.log.levels.INFO)
+      return
+    end
+
+    -- Sort newest-first.
+    table.sort(persisted, function(a, b)
+      local ta = a.modifiedTime or a.startTime or ''
+      local tb = b.modifiedTime or b.startTime or ''
+      return ta > tb
+    end)
+
+    local choices = {}
+    for _, s in ipairs(persisted) do
+      local label = s.sessionId:sub(1, 8)
+      if s.summary and s.summary ~= '' then
+        label = s.summary .. ' [' .. label .. ']'
+      else
+        local ts = s.modifiedTime or s.startTime or ''
+        if ts ~= '' then
+          label = label .. ' (' .. ts .. ')'
+        end
+      end
+      local cwd_label = ''
+      if s.context and s.context.cwd then
+        cwd_label = '  ' .. vim.fn.fnamemodify(s.context.cwd, ':~')
+      end
+      -- Mark the currently active session.
+      local active = (state.session_id and s.sessionId == state.session_id) and ' ●' or ''
+      table.insert(choices, { label = label .. cwd_label .. active, id = s.sessionId })
+    end
+    table.insert(choices, { label = '+ New session', id = nil })
+
+    local display = vim.tbl_map(function(c)
+      return c.label
+    end, choices)
+
+    vim.ui.select(display, { prompt = 'Switch session' }, function(_, idx)
+      if not idx then
+        return
+      end
+      local picked = choices[idx]
+      if not picked.id then
+        M.new_session()
+        return
+      end
+      if state.session_id and picked.id == state.session_id then
+        notify('Already on this session', vim.log.levels.INFO)
+        return
+      end
+      local previous_session_id = state.session_id
+      state.session_id = nil
+      state.session_name = nil
+      state.creating_session = true
+      M.discard_pending_attachments()
+      clear_transcript()
+      require('copilot_agent')._ensure_chat_window()
+      M.disconnect_session(previous_session_id, false, function(disconnect_err)
+        if disconnect_err then
+          append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
+        end
+        append_entry('system', 'Switching to session ' .. picked.id:sub(1, 8) .. '…')
+        M.resume_session(picked.id)
+      end)
+    end)
+  end)
+end
+
+--- Disconnect the active session.
+function M.stop(delete_state)
+  if not state.session_id then
+    append_entry('system', 'No active session')
+    return
+  end
+
+  local session_id = state.session_id
+  state.session_id = nil
+  M.discard_pending_attachments()
+  clear_transcript()
+  M.disconnect_session(session_id, delete_state, function(err)
+    if err then
+      append_entry('error', 'Failed to disconnect session: ' .. err)
+      return
+    end
+    append_entry('system', 'Disconnected session ' .. session_id)
+  end)
+end
+
+--- Cancel the current in-progress turn.
+function M.cancel()
+  if not state.session_id then
+    notify('No active session to cancel', vim.log.levels.WARN)
+    return
+  end
+  request('POST', '/sessions/' .. state.session_id .. '/abort', {}, function(_, err)
+    if err then
+      append_entry('error', 'Cancel failed: ' .. err)
+      return
+    end
+    state.chat_busy = false
+    refresh_statuslines()
+    append_entry('system', 'Turn cancelled')
+    schedule_render()
+  end)
 end
 
 return M

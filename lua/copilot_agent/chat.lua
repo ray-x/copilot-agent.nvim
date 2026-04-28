@@ -21,6 +21,8 @@ local refresh_chat_statusline = sl.refresh_chat_statusline
 
 local render_chat = render.render_chat
 local scroll_to_bottom = render.scroll_to_bottom
+local append_entry = render.append_entry
+local schedule_render = render.schedule_render
 
 local M = {}
 
@@ -771,6 +773,69 @@ function M.setup_action_keymaps(bufnr)
       end, { buffer = help_buf, silent = true, nowait = true })
     end
   end, { buffer = bufnr, silent = true, desc = 'Show keybinding help' })
+end
+
+--- Send a prompt to the active session, with optional attachments.
+--- If prompt is empty, opens the input buffer instead.
+function M.ask(prompt, opts)
+  opts = opts or {}
+  local text = prompt
+  if text == nil or text == '' then
+    require('copilot_agent').open_chat()
+    require('copilot_agent.input').open_input_window()
+    return
+  end
+
+  require('copilot_agent').open_chat()
+  append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
+  -- Mark busy immediately so the spinner shows before the first delta arrives.
+  state.chat_busy = true
+  refresh_statuslines()
+  schedule_render()
+
+  -- Build attachment list for the API.
+  local api_attachments = {}
+  local temp_files = {} -- clipboard image temp files to delete after send
+  for _, a in ipairs(opts.attachments or {}) do
+    if a.type == 'file' or a.type == 'directory' or a.type == 'image' then
+      table.insert(api_attachments, { type = 'file', path = a.path })
+      if a.temp then
+        temp_files[#temp_files + 1] = a.path
+      end
+    elseif a.type == 'selection' then
+      table.insert(api_attachments, {
+        type = 'selection',
+        filePath = a.path,
+        text = a.text,
+        lineRange = a.start_line and { start = a.start_line, ['end'] = a.end_line } or nil,
+      })
+    end
+  end
+
+  local with_session = require('copilot_agent.session').with_session
+  with_session(function(session_id, err)
+    if err then
+      state.chat_busy = false
+      refresh_statuslines()
+      append_entry('error', err)
+      return
+    end
+    local body = { prompt = text }
+    if #api_attachments > 0 then
+      body.attachments = api_attachments
+    end
+    request('POST', string.format('/sessions/%s/messages', session_id), body, function(_, request_err)
+      -- Clean up any clipboard temp PNGs — the HTTP request has been delivered.
+      for _, p in ipairs(temp_files) do
+        pcall(os.remove, p)
+      end
+      if request_err then
+        state.chat_busy = false
+        refresh_statuslines()
+        append_entry('error', 'Failed to send prompt: ' .. request_err)
+      end
+    end)
+  end)
 end
 
 return M

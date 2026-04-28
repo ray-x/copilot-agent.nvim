@@ -6,13 +6,18 @@
 
 local cfg = require('copilot_agent.config')
 local http = require('copilot_agent.http')
+local service = require('copilot_agent.service')
 local utils = require('copilot_agent.utils')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 
 local state = cfg.state
+local notify = cfg.notify
 
 local request = http.request
+local sync_request = http.sync_request
+
+local ensure_service_running = service.ensure_service_running
 
 local normalize_model_entry = utils.normalize_model_entry
 local unavailable_model_from_error = utils.unavailable_model_from_error
@@ -194,6 +199,95 @@ function M.apply_model(model, callback, opts)
       callback(state.config.session.model, nil)
     end
   end)
+end
+
+--- Interactive model picker with reasoning effort support.
+function M.select_model(model)
+  if model and model ~= '' then
+    M.apply_model(model, function(_, err)
+      if err then
+        notify('Failed to set model: ' .. err, vim.log.levels.ERROR)
+      end
+    end)
+    return
+  end
+
+  M.fetch_models(function(models, err)
+    if err then
+      notify('Failed to list models: ' .. err, vim.log.levels.ERROR)
+      append_entry('error', 'Failed to list models: ' .. err)
+      return
+    end
+    if type(models) ~= 'table' or vim.tbl_isempty(models) then
+      append_entry('error', 'No models returned by service')
+      return
+    end
+
+    vim.ui.select(models, {
+      prompt = 'Select Copilot model',
+      format_item = function(item)
+        local label = item.label
+        if item.supports_reasoning and #(item.supported_efforts or {}) > 0 then
+          label = label .. ' 🧠'
+        end
+        return label
+      end,
+    }, function(choice)
+      if not choice then
+        return
+      end
+      -- If the model supports reasoning effort, prompt for it.
+      if choice.supports_reasoning and #(choice.supported_efforts or {}) > 0 then
+        local efforts = {}
+        for _, e in ipairs(choice.supported_efforts) do
+          local label = e
+          if e == (choice.default_effort or '') then
+            label = label .. ' (default)'
+          end
+          table.insert(efforts, { id = e, label = label })
+        end
+        vim.ui.select(efforts, {
+          prompt = 'Reasoning effort for ' .. choice.name,
+          format_item = function(item)
+            return item.label
+          end,
+        }, function(effort_choice)
+          local reasoning = effort_choice and effort_choice.id or nil
+          M.apply_model(choice.id, function(_, apply_err)
+            if apply_err then
+              notify('Failed to set model: ' .. apply_err, vim.log.levels.ERROR)
+              append_entry('error', 'Failed to set model: ' .. apply_err)
+            end
+          end, { reasoning_effort = reasoning })
+        end)
+        return
+      end
+      M.apply_model(choice.id, function(_, apply_err)
+        if apply_err then
+          notify('Failed to set model: ' .. apply_err, vim.log.levels.ERROR)
+          append_entry('error', 'Failed to set model: ' .. apply_err)
+        end
+      end)
+    end)
+  end)
+end
+
+--- Tab-completion for model IDs. Fetches models synchronously on first call.
+function M.complete_model(arglead)
+  if #state.model_cache == 0 then
+    local response = select(1, sync_request('GET', '/models', nil))
+    if response and type(response.models) == 'table' then
+      M.store_model_cache(response.models)
+    elseif state.config.service.auto_start and not state.service_starting then
+      ensure_service_running(function(err)
+        if not err then
+          M.fetch_models(function() end)
+        end
+      end)
+    end
+  end
+
+  return M.model_completion_items(arglead)
 end
 
 return M

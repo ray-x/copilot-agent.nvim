@@ -12,8 +12,9 @@ local normalize_base_url = cfg.normalize_base_url
 
 local M = {}
 
+local highlight_lines -- forward declaration; defined below
+
 local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
-local HEADER_LINES = 5
 local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
 local RENDER_DEBOUNCE_MS = 150
 local STREAM_DEBOUNCE_MS = 80
@@ -193,7 +194,7 @@ local function align_tables(lines)
 
       if #rows < 2 then
         -- Not really a table, emit as-is.
-        for _, row in ipairs(rows) do
+        for _ in ipairs(rows) do
           out[#out + 1] = lines[block_start]
           block_start = block_start + 1
         end
@@ -341,7 +342,7 @@ end
 -- Highlight chat role headers using extmarks (works alongside treesitter).
 -- Only processes lines in [from_row, to_row); callers pass exact ranges
 -- so this never scans the full buffer.
-local function highlight_lines(bufnr, from_row, to_row)
+highlight_lines = function(bufnr, from_row, to_row)
   vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, to_row)
   local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, to_row, false)
   local win = state.chat_winid

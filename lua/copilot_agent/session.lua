@@ -22,9 +22,7 @@ local working_directory = service.working_directory
 
 local refresh_statuslines = sl.refresh_statuslines
 
-local render_chat = render.render_chat
 local append_entry = render.append_entry
-local clear_transcript = render.clear_transcript
 
 local stop_event_stream = events.stop_event_stream
 local start_event_stream = events.start_event_stream

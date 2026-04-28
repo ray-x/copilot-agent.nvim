@@ -6,24 +6,17 @@ local cfg = require('copilot_agent.config')
 local http = require('copilot_agent.http')
 local service = require('copilot_agent.service')
 local sl = require('copilot_agent.statusline')
-local render = require('copilot_agent.render')
 local chat = require('copilot_agent.chat')
 local utils = require('copilot_agent.utils')
 
 local state = cfg.state
 local SLASH_COMMANDS = cfg.SLASH_COMMANDS
-local notify = cfg.notify
 
 local request = http.request
 
 local working_directory = service.working_directory
 
 local refresh_statuslines = sl.refresh_statuslines
-local refresh_input_statusline = sl.refresh_input_statusline
-
-local render_chat = render.render_chat
-local scroll_to_bottom = render.scroll_to_bottom
-local append_entry = render.append_entry
 
 local split_lines = utils.split_lines
 
@@ -201,7 +194,6 @@ local function create_input_buffer()
     if natural_perm and natural_perm ~= state.permission_mode then
       state.permission_mode = natural_perm
       if state.session_id then
-        local request = require('copilot_agent.http').request
         request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)
           if err then
             cfg.notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)

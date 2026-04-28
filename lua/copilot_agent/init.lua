@@ -180,7 +180,7 @@ function M.switch_session()
           append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
         end
         append_entry('system', 'Switching to session ' .. picked.id:sub(1, 8) .. '…')
-        resume_session(picked.id)
+        session.resume_session(picked.id)
       end)
     end)
   end)

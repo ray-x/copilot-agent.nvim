@@ -11,7 +11,6 @@ local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 
 local state = cfg.state
-local notify = cfg.notify
 
 local request = http.request
 

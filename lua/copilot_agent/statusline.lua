@@ -156,7 +156,6 @@ function M.refresh_chat_statusline()
   vim.wo[state.chat_winid].statusline = line
 end
 
-local _sl_timer = nil
 local _sl_pending = false
 
 function M.refresh_statuslines()
@@ -165,9 +164,8 @@ function M.refresh_statuslines()
   end
   _sl_pending = true
   -- Debounce: at most one statusline redraw per 100 ms.
-  _sl_timer = vim.defer_fn(function()
+  vim.defer_fn(function()
     _sl_pending = false
-    _sl_timer = nil
     M.refresh_input_statusline()
     M.refresh_chat_statusline()
   end, 100)

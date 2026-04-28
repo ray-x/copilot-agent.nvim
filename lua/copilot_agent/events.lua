@@ -16,7 +16,7 @@ local notify = cfg.notify
 local notify_transient = cfg.notify_transient
 
 local decode_json = http.decode_json
-local raw_request = http.raw_request
+local raw_request = http.raw_request -- luacheck: ignore
 local request = http.request
 local build_url = http.build_url
 

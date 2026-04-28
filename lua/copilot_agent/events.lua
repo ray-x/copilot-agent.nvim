@@ -13,10 +13,8 @@ local render = require('copilot_agent.render')
 
 local state = cfg.state
 local notify = cfg.notify
-local notify_transient = cfg.notify_transient -- luacheck: ignore
 
 local decode_json = http.decode_json
-local raw_request = http.raw_request -- luacheck: ignore
 local request = http.request
 local build_url = http.build_url
 

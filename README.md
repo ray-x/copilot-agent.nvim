@@ -106,21 +106,24 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 
 [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) calls the Copilot (or other) LLM REST APIs directly from Lua. It supports multiple providers but has no agent runtime of its own — tool execution and the agentic loop are implemented in Lua above the client.
 
-| Feature                   | **copilot-agent.nvim**                                       | CopilotChat.nvim          |
-| ------------------------- | ------------------------------------------------------------ | ------------------------- |
-| Backend                   | Official Copilot SDK (Go)                                    | Direct LLM REST API (Lua) |
-| Agent / tool-use mode     | ✅ full agentic (file edits, terminal, web search, …)        | ❌ chat only              |
-| Chat modes                | ask · plan · **agent** · autopilot                           | ask only                  |
-| Permission management     | ✅ interactive / approve-all / autopilot / reject-all        | ❌                        |
-| File & folder attachments | ✅ (buffer, selection, file, folder, image, clipboard paste) | ✅ (buffer context)       |
-| Session persistence       | ✅ per working directory                                     | ❌                        |
-| Model switching (live)    | ✅ mid-session with tab-complete                             | ✅                        |
-| LSP code actions          | ✅ (explain / fix / add tests / add docs)                    | ❌                        |
-| ACP / MCP support         | ❌                                                           | ❌                        |
-| Custom agents / skills    | ✅                                                           | ❌                        |
-| SSE streaming             | ✅ native                                                    | ✅                        |
-| Multi-provider            | ❌ (Copilot only, or Bring your own key)                     | ✅ (provider_resolver)    |
-| Dependencies              | Go 1.24 + curl                                               | Pure Lua (plenary)        |
+| Feature                   | **copilot-agent.nvim**                                                | CopilotChat.nvim          |
+| ------------------------- | --------------------------------------------------------------------- | ------------------------- |
+| Backend                   | Official Copilot SDK (Go)                                             | Direct LLM REST API (Lua) |
+| Agent / tool-use mode     | ✅ full agentic (file edits, terminal, web search, …)                 | ❌ chat only              |
+| Chat modes                | ask · plan · **agent** · autopilot                                    | ask only                  |
+| Permission management     | ✅ interactive / approve-reads / approve-all / autopilot / reject-all | ❌                        |
+| Config discovery          | ✅ SDK-native (`.github/copilot-instructions.md`, etc.)               | ❌ manual                 |
+| Custom agents             | ✅ SDK `CustomAgents` — same as VS Code                               | ❌                        |
+| Skill directories         | ✅ SDK `SkillDirectories` — same as VS Code                           | ❌                        |
+| Sub-agent streaming       | ✅ SDK-native events                                                  | ❌                        |
+| File & folder attachments | ✅ (buffer, selection, file, folder, image, clipboard paste)          | ✅ (buffer context)       |
+| Session persistence       | ✅ per working directory                                              | ❌                        |
+| Model switching (live)    | ✅ mid-session with tab-complete                                      | ✅                        |
+| LSP code actions          | ✅ (explain / fix / add tests / add docs)                             | ❌                        |
+| ACP / MCP support         | ❌                                                                    | ❌                        |
+| SSE streaming             | ✅ native                                                             | ✅                        |
+| Multi-provider            | ❌ (Copilot only, or Bring your own key)                              | ✅ (provider_resolver)    |
+| Dependencies              | codepilot-cli + go server + curl                                      | Pure Lua (plenary)        |
 
 **When to choose CopilotChat.nvim**: zero-binary Lua setup, just want Copilot chat with buffer context, happy with a Lua-managed tool loop.
 
@@ -136,23 +139,23 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 
 `copilot-agent.nvim` is narrower in scope but deeper in Copilot integration: the Go service embeds the Copilot SDK directly, so it gets SDK-native features (config discovery, custom agents, skill directories, sub-agent streaming) that no ACP bridge can expose.
 
-| Feature                      | **copilot-agent.nvim**                                      | codecompanion.nvim                        | avante.nvim                            |
-| ---------------------------- | ----------------------------------------------------------- | ----------------------------------------- | -------------------------------------- |
-| Agent backend                | Copilot SDK (Go, embedded)                                  | ACP CLI agents or direct LLM adapters     | ACP CLI agents or direct LLM adapters  |
-| ACP support                  | ❌                                                          | ✅ (Claude Code, Codex, Copilot CLI, …)   | ✅ (Zen Mode)                          |
-| MCP support                  | ❌                                                          | ✅                                        | ✅                                     |
-| Multi-provider / BYO API key | ❌ (Copilot only)                                           | ✅ (Anthropic, OpenAI, Gemini, Ollama, …) | ✅ (Claude, OpenAI, Gemini, Ollama, …) |
-| Tool-call execution          | SDK built-ins (file I/O, terminal, web search, ask_user, …) | Lua tools + ACP agent tools               | Rust tools + ACP agent tools           |
-| Sub-agent / streaming events | ✅ SDK-native                                               | ❌                                        | ❌                                     |
-| Custom agents / skill dirs   | ✅                                                          | ❌                                        | ❌                                     |
-| Config discovery             | ✅ (`.github/copilot-instructions.md`, etc.)                | ✅ (`CLAUDE.md`, `.cursor/rules`, custom) | ✅ (`avante.md`)                       |
-| Permission management        | ✅ interactive / approve-all / autopilot / reject-all       | ❌                                        | ❌                                     |
-| Session persistence          | ✅ per working directory                                    | ❌                                        | ❌                                     |
-| LSP code actions             | ✅ (explain / fix / add tests / add docs)                   | ✅ (via prompt library)                   | ❌                                     |
-| Chat modes                   | ask · plan · agent · autopilot                              | chat · inline · workflow                  | ask · edit (Cursor-style)              |
-| External binary required     | Go binary                                                   | Pure Lua (plenary + treesitter)           | Rust binary (compiled at install)      |
-| GitHub Copilot subscription  | Required                                                    | Optional (one of many providers)          | Optional (one of many providers)       |
-| Community / ecosystem        | Smaller                                                     | Large (adapters, prompts, extensions)     | Large (star count, active development) |
+| Feature                      | **copilot-agent.nvim**                                                | codecompanion.nvim                        | avante.nvim                            |
+| ---------------------------- | --------------------------------------------------------------------- | ----------------------------------------- | -------------------------------------- |
+| Agent backend                | Copilot SDK (Go, embedded)                                            | ACP CLI agents or direct LLM adapters     | ACP CLI agents or direct LLM adapters  |
+| ACP support                  | ❌                                                                    | ✅ (Claude Code, Codex, Copilot CLI, …)   | ✅ (Zen Mode)                          |
+| MCP support                  | ❌                                                                    | ✅                                        | ✅                                     |
+| Multi-provider / BYO API key | ❌ (Copilot only)                                                     | ✅ (Anthropic, OpenAI, Gemini, Ollama, …) | ✅ (Claude, OpenAI, Gemini, Ollama, …) |
+| Tool-call execution          | SDK built-ins (file I/O, terminal, web search, ask_user, …)           | Lua tools + ACP agent tools               | Rust tools + ACP agent tools           |
+| Sub-agent / streaming events | ✅ SDK-native                                                         | ❌                                        | ❌                                     |
+| Custom agents / skill dirs   | ✅                                                                    | ❌                                        | ❌                                     |
+| Config discovery             | ✅ (`.github/copilot-instructions.md`, etc.)                          | ✅ (`CLAUDE.md`, `.cursor/rules`, custom) | ✅ (`avante.md`)                       |
+| Permission management        | ✅ interactive / approve-reads / approve-all / autopilot / reject-all | ❌                                        | ❌                                     |
+| Session persistence          | ✅ per working directory                                              | ❌                                        | ❌                                     |
+| LSP code actions             | ✅ (explain / fix / add tests / add docs)                             | ✅ (via prompt library)                   | ❌                                     |
+| Chat modes                   | ask · plan · agent · autopilot                                        | chat · inline · workflow                  | ask · edit (Cursor-style)              |
+| External binary required     | Go binary                                                             | Pure Lua (plenary + treesitter)           | Rust binary (compiled at install)      |
+| GitHub Copilot subscription  | Required                                                              | Optional (one of many providers)          | Optional (one of many providers)       |
+| Community / ecosystem        | Smaller                                                               | Large (adapters, prompts, extensions)     | Large (star count, active development) |
 
 **When to choose codecompanion / avante**: you want model flexibility, ACP access to Claude Code / Codex / Gemini CLI, MCP tool servers, or a large community ecosystem — and you're not exclusively on GitHub Copilot.
 
@@ -168,6 +171,7 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 - Neovim 0.11+ (0.12+ recommended)
 
 **Optional:**
+
 - [`delta`](https://github.com/dandavison/delta) — rich diff viewer for permission "Show diff" (auto side-by-side for wide windows; falls back to builtin if not installed)
 - `pngpaste` / `wl-paste` / `xclip` — clipboard image paste
 - snacks.picker / telescope / fzf-lua / mini.pick — fuzzy file picker
@@ -311,20 +315,25 @@ configures its HTTP client automatically — no manual `base_url` needed.
 
 ## Commands
 
-| Command                      | Description                                                |
-| ---------------------------- | ---------------------------------------------------------- |
-| `:CopilotAgentInstall`       | Download pre-built binary for the current platform         |
-| `:CopilotAgentChat [fullscreen]` | Open the chat buffer; `fullscreen` opens in a new tab       |
-| `:CopilotAgentAsk [prompt]`  | Send a prompt; no argument opens `vim.ui.input()`          |
-| `:CopilotAgentNewSession`    | Disconnect current session and start a fresh one           |
-| `:CopilotAgentSwitchSession` | Pick from all persisted sessions and switch                |
-| `:CopilotAgentModel [id]`    | Pick or set a model; tab-completes from service model list |
-| `:CopilotAgentStart`         | Manually start the Go service                              |
-| `:CopilotAgentStop`          | Disconnect the active session                              |
-| `:CopilotAgentStop!`         | Disconnect and delete persisted session state              |
-| `:CopilotAgentStatus`        | Show service URL, session id, stream status                |
-| `:CopilotAgentLsp`           | Start (or reuse) the LSP client for code actions           |
-| `:CopilotAgentCancel`        | Cancel the current agent turn                              |
+| Command                          | Description                                                |
+| -------------------------------- | ---------------------------------------------------------- |
+| `:CopilotAgentInstall`           | Download pre-built binary for the current platform         |
+| `:CopilotAgentChat [fullscreen]` | Open the chat buffer; `fullscreen` opens in a new tab      |
+| `:CopilotAgentChatToggle`        | Toggle chat window (open if hidden, close if visible)      |
+| `:CopilotAgentChatFocus`         | Focus or switch to an open chat buffer                     |
+| `:CopilotAgentAsk [prompt]`      | Send a prompt; no argument opens `vim.ui.input()`          |
+| `:CopilotAgentNewSession`        | Disconnect current session and start a fresh one           |
+| `:CopilotAgentSwitchSession`     | Pick from all persisted sessions and switch                |
+| `:CopilotAgentModel [id]`        | Pick or set a model; tab-completes from service model list |
+| `:CopilotAgentStart`             | Manually start the Go service                              |
+| `:CopilotAgentStop`              | Disconnect the active session                              |
+| `:CopilotAgentStop!`             | Disconnect and delete persisted session state              |
+| `:CopilotAgentCancel`            | Cancel the current agent turn                              |
+| `:CopilotAgentDiff`              | Pick a changed file and open vimdiff against HEAD          |
+| `:CopilotAgentStatus`            | Show service URL, session id, stream status                |
+| `:CopilotAgentLsp`               | Start (or reuse) the LSP client for code actions           |
+| `:CopilotAgentPasteImage`        | Paste clipboard image as attachment                        |
+| `:CopilotAgentRetryInput`        | Re-show the last dismissed ask_user prompt                 |
 
 ---
 
@@ -439,23 +448,21 @@ There are **two separate interruption points** in an agentic loop:
 1. **Tool-call approval** — before the SDK executes a tool (read file, run shell, write code, etc.).
    Controlled entirely by the permission mode above.
 
-2. **`ask_user` requests** — the *model itself* decides to pause and ask you a clarifying question
+2. **`ask_user` requests** — the _model itself_ decides to pause and ask you a clarifying question
    mid-task (e.g. "Which branch should I target?" or "There are two test files — which one?").
    This is independent of tool approval and happens at the model's discretion.
 
-| Permission mode   | Tool calls          | `ask_user` questions          |
-| ----------------- | ------------------- | ----------------------------- |
-| **interactive**   | prompt every call   | shown via `vim.ui.input/select` |
-| **approve-reads** | prompt writes/shell | shown via `vim.ui.input/select` |
-| **approve-all**   | silent              | shown via `vim.ui.input/select` |
+| Permission mode   | Tool calls          | `ask_user` questions                       |
+| ----------------- | ------------------- | ------------------------------------------ |
+| **interactive**   | prompt every call   | shown via `vim.ui.input/select`            |
+| **approve-reads** | prompt writes/shell | shown via `vim.ui.input/select`            |
+| **approve-all**   | silent              | shown via `vim.ui.input/select`            |
 | **autopilot**     | silent              | **auto-answered** (first choice, silently) |
-| **reject-all**    | all rejected        | shown via `vim.ui.input/select` |
+| **reject-all**    | all rejected        | shown via `vim.ui.input/select`            |
 
 > **Practical rule:** use **agent** mode (`approve-reads`) for day-to-day tasks — Copilot will still
 > ask you clarifying questions but won't prompt for every file read. Switch to **autopilot** permission
 > only when you are confident in the task scope and want zero interruptions.
-
-### Performance Tips
 
 ---
 

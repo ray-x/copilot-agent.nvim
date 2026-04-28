@@ -185,24 +185,10 @@ local function notify(message, level)
   vim.notify('[copilot-agent] ' .. message, level or vim.log.levels.INFO)
 end
 
--- For noisy, transient messages (permission decisions, etc.) that shouldn't
--- clutter the chat buffer. Displays via vim.notify and optionally auto-clears
--- the cmdline area after config.chat.system_notify_timeout ms.
-local function notify_transient(message, level)
-  notify(message, level)
-  local timeout = state.config.chat and state.config.chat.system_notify_timeout or 0
-  if timeout and timeout > 0 then
-    vim.defer_fn(function()
-      vim.cmd('echo ""')
-    end, timeout)
-  end
-end
-
 return {
   defaults = defaults,
   state = state,
   SLASH_COMMANDS = SLASH_COMMANDS,
   notify = notify,
-  notify_transient = notify_transient,
   normalize_base_url = normalize_base_url,
 }

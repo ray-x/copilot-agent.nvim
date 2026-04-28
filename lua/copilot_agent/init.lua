@@ -165,10 +165,6 @@ function M.status()
   }
 end
 
-function M.state()
-  return state
-end
-
 -- ── Statusline component API ──────────────────────────────────────────────────
 -- Use these in your statusline plugin (lualine, heirline, feline, etc.)
 --

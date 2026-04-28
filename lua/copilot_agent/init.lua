@@ -403,6 +403,10 @@ function M.retry_input()
   show_user_input_picker(state.pending_user_input)
 end
 
+function M.review_diff()
+  events.review_diff()
+end
+
 function M.status()
   local lines = {
     'service: ' .. normalize_base_url(state.config.base_url),

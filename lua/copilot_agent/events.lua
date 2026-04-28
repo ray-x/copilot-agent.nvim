@@ -726,6 +726,69 @@ M.show_user_input_picker = show_user_input_picker
 M.handle_user_input = handle_user_input
 M.handle_host_event = handle_host_event
 M.offer_diff_review = offer_diff_review
+
+--- List all uncommitted changed files and open vimdiff for the selected one.
+--- Shows a picker of files with unstaged/staged changes relative to HEAD.
+local function review_diff()
+  local wd = working_directory()
+  -- Get files with changes (staged + unstaged) relative to HEAD.
+  local changed = vim.fn.systemlist({ 'git', '-C', wd, 'diff', '--name-only', 'HEAD' })
+  if vim.v.shell_error ~= 0 or #changed == 0 or (changed[1] or '') == '' then
+    -- Also check for untracked files that were newly created.
+    local untracked = vim.fn.systemlist({ 'git', '-C', wd, 'ls-files', '--others', '--exclude-standard' })
+    if vim.v.shell_error ~= 0 or #untracked == 0 or (untracked[1] or '') == '' then
+      notify('No uncommitted changes found', vim.log.levels.INFO)
+      return
+    end
+    changed = untracked
+  end
+  -- Filter out empty strings.
+  changed = vim.tbl_filter(function(f)
+    return f and f ~= ''
+  end, changed)
+  if #changed == 0 then
+    notify('No uncommitted changes found', vim.log.levels.INFO)
+    return
+  end
+
+  vim.ui.select(changed, { prompt = 'Review diff for:' }, function(choice)
+    if not choice then
+      return
+    end
+    local abs_path = vim.fn.fnamemodify(wd .. '/' .. choice, ':p')
+    -- Check if file is tracked (has a HEAD version) for vimdiff.
+    vim.fn.systemlist({ 'git', '-C', wd, 'cat-file', '-e', 'HEAD:' .. choice })
+    if vim.v.shell_error ~= 0 then
+      -- New untracked file — just open it.
+      vim.cmd('tabnew ' .. vim.fn.fnameescape(abs_path))
+      notify('New file (no HEAD version): ' .. choice, vim.log.levels.INFO)
+      return
+    end
+    -- Get the old (HEAD) version and open vimdiff.
+    local old_lines = vim.fn.systemlist({ 'git', '-C', wd, 'show', 'HEAD:' .. choice })
+    if vim.v.shell_error ~= 0 then
+      notify('Could not read old version of ' .. choice, vim.log.levels.WARN)
+      return
+    end
+    vim.cmd('tabnew ' .. vim.fn.fnameescape(abs_path))
+    vim.cmd('diffthis')
+    vim.cmd('vnew')
+    local scratch = vim.api.nvim_get_current_buf()
+    vim.bo[scratch].buftype = 'nofile'
+    vim.bo[scratch].bufhidden = 'wipe'
+    vim.bo[scratch].swapfile = false
+    vim.api.nvim_buf_set_name(scratch, choice .. ' (HEAD)')
+    vim.api.nvim_buf_set_lines(scratch, 0, -1, false, old_lines)
+    local ft = vim.filetype.match({ filename = abs_path }) or ''
+    if ft ~= '' then
+      vim.bo[scratch].filetype = ft
+    end
+    vim.bo[scratch].modifiable = false
+    vim.cmd('diffthis')
+  end)
+end
+
+M.review_diff = review_diff
 M.handle_session_event = handle_session_event
 M.flush_sse_event = flush_sse_event
 M.consume_sse_line = consume_sse_line

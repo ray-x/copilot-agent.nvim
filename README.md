@@ -1,6 +1,6 @@
 # copilot-agent.nvim
 
-A Neovim plugin that bridges the [GitHub Copilot SDK](https://github.com/github/copilot-sdk) to Neovim via a lightweight Go HTTP service. Persistent sessions, streamed responses, LSP code actions, and a rich input buffer with SSE/HTTP.
+GitHub Copilot's agentic runtime, natively in Neovim. A lightweight Go bridge to the [official SDK](https://github.com/github/copilot-sdk) with autonomous tool execution, four chat modes, granular permissions, persistent sessions, and LSP code actions.
 
 ## Cool features
 

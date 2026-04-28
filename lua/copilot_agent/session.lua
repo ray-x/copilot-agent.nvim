@@ -291,6 +291,14 @@ create_session = function(callback, opts)
     end
 
     start_event_stream(state.session_id)
+
+    -- Announce the new session.
+    local wd = (response.workingDirectory and response.workingDirectory ~= '') and vim.fn.fnamemodify(response.workingDirectory, ':~') or vim.fn.fnamemodify(working_directory(), ':~')
+    local name = (response.summary and response.summary ~= '') and response.summary or nil
+    local id_short = state.session_id:sub(1, 8)
+    local msg = 'New session created' .. '  id:' .. id_short .. (name and ('  name:' .. name) or '') .. '  dir:' .. wd
+    append_entry('system', msg)
+
     -- Sync the agent mode with the server if the user already picked one.
     if state.input_mode and state.input_mode ~= 'agent' then
       require('copilot_agent')._set_agent_mode(state.input_mode)

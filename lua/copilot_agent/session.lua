@@ -173,7 +173,14 @@ function M.pick_or_create_session(callback)
 
     vim.ui.select(display, { prompt = 'Resume a session or start new?' }, function(_, idx)
       if not idx then
-        create_session(callback)
+        -- <Esc> dismissed the picker — default to the most recent session.
+        local default = choices[1]
+        if default.id then
+          append_entry('system', 'Resumed most recent session ' .. default.id:sub(1, 8) .. ' (picker cancelled)')
+          M.resume_session(default.id, callback)
+        else
+          create_session(callback)
+        end
         return
       end
       local picked = choices[idx]

@@ -13,7 +13,7 @@ local render = require('copilot_agent.render')
 
 local state = cfg.state
 local notify = cfg.notify
-local notify_transient = cfg.notify_transient
+local notify_transient = cfg.notify_transient -- luacheck: ignore
 
 local decode_json = http.decode_json
 local raw_request = http.raw_request -- luacheck: ignore
@@ -305,11 +305,11 @@ local function handle_host_event(event_name, payload)
       end
 
       vim.schedule(show_permission_picker)
-    else
-      notify_transient('Permission requested; mode=' .. tostring(mode), vim.log.levels.INFO)
     end
+    -- Auto-approved/rejected decisions are reflected in the statusline; no notify needed.
   elseif event_name == 'host.permission_decision' then
-    notify_transient('Permission ' .. tostring(data.decision or 'unknown') .. ' (' .. tostring(data.mode or '') .. ')', vim.log.levels.INFO)
+    -- Silently update the statusline; avoid noisy "Permission approved (autopilot)" spam.
+    refresh_statuslines()
   elseif event_name == 'host.permission_mode_changed' then
     state.permission_mode = data.mode or state.permission_mode
     refresh_statuslines()

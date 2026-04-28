@@ -30,7 +30,7 @@ local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
 local _mode_permission = {
   ask = 'interactive',
   plan = 'interactive',
-  agent = 'interactive',
+  agent = 'approve-reads',
   autopilot = 'approve-all',
 }
 
@@ -76,12 +76,16 @@ local function create_input_buffer()
   end
 
   local function set_input_text(text)
-    local lines = split_lines(text or '')
+    -- In a prompt buffer the prompt prefix is stored as part of the first line's
+    -- content (get_input_text strips it back out). Re-prepend it here so the
+    -- history text appears after "agent❯ " rather than before it.
+    local prefix = vim.fn.prompt_getprompt(bufnr)
+    local lines = split_lines((prefix or '') .. (text or ''))
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
     if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
       vim.api.nvim_win_set_cursor(state.input_winid, { #lines, #lines[#lines] })
     end
-    vim.cmd('startinsert')
+    vim.cmd('startinsert!')
   end
 
   local function remember_prompt(text)
@@ -190,8 +194,12 @@ local function create_input_buffer()
     set_agent_mode(new_mode)
 
     -- Apply the natural permission mode for this input mode.
+    -- Respect manual overrides: if the user explicitly set permission via <M-a>,
+    -- don't auto-reset it on mode change.
+    local had_manual = state.permission_mode_manual
+    state.permission_mode_manual = false
     local natural_perm = _mode_permission[new_mode]
-    if natural_perm and natural_perm ~= state.permission_mode then
+    if natural_perm and not had_manual and natural_perm ~= state.permission_mode then
       state.permission_mode = natural_perm
       if state.session_id then
         request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)

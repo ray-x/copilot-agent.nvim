@@ -10,9 +10,13 @@ vim.g.loaded_copilot_agent_plugin = 1
 
 local copilot_agent = require('copilot_agent')
 
-vim.api.nvim_create_user_command('CopilotAgentChat', function()
-  copilot_agent.open_chat()
-end, { desc = 'Open Copilot Go chat' })
+vim.api.nvim_create_user_command('CopilotAgentChat', function(opts)
+  local args = opts.fargs or {}
+  local fullscreen = vim.tbl_contains(args, 'fullscreen') or vim.tbl_contains(args, 'fs')
+  copilot_agent.open_chat({ fullscreen = fullscreen or nil })
+end, { nargs = '?', desc = 'Open Copilot Go chat (args: fullscreen)', complete = function()
+  return { 'fullscreen' }
+end })
 
 vim.api.nvim_create_user_command('CopilotAgentChatToggle', function()
   copilot_agent.toggle_chat()

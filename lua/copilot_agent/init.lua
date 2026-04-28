@@ -89,8 +89,8 @@ function M.setup(opts)
   return M
 end
 
-function M.open_chat()
-  ensure_chat_window()
+function M.open_chat(opts)
+  ensure_chat_window(opts)
   if state.config.auto_create_session and not state.session_id and not state.creating_session then
     with_session(function() end)
   end

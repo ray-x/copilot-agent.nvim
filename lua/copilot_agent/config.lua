@@ -32,9 +32,9 @@ local defaults = {
   chat = {
     split = 'botright vnew',
     title = 'Copilot Chat',
-    -- buf_name: name assigned to the chat buffer. Use '*CopilotAgentChat*' (the
+    -- buf_name: name assigned to the chat buffer. Use 'CopilotAgentChat' (the
     -- asterisks make it show as [CopilotAgentChat] in some UIs and easy to :b<Tab>).
-    buf_name = '*CopilotAgentChat*',
+    buf_name = 'CopilotAgentChat',
     -- fullscreen: when true the chat opens in a new tab instead of a vertical split.
     fullscreen = false,
     -- Noisy system messages (permission decisions, etc.) go to vim.notify instead
@@ -53,6 +53,11 @@ local defaults = {
     -- true  = prompt 'Open diff / Skip' after each file update (default)
     -- false = just notify and auto-reload the buffer
     diff_review = true,
+    -- External diff command for the permission "Show diff" viewer.
+    -- Set to a list like { 'delta' }, { 'diff-so-fancy' }, or { 'delta', '--side-by-side' }.
+    -- Diff text is piped via stdin. Falls back to builtin float if command not found.
+    -- Set to false to always use the builtin floating diff window.
+    diff_cmd = { 'delta' },
   },
   session = {
     working_directory = nil,

@@ -256,8 +256,9 @@ function M.pick_path(opts, callback)
 end
 
 -- Open the chat window. Respects chat.fullscreen and chat.buf_name config.
-local function open_chat_win(bufnr)
-  if state.config.chat and state.config.chat.fullscreen then
+local function open_chat_win(bufnr, opts)
+  local fullscreen = (opts and opts.fullscreen) or (state.config.chat and state.config.chat.fullscreen)
+  if fullscreen then
     -- Full-screen: open in a new tab.
     vim.cmd('tabnew')
     vim.api.nvim_win_set_buf(0, bufnr)
@@ -271,8 +272,8 @@ local function open_chat_win(bufnr)
   vim.wo[state.chat_winid].conceallevel = 2
 end
 
-function M.ensure_chat_window()
-  local buf_name = (state.config.chat and state.config.chat.buf_name) or '*CopilotAgentChat*'
+function M.ensure_chat_window(opts)
+  local buf_name = (state.config.chat and state.config.chat.buf_name) or 'CopilotAgentChat'
 
   if state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr) then
     if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
@@ -281,7 +282,7 @@ function M.ensure_chat_window()
       return state.chat_bufnr
     end
     -- Buffer exists but window was closed — reopen it.
-    open_chat_win(state.chat_bufnr)
+    open_chat_win(state.chat_bufnr, opts)
     render_chat()
     refresh_chat_statusline()
     scroll_to_bottom()
@@ -301,7 +302,7 @@ function M.ensure_chat_window()
   vim.bo[bufnr].readonly = true
   vim.api.nvim_buf_set_name(bufnr, buf_name)
 
-  open_chat_win(bufnr)
+  open_chat_win(bufnr, opts)
   refresh_chat_statusline()
 
   -- Tell render-markdown.nvim (and similar) to enable on this buffer.
@@ -373,7 +374,7 @@ end
 
 -- Focus picker: list all chat buffers and jump to the selected one.
 function M.focus_chat()
-  local buf_name = (state.config.chat and state.config.chat.buf_name) or '*CopilotAgentChat*'
+  local buf_name = (state.config.chat and state.config.chat.buf_name) or 'CopilotAgentChat'
   -- Collect all matching buffers (handles multiple instances if ever created).
   local candidates = {}
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
@@ -500,11 +501,16 @@ function M.setup_action_keymaps(bufnr)
     if natural_perm and not had_manual and natural_perm ~= state.permission_mode then
       state.permission_mode = natural_perm
       if state.session_id then
-        request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)
-          if err then
-            notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+        request(
+          'POST',
+          '/sessions/' .. state.session_id .. '/permission-mode',
+          { mode = natural_perm },
+          function(_, err)
+            if err then
+              notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+            end
           end
-        end)
+        )
       end
     end
 
@@ -593,7 +599,12 @@ function M.setup_action_keymaps(bufnr)
             text = text,
             start_line = start_line,
             end_line = end_line,
-            display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
+            display = 'selection:'
+              .. vim.fn.fnamemodify(filepath, ':t')
+              .. ':'
+              .. (start_line + 1)
+              .. '-'
+              .. (end_line + 1),
           })
         end
       elseif choice == 'File' then
@@ -678,13 +689,18 @@ function M.setup_action_keymaps(bufnr)
           excluded_set[choice.name] = true
         end
         local new_excluded = vim.tbl_keys(excluded_set)
-        request('POST', '/sessions/' .. state.session_id .. '/tools', { excludedTools = new_excluded }, function(_, req_err)
-          if req_err then
-            notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
-          else
-            notify('Tools updated', vim.log.levels.INFO)
+        request(
+          'POST',
+          '/sessions/' .. state.session_id .. '/tools',
+          { excludedTools = new_excluded },
+          function(_, req_err)
+            if req_err then
+              notify('Failed to update tools: ' .. req_err, vim.log.levels.WARN)
+            else
+              notify('Tools updated', vim.log.levels.INFO)
+            end
           end
-        end)
+        )
       end)
     end)
   end, { buffer = bufnr, silent = true, desc = 'Configure session tools' })

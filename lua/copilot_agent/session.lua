@@ -191,6 +191,9 @@ function M.pick_or_create_session(callback)
       local picked = choices[idx]
       if picked.id == '__all__' then
         -- Re-open picker with the full unfiltered list.
+        -- Deferred so the first picker fully closes before the second opens
+        -- (some picker backends need time to tear down their window).
+        vim.defer_fn(function()
         local all_choices = {}
         table.sort(persisted, function(a, b)
           return (a.modifiedTime or a.startTime or '') > (b.modifiedTime or b.startTime or '')
@@ -228,6 +231,7 @@ function M.pick_or_create_session(callback)
             create_session(callback)
           end
         end)
+        end, 100)
       elseif picked.id then
         append_entry('system', 'Resuming session ' .. picked.id)
         M.resume_session(picked.id, callback)

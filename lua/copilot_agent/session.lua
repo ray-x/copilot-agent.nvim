@@ -251,6 +251,16 @@ create_session = function(callback, opts)
   end)
 end
 
+-- Force-create a brand-new session, bypassing any pick/resume logic.
+function M.create_new_session(callback)
+  table.insert(state.pending_session_callbacks, callback or function() end)
+  if state.creating_session then
+    return
+  end
+  state.creating_session = true
+  create_session(callback)
+end
+
 function M.with_session(callback)
   if state.session_id then
     callback(state.session_id)

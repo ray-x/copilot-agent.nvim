@@ -34,6 +34,7 @@ local show_user_input_picker = events.show_user_input_picker
 local discard_pending_attachments = session.discard_pending_attachments
 local disconnect_session = session.disconnect_session
 local with_session = session.with_session
+local create_new_session = session.create_new_session
 local apply_model = mdl.apply_model
 local fetch_models = mdl.fetch_models
 local model_completion_items = mdl.model_completion_items
@@ -100,7 +101,7 @@ function M.new_session()
       append_entry('error', 'Failed to disconnect previous session: ' .. err)
       return
     end
-    with_session(function(session_id, create_err)
+    create_new_session(function(session_id, create_err)
       if create_err then
         append_entry('error', create_err)
         return

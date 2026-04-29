@@ -560,7 +560,13 @@ end)
 describe('chat input behavior', function()
   local agent
   local input
+  local http
   local original_ui_select
+  local original_sync_request
+  local root_mcp
+  local vscode_mcp
+  local root_mcp_backup
+  local vscode_mcp_backup
 
   before_each(function()
     vim.cmd('tabonly | only')
@@ -570,11 +576,33 @@ describe('chat input behavior', function()
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false })
     input = require('copilot_agent.input')
+    http = require('copilot_agent.http')
     original_ui_select = vim.ui.select
+    original_sync_request = http.sync_request
+    local cwd = require('copilot_agent.service').working_directory()
+    root_mcp = cwd .. '/.mcp.json'
+    vscode_mcp = cwd .. '/.vscode/mcp.json'
+    root_mcp_backup = nil
+    vscode_mcp_backup = nil
   end)
 
   after_each(function()
     vim.ui.select = original_ui_select
+    http.sync_request = original_sync_request
+    if root_mcp then
+      if root_mcp_backup then
+        vim.fn.writefile(root_mcp_backup, root_mcp)
+      else
+        vim.fn.delete(root_mcp)
+      end
+    end
+    if vscode_mcp then
+      if vscode_mcp_backup then
+        vim.fn.writefile(vscode_mcp_backup, vscode_mcp)
+      else
+        vim.fn.delete(vscode_mcp)
+      end
+    end
     vim.cmd('tabonly | only')
   end)
 
@@ -625,5 +653,75 @@ describe('chat input behavior', function()
     assert_eq(moved_chat_win, input._resolve_chat_window())
     assert_true(input._is_input_anchored_below_chat(moved_chat_win, agent.state.input_winid))
     assert_eq(prefix .. 'draft message', vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, -1, false)[1])
+  end)
+
+  it('completes discovered command arguments from the chat input', function()
+    local vscode_dir = vim.fn.fnamemodify(vscode_mcp, ':h')
+    root_mcp_backup = vim.fn.filereadable(root_mcp) == 1 and vim.fn.readfile(root_mcp) or nil
+    vscode_mcp_backup = vim.fn.filereadable(vscode_mcp) == 1 and vim.fn.readfile(vscode_mcp) or nil
+
+    vim.fn.mkdir(vscode_dir, 'p')
+    vim.fn.writefile({ '{"mcpServers":{"local":{},"docs":{}}}' }, root_mcp)
+    vim.fn.writefile({ '{"servers":[{"name":"browser"}]}' }, vscode_mcp)
+
+    http.sync_request = function(method, path)
+      assert_eq('GET', method)
+      if path == '/models' then
+        return {
+          models = {
+            { id = 'gpt-5.4', name = 'GPT 5.4' },
+            { id = 'claude-sonnet-4.6', name = 'Claude Sonnet 4.6' },
+          },
+        }, nil, 200
+      end
+      if path == '/sessions' then
+        return {
+          persisted = {
+            { sessionId = 'session-123', summary = 'Existing repo session' },
+          },
+          live = {
+            { sessionId = 'live-456', summary = 'Live repo session', live = true },
+          },
+        }, nil, 200
+      end
+      return nil, 'unexpected path: ' .. tostring(path), 404
+    end
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+
+    local function completion_words(command_text)
+      vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. command_text })
+      vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. command_text) })
+      return vim.tbl_map(function(item)
+        return item.word
+      end, input._input_omnifunc(0, ''))
+    end
+
+    local agent_words = completion_words('/agent ')
+    local skill_words = completion_words('/skills ')
+    local model_words = completion_words('/model ')
+    local resume_words = completion_words('/resume ')
+    local session_words = completion_words('/session ')
+    local mcp_words = completion_words('/mcp ')
+    local instruction_words = completion_words('/instructions ')
+
+    assert_true(vim.tbl_contains(agent_words, '/agent Go Quality Engineer'))
+    assert_true(vim.tbl_contains(agent_words, '/agent Selene Lua Quality Engineer'))
+    assert_true(vim.tbl_contains(skill_words, '/skills nvim-integration-tests'))
+    assert_true(vim.tbl_contains(skill_words, '/skills selene-check'))
+    assert_true(vim.tbl_contains(model_words, '/model gpt-5.4'))
+    assert_true(vim.tbl_contains(model_words, '/model claude-sonnet-4.6'))
+    assert_true(vim.tbl_contains(resume_words, '/resume session-123'))
+    assert_true(vim.tbl_contains(resume_words, '/resume live-456'))
+    assert_true(vim.tbl_contains(session_words, '/session session-123'))
+    assert_true(vim.tbl_contains(session_words, '/session live-456'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp local'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp docs'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp browser'))
+    assert_true(vim.tbl_contains(instruction_words, '/instructions .github/copilot-instructions.md'))
   end)
 end)

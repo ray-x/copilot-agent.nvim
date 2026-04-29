@@ -26,6 +26,343 @@ local setup_action_keymaps = chat.setup_action_keymaps
 local M = {}
 
 local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
+local session_label_max_len = 32
+local is_list = vim.islist or vim.tbl_islist
+
+local function frontmatter_name(path)
+  local lines = vim.fn.readfile(path, '', 32)
+  if type(lines) ~= 'table' or lines[1] ~= '---' then
+    return nil
+  end
+
+  for i = 2, #lines do
+    local line = lines[i]
+    if line == '---' then
+      break
+    end
+    local raw = line:match('^name:%s*(.+)%s*$')
+    if raw then
+      raw = vim.trim(raw)
+      local quoted = raw:match('^"(.*)"$') or raw:match("^'(.*)'$")
+      return quoted or raw
+    end
+  end
+
+  return nil
+end
+
+local function discovered_agent_names()
+  local wd = working_directory()
+  local files = {}
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/agents/*.agent.md', false, true))
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/agents/**/*.agent.md', false, true))
+  local items = {}
+  local seen = {}
+
+  for _, path in ipairs(files or {}) do
+    local name = frontmatter_name(path) or vim.fn.fnamemodify(path, ':t:r:r')
+    if type(name) == 'string' and name ~= '' and not seen[name] then
+      seen[name] = true
+      table.insert(items, name)
+    end
+  end
+
+  table.sort(items)
+  return items
+end
+
+local function discovered_skill_names()
+  local wd = working_directory()
+  local files = {}
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/skills/*/SKILL.md', false, true))
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/skills/*/skill.md', false, true))
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/skills/**/SKILL.md', false, true))
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/skills/**/skill.md', false, true))
+
+  local items = {}
+  local seen = {}
+  for _, path in ipairs(files) do
+    local name = frontmatter_name(path) or vim.fn.fnamemodify(vim.fn.fnamemodify(path, ':h'), ':t')
+    if type(name) == 'string' and name ~= '' and not seen[name] then
+      seen[name] = true
+      table.insert(items, name)
+    end
+  end
+
+  table.sort(items)
+  return items
+end
+
+local function command_completion_context(before)
+  for _, command in ipairs({ 'agent', 'skills', 'model', 'resume', 'session', 'mcp', 'instructions' }) do
+    local start_pos, _, _, query = before:find(string.format('(/%s%%s+)(.*)$', command))
+    if start_pos then
+      return {
+        kind = command,
+        start = start_pos,
+        query = query or '',
+      }
+    end
+  end
+
+  return nil
+end
+
+local function discovered_instruction_names()
+  local wd = working_directory()
+  local files = {}
+  local root_file = wd .. '/.github/copilot-instructions.md'
+  if vim.fn.filereadable(root_file) == 1 then
+    table.insert(files, root_file)
+  end
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/instructions/*.instructions.md', false, true))
+  vim.list_extend(files, vim.fn.glob(wd .. '/.github/instructions/**/*.instructions.md', false, true))
+
+  local items = {}
+  local seen = {}
+  for _, path in ipairs(files) do
+    local rel = path:sub(#wd + 2)
+    if rel ~= '' and not seen[rel] then
+      seen[rel] = true
+      table.insert(items, rel)
+    end
+  end
+
+  table.sort(items)
+  return items
+end
+
+local function discovered_mcp_names()
+  local wd = working_directory()
+  local items = {}
+  local seen = {}
+
+  local function add(name)
+    if type(name) ~= 'string' or name == '' or seen[name] then
+      return
+    end
+    seen[name] = true
+    table.insert(items, name)
+  end
+
+  local function add_from_value(value)
+    if type(value) == 'table' then
+      if is_list(value) then
+        for _, entry in ipairs(value) do
+          if type(entry) == 'string' then
+            add(entry)
+          elseif type(entry) == 'table' then
+            add(entry.name or entry.id)
+          end
+        end
+      else
+        for name in pairs(value) do
+          add(name)
+        end
+      end
+    end
+  end
+
+  local function read_config(path)
+    if vim.fn.filereadable(path) ~= 1 then
+      return
+    end
+    local decoded = http.decode_json(table.concat(vim.fn.readfile(path), '\n'))
+    if type(decoded) ~= 'table' then
+      return
+    end
+    add_from_value(decoded.mcpServers)
+    add_from_value(decoded.servers)
+  end
+
+  read_config(wd .. '/.mcp.json')
+  read_config(wd .. '/.vscode/mcp.json')
+
+  table.sort(items)
+  return items
+end
+
+local function discovered_model_ids()
+  local ok, model = pcall(require, 'copilot_agent.model')
+  if not ok then
+    return {}
+  end
+
+  if vim.tbl_isempty(state.model_cache) then
+    local response = http.sync_request('GET', '/models', nil)
+    if type(response) == 'table' then
+      model.store_model_cache(response.models or {})
+    end
+  end
+
+  return model.model_completion_items('')
+end
+
+local function discovered_session_items()
+  local response = http.sync_request('GET', '/sessions', nil)
+  if type(response) ~= 'table' then
+    return {}
+  end
+
+  local merged = {}
+  local order = {}
+  local function upsert(session)
+    local id = session and session.sessionId or nil
+    if type(id) ~= 'string' or id == '' then
+      return
+    end
+    if not merged[id] then
+      merged[id] = vim.deepcopy(session)
+      table.insert(order, id)
+      return
+    end
+
+    local existing = merged[id]
+    if session.live then
+      local combined = vim.deepcopy(session)
+      combined.summary = combined.summary or existing.summary
+      combined.modifiedTime = combined.modifiedTime or existing.modifiedTime
+      combined.startTime = combined.startTime or existing.startTime
+      merged[id] = combined
+      return
+    end
+
+    existing.summary = existing.summary or session.summary
+    existing.modifiedTime = existing.modifiedTime or session.modifiedTime
+    existing.startTime = existing.startTime or session.startTime
+    existing.createdAt = existing.createdAt or session.createdAt
+  end
+
+  for _, session in ipairs(response.persisted or {}) do
+    upsert(session)
+  end
+  for _, session in ipairs(response.live or {}) do
+    upsert(session)
+  end
+
+  local items = {}
+  for _, id in ipairs(order) do
+    local session = merged[id]
+    local summary = utils.truncate_session_summary(session.summary, session_label_max_len)
+    local formatted_id = utils.format_session_id(id)
+    local label = summary ~= '' and (summary .. ' [' .. formatted_id .. ']') or formatted_id
+    table.insert(items, {
+      id = id,
+      label = label,
+      summary = (session.summary or ''):lower(),
+    })
+  end
+
+  table.sort(items, function(left, right)
+    return left.label < right.label
+  end)
+  return items
+end
+
+local function input_omnifunc(findstart, base)
+  local line = vim.api.nvim_get_current_line()
+  local col = vim.api.nvim_win_get_cursor(0)[2]
+  local before = line:sub(1, col)
+  local command_context = command_completion_context(before)
+
+  if findstart == 1 then
+    if command_context then
+      return command_context.start - 1
+    end
+    local pos = before:find('[@/][^%s]*$')
+    if pos then
+      return pos - 1
+    end
+    return -2
+  end
+
+  local items = {}
+  if vim.startswith(base, '@') then
+    local query = base:sub(2)
+    local wd = working_directory()
+    local pattern = wd .. '/' .. query .. '*'
+    local files = vim.fn.glob(pattern, false, true)
+    for _, f in ipairs(files) do
+      local rel = f:sub(#wd + 2)
+      table.insert(items, { word = '@' .. rel, abbr = rel, menu = '[file]' })
+    end
+  elseif command_context and command_context.kind == 'agent' then
+    local query = command_context.query:lower()
+    for _, name in ipairs(discovered_agent_names()) do
+      if query == '' or vim.startswith(name:lower(), query) then
+        table.insert(items, {
+          word = '/agent ' .. name,
+          abbr = name,
+          menu = '[agent]',
+        })
+      end
+    end
+  elseif command_context and command_context.kind == 'skills' then
+    local query = command_context.query:lower()
+    for _, name in ipairs(discovered_skill_names()) do
+      if query == '' or vim.startswith(name:lower(), query) then
+        table.insert(items, {
+          word = '/skills ' .. name,
+          abbr = name,
+          menu = '[skill]',
+        })
+      end
+    end
+  elseif command_context and command_context.kind == 'model' then
+    local query = command_context.query:lower()
+    for _, id in ipairs(discovered_model_ids()) do
+      if query == '' or vim.startswith(id:lower(), query) then
+        table.insert(items, {
+          word = '/model ' .. id,
+          abbr = id,
+          menu = '[model]',
+        })
+      end
+    end
+  elseif command_context and (command_context.kind == 'resume' or command_context.kind == 'session') then
+    local query = command_context.query:lower()
+    for _, session in ipairs(discovered_session_items()) do
+      if query == '' or vim.startswith(session.id:lower(), query) or vim.startswith(session.summary, query) then
+        table.insert(items, {
+          word = '/' .. command_context.kind .. ' ' .. session.id,
+          abbr = session.label,
+          menu = '[session]',
+        })
+      end
+    end
+  elseif command_context and command_context.kind == 'mcp' then
+    local query = command_context.query:lower()
+    for _, name in ipairs(discovered_mcp_names()) do
+      if query == '' or vim.startswith(name:lower(), query) then
+        table.insert(items, {
+          word = '/mcp ' .. name,
+          abbr = name,
+          menu = '[mcp]',
+        })
+      end
+    end
+  elseif command_context and command_context.kind == 'instructions' then
+    local query = command_context.query:lower()
+    for _, name in ipairs(discovered_instruction_names()) do
+      if query == '' or vim.startswith(name:lower(), query) then
+        table.insert(items, {
+          word = '/instructions ' .. name,
+          abbr = name,
+          menu = '[instruction]',
+        })
+      end
+    end
+  elseif vim.startswith(base, '/') then
+    local query = base:sub(2):lower()
+    for _, cmd in ipairs(SLASH_COMMANDS) do
+      local name = cmd.word:sub(2):lower()
+      if query == '' or vim.startswith(name, query) then
+        table.insert(items, { word = cmd.word, menu = cmd.info })
+      end
+    end
+  end
+  return items
+end
 
 local function resolve_chat_window()
   if type(chat.find_chat_window) == 'function' then
@@ -297,47 +634,12 @@ local function create_input_buffer()
   -- Set the initial prompt prefix to reflect the current mode.
   refresh_prompt()
 
-  -- Omnifunc for @ file mentions and / slash command completion.
-  local function input_omnifunc(findstart, base)
-    local line = vim.api.nvim_get_current_line()
-    local col = vim.api.nvim_win_get_cursor(0)[2]
-    local before = line:sub(1, col)
-
-    if findstart == 1 then
-      local pos = before:find('[@/][^%s]*$')
-      if pos then
-        return pos - 1
-      end
-      return -2
-    end
-
-    local items = {}
-    if vim.startswith(base, '@') then
-      local query = base:sub(2)
-      local wd = working_directory()
-      local pattern = wd .. '/' .. query .. '*'
-      local files = vim.fn.glob(pattern, false, true)
-      for _, f in ipairs(files) do
-        local rel = f:sub(#wd + 2)
-        table.insert(items, { word = '@' .. rel, abbr = rel, menu = '[file]' })
-      end
-    elseif vim.startswith(base, '/') then
-      local query = base:sub(2):lower()
-      for _, cmd in ipairs(SLASH_COMMANDS) do
-        local name = cmd.word:sub(2):lower()
-        if query == '' or vim.startswith(name, query) then
-          table.insert(items, { word = cmd.word, menu = cmd.info })
-        end
-      end
-    end
-    return items
-  end
-
   vim.bo[bufnr].omnifunc = ''
   vim.api.nvim_buf_set_option(bufnr, 'completefunc', "v:lua.require'copilot_agent'.input_omnifunc")
 
   -- Store omnifunc on the module so v:lua can reach it.
   require('copilot_agent').input_omnifunc = input_omnifunc
+  M._input_omnifunc = input_omnifunc
 
   vim.keymap.set('i', '<Tab>', '<C-x><C-u>', { buffer = bufnr, silent = true, desc = 'Trigger completion' })
 
@@ -433,5 +735,12 @@ M._close_input_window = close_existing_input_window
 M._cancel_input = cancel_existing_input_window
 M._resolve_chat_window = resolve_chat_window
 M._is_input_anchored_below_chat = is_input_anchored_below_chat
+M._input_omnifunc = input_omnifunc
+M._discovered_agent_names = discovered_agent_names
+M._discovered_skill_names = discovered_skill_names
+M._discovered_instruction_names = discovered_instruction_names
+M._discovered_mcp_names = discovered_mcp_names
+M._discovered_model_ids = discovered_model_ids
+M._discovered_session_items = discovered_session_items
 
 return M

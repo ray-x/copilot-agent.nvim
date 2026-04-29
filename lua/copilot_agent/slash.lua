@@ -5,6 +5,7 @@
 local cfg = require('copilot_agent.config')
 local chat = require('copilot_agent.chat')
 local checkpoints = require('copilot_agent.checkpoints')
+local events = require('copilot_agent.events')
 local init_project = require('copilot_agent.project_init')
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
@@ -317,6 +318,71 @@ local function session_tasks(args)
   return tasks.show(args)
 end
 
+local function compact_result_message(result)
+  if type(result) ~= 'table' then
+    return 'History compaction finished'
+  end
+
+  local parts = {}
+  if result.success == false then
+    local err = vim.trim(result.error or '')
+    return err ~= '' and ('History compaction failed: ' .. err) or 'History compaction failed'
+  end
+  if tonumber(result.messagesRemoved) then
+    parts[#parts + 1] = string.format('%d messages removed', tonumber(result.messagesRemoved))
+  end
+  if tonumber(result.tokensRemoved) then
+    parts[#parts + 1] = string.format('%d tokens freed', tonumber(result.tokensRemoved))
+  end
+
+  local context = result.contextWindow
+  if type(context) == 'table' and tonumber(context.currentTokens) and tonumber(context.tokenLimit) then
+    parts[#parts + 1] = string.format('%d/%d tokens', tonumber(context.currentTokens), tonumber(context.tokenLimit))
+  end
+
+  if #parts == 0 then
+    return 'History compacted successfully'
+  end
+  return 'History compacted: ' .. table.concat(parts, ', ')
+end
+
+local function compact_history()
+  session.with_session(function(session_id, err)
+    if err then
+      append_entry('error', err)
+      return
+    end
+
+    request('POST', string.format('/sessions/%s/compact', session_id), {}, function(response, request_err)
+      if request_err then
+        append_entry('error', 'Compaction failed: ' .. request_err)
+        return
+      end
+
+      local result = response and response.result or nil
+      if type(result) == 'table' and result.success == false then
+        append_entry('error', compact_result_message(result))
+        return
+      end
+
+      if type(result) == 'table' and type(result.contextWindow) == 'table' then
+        state.context_tokens = tonumber(result.contextWindow.currentTokens) or state.context_tokens
+        state.context_limit = tonumber(result.contextWindow.tokenLimit) or state.context_limit
+        refresh_statuslines()
+      end
+
+      events.reload_session_history(session_id, function(reload_err)
+        if reload_err then
+          append_entry('error', 'Compaction succeeded but history reload failed: ' .. reload_err)
+          return
+        end
+        append_entry('system', compact_result_message(result))
+      end)
+    end)
+  end)
+  return true
+end
+
 local function undo_checkpoint()
   if not state.session_id then
     notify('No active session to undo', vim.log.levels.WARN)
@@ -357,6 +423,7 @@ local function rewind_checkpoint()
 end
 
 local handlers = {
+  compact = compact_history,
   fleet = fleet_mode,
   init = init_repository,
   rename = rename_session,

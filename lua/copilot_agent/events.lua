@@ -27,6 +27,7 @@ local render_chat = render.render_chat
 local schedule_render = render.schedule_render
 local stream_update = render.stream_update
 local append_entry = render.append_entry
+local clear_transcript = render.clear_transcript
 local ensure_assistant_entry = render.ensure_assistant_entry
 local start_thinking_spinner = render.start_thinking_spinner
 local stop_thinking_spinner = render.stop_thinking_spinner
@@ -752,6 +753,34 @@ function M.start_event_stream(session_id)
       end)
     end,
   })
+end
+
+function M.reload_session_history(session_id, callback)
+  callback = callback or function() end
+  session_id = session_id or state.session_id
+  if not session_id then
+    callback('No active session')
+    return
+  end
+
+  clear_transcript()
+  state.history_loading = true
+  request('GET', string.format('/sessions/%s/messages', session_id), nil, function(response, err)
+    if err then
+      state.history_loading = false
+      callback(err)
+      return
+    end
+
+    for _, event in ipairs((response and response.events) or {}) do
+      handle_session_event(event)
+    end
+
+    state.history_loading = false
+    render_chat()
+    scroll_to_bottom()
+    callback(nil, #((response and response.events) or {}))
+  end)
 end
 
 M.show_user_input_picker = show_user_input_picker

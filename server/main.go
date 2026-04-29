@@ -69,6 +69,8 @@ type fleetStartRequest struct {
 	Prompt string `json:"prompt,omitempty"`
 }
 
+type compactHistoryRequest struct{}
+
 type setModelRequest struct {
 	Model           string `json:"model"`
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
@@ -281,6 +283,7 @@ func main() {
 	mux.HandleFunc("GET /sessions/{id}/messages", svc.handleGetMessages)
 	mux.HandleFunc("GET /sessions/{id}/tasks", svc.handleGetTasks)
 	mux.HandleFunc("POST /sessions/{id}/messages", svc.handleSendMessage)
+	mux.HandleFunc("POST /sessions/{id}/compact", svc.handleCompactHistory)
 	mux.HandleFunc("POST /sessions/{id}/fleet", svc.handleStartFleet)
 	mux.HandleFunc("GET /sessions/{id}/events", svc.handleEvents)
 	mux.HandleFunc("POST /sessions/{id}/user-input/{requestID}", svc.handleAnswerUserInput)
@@ -690,6 +693,31 @@ func (s *service) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"sessionId": managed.session.SessionID, "messageId": messageID})
+}
+
+func (s *service) handleCompactHistory(w http.ResponseWriter, r *http.Request) {
+	managed, ok := s.getManagedSession(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session is not attached to this service")
+		return
+	}
+
+	var req compactHistoryRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	result, err := managed.session.RPC.History.Compact(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("compact history: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sessionId": managed.session.SessionID,
+		"result":    result,
+	})
 }
 
 func (s *service) handleStartFleet(w http.ResponseWriter, r *http.Request) {

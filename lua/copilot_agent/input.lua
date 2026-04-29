@@ -31,8 +31,8 @@ local session_label_max_len = 32
 local is_list = vim.islist or vim.tbl_islist
 
 local function frontmatter_name(path)
-  local lines = vim.fn.readfile(path, '', 32)
-  if type(lines) ~= 'table' or lines[1] ~= '---' then
+  local ok, lines = pcall(vim.fn.readfile, path, '', 32)
+  if not ok or type(lines) ~= 'table' or lines[1] ~= '---' then
     return nil
   end
 

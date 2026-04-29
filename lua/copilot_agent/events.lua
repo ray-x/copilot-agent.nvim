@@ -8,6 +8,7 @@ local utils = require('copilot_agent.utils')
 local cfg = require('copilot_agent.config')
 local http = require('copilot_agent.http')
 local service = require('copilot_agent.service')
+local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 
@@ -140,13 +141,13 @@ local function handle_host_event(event_name, payload)
   if event_name == 'host.session_attached' then
     sync_model_state(data.model, data.reasoningEffort)
     sync_config_counts(data)
-    if data.summary and data.summary ~= '' then
-      state.session_name = data.summary
-    end
+    state.session_name = session_names.resolve(data.summary, data.sessionId or state.session_id)
     refresh_statuslines()
     append_entry('system', 'Connected to session ' .. (data.sessionId or state.session_id or '<unknown>'))
   elseif event_name == 'host.session_name_updated' then
-    state.session_name = data.name or state.session_name
+    if not session_names.get(data.sessionId or state.session_id) then
+      state.session_name = data.name or state.session_name
+    end
     refresh_statuslines()
   elseif event_name == 'host.model_changed' then
     sync_model_state(data.model, data.reasoningEffort)
@@ -157,6 +158,7 @@ local function handle_host_event(event_name, payload)
     state.agent_count = 0
     state.skill_count = 0
     state.mcp_count = 0
+    state.session_name = nil
     refresh_statuslines()
   elseif event_name == 'host.permission_requested' then
     -- In interactive mode, Go sends a request object with an ID; ask the user.

@@ -5,6 +5,7 @@
 local cfg = require('copilot_agent.config')
 local http = require('copilot_agent.http')
 local service = require('copilot_agent.service')
+local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local chat = require('copilot_agent.chat')
 local utils = require('copilot_agent.utils')
@@ -243,13 +244,13 @@ local function discovered_session_items()
   local items = {}
   for _, id in ipairs(order) do
     local session = merged[id]
-    local summary = utils.truncate_session_summary(session.summary, session_label_max_len)
+    local summary = utils.truncate_session_summary(session_names.resolve(session.summary, id), session_label_max_len)
     local formatted_id = utils.format_session_id(id)
     local label = summary ~= '' and (summary .. ' [' .. formatted_id .. ']') or formatted_id
     table.insert(items, {
       id = id,
       label = label,
-      summary = (session.summary or ''):lower(),
+      summary = (session_names.resolve(session.summary, id) or ''):lower(),
     })
   end
 
@@ -560,6 +561,9 @@ local function create_input_buffer()
     vim.cmd('startinsert')
     if text ~= '' then
       local attachments = vim.deepcopy(state.pending_attachments)
+      if require('copilot_agent.slash').execute(text, { attachments = attachments }) then
+        return
+      end
       state.pending_attachments = {}
       state.chat_busy = true
       refresh_statuslines()

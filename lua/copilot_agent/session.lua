@@ -11,6 +11,7 @@ local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 local events = require('copilot_agent.events')
 local model = require('copilot_agent.model')
+local session_names = require('copilot_agent.session_names')
 local utils = require('copilot_agent.utils')
 
 local state = cfg.state
@@ -45,7 +46,7 @@ end
 
 local function formatted_session_label(summary, session_id)
   local formatted_id = format_session_id(session_id)
-  local formatted_summary = formatted_session_summary(summary)
+  local formatted_summary = formatted_session_summary(session_names.resolve(summary, session_id))
   if formatted_summary ~= '' then
     return formatted_summary .. ' [' .. formatted_id .. ']'
   end
@@ -70,7 +71,7 @@ end
 local function log_session_catalog(context, sessions, target_cwd)
   for _, session in ipairs(sessions or {}) do
     local session_cwd = session_cwd_of(session) or '<none>'
-    local summary = formatted_session_summary(session.summary)
+    local summary = formatted_session_summary(session_names.resolve(session.summary, session.sessionId))
     log(
       string.format(
         '%s candidate id=%s live=%s cwd=%s target=%s match=%s summary=%s',
@@ -459,7 +460,7 @@ create_session = function(callback, opts)
 
     -- Announce the new session.
     local wd = (response.workingDirectory and response.workingDirectory ~= '') and vim.fn.fnamemodify(response.workingDirectory, ':~') or vim.fn.fnamemodify(working_directory(), ':~')
-    local name = formatted_session_summary(response.summary)
+    local name = formatted_session_summary(session_names.resolve(response.summary, state.session_id))
     local formatted_id = format_session_id(state.session_id)
     local msg = 'New session created' .. '  id:' .. formatted_id .. (name ~= '' and ('  name:' .. name) or '') .. '  dir:' .. wd
     append_entry('system', msg)

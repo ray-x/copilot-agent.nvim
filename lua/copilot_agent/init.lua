@@ -201,6 +201,10 @@ function M.start_lsp(opts)
   return lsp.start_lsp(opts)
 end
 
+function M.execute_slash_command(prompt, opts)
+  return require('copilot_agent.slash').execute(prompt, opts)
+end
+
 -- Expose internal state for :checkhealth and debugging.
 M.state = state
 

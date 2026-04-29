@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,6 +106,29 @@ type sessionSummary struct {
 type listSessionsResponse struct {
 	Persisted []copilot.SessionMetadata `json:"persisted"`
 	Live      []sessionSummary          `json:"live"`
+}
+
+type backgroundTaskView struct {
+	ID             string     `json:"id"`
+	Kind           string     `json:"kind"`
+	Status         string     `json:"status"`
+	Title          string     `json:"title,omitempty"`
+	Description    string     `json:"description,omitempty"`
+	Summary        string     `json:"summary,omitempty"`
+	Prompt         string     `json:"prompt,omitempty"`
+	AgentID        string     `json:"agentId,omitempty"`
+	AgentType      string     `json:"agentType,omitempty"`
+	AgentName      string     `json:"agentName,omitempty"`
+	ToolCallID     string     `json:"toolCallId,omitempty"`
+	EntryID        string     `json:"entryId,omitempty"`
+	Error          string     `json:"error,omitempty"`
+	Model          string     `json:"model,omitempty"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+	StartedAt      *time.Time `json:"startedAt,omitempty"`
+	CompletedAt    *time.Time `json:"completedAt,omitempty"`
+	DurationMs     *float64   `json:"durationMs,omitempty"`
+	TotalTokens    *float64   `json:"totalTokens,omitempty"`
+	TotalToolCalls *float64   `json:"totalToolCalls,omitempty"`
 }
 
 type hostEvent struct {
@@ -255,6 +279,7 @@ func main() {
 	mux.HandleFunc("POST /sessions/{id}/model", svc.handleSetModel)
 	mux.HandleFunc("POST /sessions/{id}/mode", svc.handleSetAgentMode)
 	mux.HandleFunc("GET /sessions/{id}/messages", svc.handleGetMessages)
+	mux.HandleFunc("GET /sessions/{id}/tasks", svc.handleGetTasks)
 	mux.HandleFunc("POST /sessions/{id}/messages", svc.handleSendMessage)
 	mux.HandleFunc("POST /sessions/{id}/fleet", svc.handleStartFleet)
 	mux.HandleFunc("GET /sessions/{id}/events", svc.handleEvents)
@@ -605,6 +630,22 @@ func (s *service) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+func (s *service) handleGetTasks(w http.ResponseWriter, r *http.Request) {
+	managed, ok := s.getManagedSession(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session is not attached to this service")
+		return
+	}
+
+	events, err := managed.session.GetMessages(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("get tasks: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": extractBackgroundTasks(events)})
 }
 
 func (s *service) handleAbortSession(w http.ResponseWriter, r *http.Request) {
@@ -1292,6 +1333,149 @@ func countMCPServerEntries(value any) int {
 	default:
 		return 0
 	}
+}
+
+func extractBackgroundTasks(events []copilot.SessionEvent) []backgroundTaskView {
+	tasks := make(map[string]*backgroundTaskView)
+
+	ensureTask := func(id, kind string) *backgroundTaskView {
+		task, ok := tasks[id]
+		if !ok {
+			task = &backgroundTaskView{ID: id, Kind: kind}
+			tasks[id] = task
+		}
+		if task.Kind == "" {
+			task.Kind = kind
+		}
+		return task
+	}
+
+	for idx, event := range events {
+		switch data := event.Data.(type) {
+		case *copilot.SubagentStartedData:
+			task := ensureTask("subagent:"+data.ToolCallID, "subagent")
+			task.Status = "running"
+			task.Title = firstNonEmpty(data.AgentDisplayName, data.AgentName, task.Title, "Subagent")
+			task.Description = firstNonEmpty(data.AgentDescription, task.Description)
+			task.AgentName = firstNonEmpty(data.AgentName, task.AgentName)
+			task.ToolCallID = firstNonEmpty(data.ToolCallID, task.ToolCallID)
+			task.UpdatedAt = event.Timestamp
+			if task.StartedAt == nil {
+				startedAt := event.Timestamp
+				task.StartedAt = &startedAt
+			}
+		case *copilot.SubagentCompletedData:
+			task := ensureTask("subagent:"+data.ToolCallID, "subagent")
+			task.Status = "completed"
+			task.Title = firstNonEmpty(data.AgentDisplayName, data.AgentName, task.Title, "Subagent")
+			task.AgentName = firstNonEmpty(data.AgentName, task.AgentName)
+			task.ToolCallID = firstNonEmpty(data.ToolCallID, task.ToolCallID)
+			task.Model = firstNonEmpty(stringValue(data.Model), task.Model)
+			task.DurationMs = data.DurationMs
+			task.TotalTokens = data.TotalTokens
+			task.TotalToolCalls = data.TotalToolCalls
+			task.UpdatedAt = event.Timestamp
+			completedAt := event.Timestamp
+			task.CompletedAt = &completedAt
+			if task.StartedAt == nil {
+				startedAt := event.Timestamp
+				task.StartedAt = &startedAt
+			}
+		case *copilot.SubagentFailedData:
+			task := ensureTask("subagent:"+data.ToolCallID, "subagent")
+			task.Status = "failed"
+			task.Title = firstNonEmpty(data.AgentDisplayName, data.AgentName, task.Title, "Subagent")
+			task.AgentName = firstNonEmpty(data.AgentName, task.AgentName)
+			task.ToolCallID = firstNonEmpty(data.ToolCallID, task.ToolCallID)
+			task.Model = firstNonEmpty(stringValue(data.Model), task.Model)
+			task.DurationMs = data.DurationMs
+			task.TotalTokens = data.TotalTokens
+			task.TotalToolCalls = data.TotalToolCalls
+			task.Error = firstNonEmpty(data.Error, task.Error)
+			task.UpdatedAt = event.Timestamp
+			completedAt := event.Timestamp
+			task.CompletedAt = &completedAt
+			if task.StartedAt == nil {
+				startedAt := event.Timestamp
+				task.StartedAt = &startedAt
+			}
+		case *copilot.SystemNotificationData:
+			kind := data.Kind
+			switch kind.Type {
+			case copilot.SystemNotificationTypeAgentCompleted, copilot.SystemNotificationTypeAgentIdle, copilot.SystemNotificationTypeNewInboxMessage:
+				key := firstNonEmpty(stringValue(kind.AgentID), stringValue(kind.EntryID), fmt.Sprintf("notification-%d", idx))
+				task := ensureTask("background:"+key, "background")
+				task.Title = firstNonEmpty(stringValue(kind.Description), task.Title, stringValue(kind.Summary), stringValue(kind.AgentType), "Background agent")
+				task.Description = firstNonEmpty(stringValue(kind.Description), task.Description)
+				task.Summary = firstNonEmpty(stringValue(kind.Summary), task.Summary)
+				task.Prompt = firstNonEmpty(stringValue(kind.Prompt), task.Prompt)
+				task.AgentID = firstNonEmpty(stringValue(kind.AgentID), task.AgentID)
+				task.AgentType = firstNonEmpty(stringValue(kind.AgentType), task.AgentType)
+				task.EntryID = firstNonEmpty(stringValue(kind.EntryID), task.EntryID)
+				task.UpdatedAt = event.Timestamp
+				if task.StartedAt == nil {
+					startedAt := event.Timestamp
+					task.StartedAt = &startedAt
+				}
+
+				switch kind.Type {
+				case copilot.SystemNotificationTypeAgentCompleted:
+					if kind.Status != nil && *kind.Status == copilot.SystemNotificationAgentCompletedStatusFailed {
+						task.Status = "failed"
+					} else {
+						task.Status = "completed"
+					}
+					completedAt := event.Timestamp
+					task.CompletedAt = &completedAt
+				case copilot.SystemNotificationTypeAgentIdle:
+					task.Status = "idle"
+				case copilot.SystemNotificationTypeNewInboxMessage:
+					task.Status = "inbox"
+				}
+			}
+		}
+	}
+
+	out := make([]backgroundTaskView, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, *task)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		leftRank := backgroundTaskStatusRank(out[i].Status)
+		rightRank := backgroundTaskStatusRank(out[j].Status)
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+func backgroundTaskStatusRank(status string) int {
+	switch status {
+	case "running":
+		return 0
+	case "inbox":
+		return 1
+	case "idle":
+		return 2
+	case "failed":
+		return 3
+	case "completed":
+		return 4
+	default:
+		return 5
+	}
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func fileExists(path string) bool {

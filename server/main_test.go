@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
 )
@@ -434,5 +435,92 @@ func TestDecodeJSONRejectsUnknownFields(t *testing.T) {
 	}
 	if err := decodeJSON(req, &target); err == nil {
 		t.Fatal("expected error for unknown field")
+	}
+}
+
+func TestExtractBackgroundTasksSummarizesSubagentsAndNotifications(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, 4, 29, 11, 0, 0, 0, time.UTC)
+	completedAt := startedAt.Add(2 * time.Second)
+	failedAt := completedAt.Add(2 * time.Second)
+	durationMs := 1250.0
+	totalTokens := 321.0
+	totalToolCalls := 4.0
+	model := "gpt-5.4"
+	agentID := "agent-123"
+	description := "Analyze repository health"
+	summary := "Background agent failed while linting"
+	status := copilot.SystemNotificationAgentCompletedStatusFailed
+
+	events := []copilot.SessionEvent{
+		{
+			Type:      copilot.SessionEventTypeSubagentStarted,
+			Timestamp: startedAt,
+			Data: &copilot.SubagentStartedData{
+				AgentDescription: "Review the changed files",
+				AgentDisplayName: "Code Review",
+				AgentName:        "code-review",
+				ToolCallID:       "tool-1",
+			},
+		},
+		{
+			Type:      copilot.SessionEventTypeSubagentCompleted,
+			Timestamp: completedAt,
+			Data: &copilot.SubagentCompletedData{
+				AgentDisplayName: "Code Review",
+				AgentName:        "code-review",
+				DurationMs:       &durationMs,
+				Model:            &model,
+				ToolCallID:       "tool-1",
+				TotalTokens:      &totalTokens,
+				TotalToolCalls:   &totalToolCalls,
+			},
+		},
+		{
+			Type:      copilot.SessionEventTypeSystemNotification,
+			Timestamp: failedAt,
+			Data: &copilot.SystemNotificationData{
+				Kind: copilot.SystemNotification{
+					Type:        copilot.SystemNotificationTypeAgentCompleted,
+					AgentID:     &agentID,
+					AgentType:   &model,
+					Description: &description,
+					Summary:     &summary,
+					Status:      &status,
+				},
+			},
+		},
+	}
+
+	tasks := extractBackgroundTasks(events)
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+
+	if tasks[0].ID != "background:"+agentID {
+		t.Fatalf("expected background task first, got %+v", tasks[0])
+	}
+	if tasks[0].Status != "failed" {
+		t.Fatalf("expected failed background task, got %+v", tasks[0])
+	}
+	if tasks[0].Description != description {
+		t.Fatalf("expected description %q, got %+v", description, tasks[0])
+	}
+	if tasks[0].Summary != summary {
+		t.Fatalf("expected summary %q, got %+v", summary, tasks[0])
+	}
+
+	if tasks[1].ID != "subagent:tool-1" {
+		t.Fatalf("expected subagent task second, got %+v", tasks[1])
+	}
+	if tasks[1].Status != "completed" {
+		t.Fatalf("expected completed subagent task, got %+v", tasks[1])
+	}
+	if tasks[1].Model != model {
+		t.Fatalf("expected model %q, got %+v", model, tasks[1])
+	}
+	if tasks[1].DurationMs == nil || *tasks[1].DurationMs != durationMs {
+		t.Fatalf("expected duration %.0f, got %+v", durationMs, tasks[1])
 	}
 }

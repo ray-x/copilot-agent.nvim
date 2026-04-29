@@ -11,6 +11,7 @@ local service = require('copilot_agent.service')
 local session = require('copilot_agent.session')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
+local tasks = require('copilot_agent.tasks')
 
 local state = cfg.state
 local notify = cfg.notify
@@ -312,6 +313,10 @@ local function fleet_mode(args)
   return true
 end
 
+local function session_tasks(args)
+  return tasks.show(args)
+end
+
 local function undo_checkpoint()
   if not state.session_id then
     notify('No active session to undo', vim.log.levels.WARN)
@@ -357,6 +362,7 @@ local handlers = {
   rename = rename_session,
   search = search_transcript,
   share = share_session,
+  tasks = session_tasks,
   undo = undo_checkpoint,
   rewind = rewind_checkpoint,
 }

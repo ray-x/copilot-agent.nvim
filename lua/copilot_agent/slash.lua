@@ -5,6 +5,7 @@
 local cfg = require('copilot_agent.config')
 local chat = require('copilot_agent.chat')
 local render = require('copilot_agent.render')
+local service = require('copilot_agent.service')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 
@@ -15,6 +16,7 @@ local refresh_statuslines = sl.refresh_statuslines
 
 local M = {}
 local search_label_max_len = 72
+local working_directory = service.working_directory
 
 local function parse(text)
   if type(text) ~= 'string' then
@@ -141,9 +143,134 @@ local function search_transcript(args)
   return true
 end
 
+local function transcript_lines()
+  local lines = {}
+  for idx, entry in ipairs(state.entries) do
+    vim.list_extend(lines, render.entry_lines(entry, idx, true))
+  end
+  return lines
+end
+
+local function markdown_document()
+  return table.concat(transcript_lines(), '\n') .. '\n'
+end
+
+local function html_escape(text)
+  return (text:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;'):gsub('"', '&quot;'))
+end
+
+local function html_document()
+  local body = html_escape(table.concat(transcript_lines(), '\n'))
+  return table.concat({
+    '<!DOCTYPE html>',
+    '<html lang="en">',
+    '<head>',
+    '  <meta charset="utf-8">',
+    '  <meta name="viewport" content="width=device-width, initial-scale=1">',
+    '  <title>Copilot Agent Session Export</title>',
+    '  <style>',
+    '    body { margin: 0; background: #0d1117; color: #c9d1d9; font: 14px/1.5 ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace; }',
+    '    main { max-width: 960px; margin: 0 auto; padding: 24px; }',
+    '    pre { white-space: pre-wrap; word-break: break-word; }',
+    '  </style>',
+    '</head>',
+    '<body>',
+    '  <main>',
+    '    <pre>' .. body .. '</pre>',
+    '  </main>',
+    '</body>',
+    '</html>',
+  }, '\n')
+end
+
+local function write_export(path, content)
+  path = vim.fn.fnamemodify(path, ':p')
+  vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
+  local f, err = io.open(path, 'w')
+  if not f then
+    return nil, err
+  end
+  f:write(content)
+  f:close()
+  return path
+end
+
+local function export_session(format_name, path)
+  if vim.tbl_isempty(state.entries) then
+    notify('No transcript entries to share', vim.log.levels.INFO)
+    return
+  end
+
+  local content = format_name == 'html' and html_document() or markdown_document()
+  local written, err = write_export(path, content)
+  if not written then
+    append_entry('error', 'Failed to export session: ' .. tostring(err))
+    return
+  end
+  append_entry('system', 'Session export written to ' .. vim.fn.fnamemodify(written, ':~'))
+end
+
+local function default_export_path(format_name)
+  local ext = format_name == 'html' and 'html' or 'md'
+  return string.format('%s/copilot-session-%s.%s', working_directory(), os.date('%Y%m%d-%H%M%S'), ext)
+end
+
+local function resolve_share_request(args)
+  local format_name
+  local path
+  local first, rest = vim.trim(args or ''):match('^(%S+)%s*(.*)$')
+  if first == 'html' then
+    format_name = 'html'
+    path = rest
+  elseif first == 'markdown' or first == 'md' or first == 'file' then
+    format_name = 'markdown'
+    path = rest
+  elseif first and first ~= '' then
+    path = args
+  end
+  return format_name, vim.trim(path or '')
+end
+
+local function share_session(args)
+  local requested_format, requested_path = resolve_share_request(args)
+  local function prompt_path(format_name)
+    vim.ui.input({
+      prompt = 'Export path: ',
+      default = requested_path ~= '' and requested_path or default_export_path(format_name),
+      completion = 'file',
+    }, function(path)
+      path = vim.trim(path or '')
+      if path ~= '' then
+        export_session(format_name, path)
+      end
+    end)
+  end
+
+  if requested_format then
+    prompt_path(requested_format)
+    return true
+  end
+
+  vim.ui.select({
+    { id = 'markdown', label = 'Markdown (.md)' },
+    { id = 'html', label = 'HTML (.html)' },
+  }, {
+    prompt = 'Share session as',
+    format_item = function(item)
+      return item.label
+    end,
+  }, function(choice)
+    if choice then
+      prompt_path(choice.id)
+    end
+  end)
+  return true
+end
+
 local handlers = {
   rename = rename_session,
   search = search_transcript,
+  share = share_session,
 }
 
 function M.execute(text, opts)

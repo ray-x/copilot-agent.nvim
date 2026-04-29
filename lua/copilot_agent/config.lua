@@ -14,6 +14,7 @@ local defaults = {
   permission_mode = 'approve-all',
   auto_create_session = true,
   notify = true,
+  file_log_level = 'WARN', -- DEBUG | INFO | WARN | ERROR; threshold for stdpath('log')/copilot_agent.log
   service = {
     auto_start = false,
     command = nil, -- nil = auto-detect installed binary, then fall back to 'go run .'
@@ -182,7 +183,52 @@ local function normalize_base_url(url)
   return utils.normalize_base_url(url, defaults.base_url)
 end
 
+local function log_path()
+  return vim.fn.stdpath('log') .. '/copilot_agent.log'
+end
+
+local _log_levels = {
+  DEBUG = vim.log.levels.DEBUG,
+  INFO = vim.log.levels.INFO,
+  WARN = vim.log.levels.WARN,
+  ERROR = vim.log.levels.ERROR,
+}
+
+local function resolve_file_log_level(value)
+  if type(value) == 'number' then
+    return value
+  end
+  if type(value) == 'string' then
+    return _log_levels[value:upper()]
+  end
+  return nil
+end
+
+local function log(message, level)
+  local configured_level = resolve_file_log_level(state.config.file_log_level) or vim.log.levels.WARN
+  level = level or vim.log.levels.INFO
+  if level < configured_level then
+    return
+  end
+
+  local prefix = ({
+    [vim.log.levels.DEBUG] = 'DEBUG',
+    [vim.log.levels.INFO] = 'INFO',
+    [vim.log.levels.WARN] = 'WARN',
+    [vim.log.levels.ERROR] = 'ERROR',
+  })[level or vim.log.levels.INFO] or 'INFO'
+  local line = string.format('%s [%s] %s\n', os.date('%Y-%m-%d %H:%M:%S'), prefix, tostring(message))
+  pcall(function()
+    local path = log_path()
+    vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
+    local f = assert(io.open(path, 'a'))
+    f:write(line)
+    f:close()
+  end)
+end
+
 local function notify(message, level)
+  log(message, level)
   if state.config.notify == false then
     return
   end
@@ -194,5 +240,7 @@ return {
   state = state,
   SLASH_COMMANDS = SLASH_COMMANDS,
   notify = notify,
+  log = log,
+  log_path = log_path,
   normalize_base_url = normalize_base_url,
 }

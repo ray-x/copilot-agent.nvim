@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -288,6 +290,74 @@ func TestWriteErrorSetsStatusAndMessage(t *testing.T) {
 	}
 	if body["error"] != "something went wrong" {
 		t.Fatalf("unexpected error message: %q", body["error"])
+	}
+}
+
+func TestEnrichPersistedSessionsFromWorkspaceBackfillsMissingContext(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	sessionID := "nvim-1777442217401371000"
+	if err := os.MkdirAll(filepath.Join(stateDir, sessionID), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(stateDir, sessionID, "workspace.yaml"),
+		[]byte("id: nvim-1777442217401371000\ncwd: /tmp/project\ngit_root: /tmp/project\nrepository: owner/repo\nbranch: main\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("write workspace metadata: %v", err)
+	}
+
+	enriched := enrichPersistedSessionsFromWorkspace([]copilot.SessionMetadata{
+		{SessionID: sessionID},
+	}, stateDir)
+
+	if got := enriched[0].Context; got == nil {
+		t.Fatal("expected workspace context to be backfilled")
+	} else {
+		if got.Cwd != "/tmp/project" {
+			t.Fatalf("expected cwd /tmp/project, got %q", got.Cwd)
+		}
+		if got.GitRoot != "/tmp/project" {
+			t.Fatalf("expected gitRoot /tmp/project, got %q", got.GitRoot)
+		}
+		if got.Repository != "owner/repo" {
+			t.Fatalf("expected repository owner/repo, got %q", got.Repository)
+		}
+		if got.Branch != "main" {
+			t.Fatalf("expected branch main, got %q", got.Branch)
+		}
+	}
+}
+
+func TestEnrichPersistedSessionsFromWorkspacePreservesExistingContext(t *testing.T) {
+	t.Parallel()
+
+	enriched := enrichPersistedSessionsFromWorkspace([]copilot.SessionMetadata{
+		{
+			SessionID: "session-123",
+			Context: &copilot.SessionContext{
+				Cwd:        "/already/set",
+				GitRoot:    "/already/set",
+				Repository: "owner/existing",
+				Branch:     "stable",
+			},
+		},
+	}, t.TempDir())
+
+	if got := enriched[0].Context; got == nil {
+		t.Fatal("expected existing context to be preserved")
+	} else {
+		if got.Cwd != "/already/set" {
+			t.Fatalf("expected cwd /already/set, got %q", got.Cwd)
+		}
+		if got.Repository != "owner/existing" {
+			t.Fatalf("expected repository owner/existing, got %q", got.Repository)
+		}
+		if got.Branch != "stable" {
+			t.Fatalf("expected branch stable, got %q", got.Branch)
+		}
 	}
 }
 

@@ -15,6 +15,7 @@ local utils = require('copilot_agent.utils')
 
 local state = cfg.state
 local notify = cfg.notify
+local log = cfg.log
 
 local request = http.request
 
@@ -49,6 +50,90 @@ local function formatted_session_label(summary, session_id)
     return formatted_summary .. ' [' .. formatted_id .. ']'
   end
   return formatted_id
+end
+
+local function session_id_of(session)
+  return session and session.sessionId or nil
+end
+
+local function session_cwd_of(session)
+  if not session then
+    return nil
+  end
+  return (session.context and session.context.cwd) or session.workingDirectory or nil
+end
+
+local function session_sort_key(session)
+  return (session and (session.modifiedTime or session.startTime or session.createdAt)) or ''
+end
+
+local function log_session_catalog(context, sessions, target_cwd)
+  for _, session in ipairs(sessions or {}) do
+    local session_cwd = session_cwd_of(session) or '<none>'
+    local summary = formatted_session_summary(session.summary)
+    log(
+      string.format(
+        '%s candidate id=%s live=%s cwd=%s target=%s match=%s summary=%s',
+        context,
+        format_session_id(session.sessionId),
+        tostring(session.live == true),
+        session_cwd,
+        target_cwd or '<none>',
+        tostring(session_cwd == target_cwd),
+        summary ~= '' and summary or '<none>'
+      ),
+      vim.log.levels.DEBUG
+    )
+  end
+end
+
+local function merge_sessions(response)
+  local merged = {}
+  local order = {}
+
+  local function upsert(session)
+    local id = session_id_of(session)
+    if not id or id == '' then
+      return
+    end
+    if not merged[id] then
+      order[#order + 1] = id
+      merged[id] = vim.deepcopy(session)
+      return
+    end
+
+    local existing = merged[id]
+    if session.live then
+      local combined = vim.deepcopy(session)
+      combined.context = combined.context or existing.context
+      combined.workingDirectory = combined.workingDirectory or existing.workingDirectory
+      combined.summary = combined.summary or existing.summary
+      combined.modifiedTime = combined.modifiedTime or existing.modifiedTime
+      combined.startTime = combined.startTime or existing.startTime
+      merged[id] = combined
+      return
+    end
+
+    existing.context = existing.context or session.context
+    existing.workingDirectory = existing.workingDirectory or session.workingDirectory
+    existing.summary = existing.summary or session.summary
+    existing.modifiedTime = existing.modifiedTime or session.modifiedTime
+    existing.startTime = existing.startTime or session.startTime
+    existing.createdAt = existing.createdAt or session.createdAt
+  end
+
+  for _, session in ipairs((response and response.persisted) or {}) do
+    upsert(session)
+  end
+  for _, session in ipairs((response and response.live) or {}) do
+    upsert(session)
+  end
+
+  local items = {}
+  for _, id in ipairs(order) do
+    items[#items + 1] = merged[id]
+  end
+  return items
 end
 
 -- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
@@ -104,12 +189,14 @@ local function on_session_ready(session_id, err)
 end
 
 function M.resume_session(session_id, callback)
+  local requested_wd = working_directory()
+  log(string.format('resume_session request id=%s cwd=%s', format_session_id(session_id), requested_wd), vim.log.levels.DEBUG)
   request('POST', '/sessions', {
     sessionId = session_id,
     resume = true,
     clientName = state.config.client_name,
     permissionMode = state.config.permission_mode,
-    workingDirectory = working_directory(),
+    workingDirectory = requested_wd,
     streaming = state.config.session.streaming,
     enableConfigDiscovery = state.config.session.enable_config_discovery,
     model = state.config.session.model,
@@ -129,6 +216,16 @@ function M.resume_session(session_id, callback)
       on_session_ready(nil, message)
       return
     end
+    log(
+      string.format(
+        'resume_session attached id=%s requested_cwd=%s response_wd=%s summary=%s',
+        format_session_id(state.session_id),
+        requested_wd,
+        tostring(response and response.workingDirectory or '<none>'),
+        tostring(response and response.summary or '<none>')
+      ),
+      vim.log.levels.DEBUG
+    )
     start_event_stream(state.session_id)
     on_session_ready(state.session_id)
     if callback then
@@ -143,22 +240,37 @@ function M.pick_or_create_session(callback)
   local wd = working_directory()
   -- Show a connecting indicator immediately while the async fetch runs.
   append_entry('system', 'Connecting…')
+  log('pick_or_create_session cwd=' .. tostring(wd), vim.log.levels.INFO)
   request('GET', '/sessions', nil, function(response, err)
     if err then
+      log('pick_or_create_session list failed: ' .. tostring(err), vim.log.levels.ERROR)
       create_session(callback)
       return
     end
 
-    local persisted = (response and response.persisted) or {}
+    local sessions = merge_sessions(response)
+    log_session_catalog('pick_or_create_session', sessions, wd)
     local matching = {}
-    for _, s in ipairs(persisted) do
-      local s_cwd = s.context and s.context.cwd or nil
+    for _, s in ipairs(sessions) do
+      local s_cwd = session_cwd_of(s)
       if s_cwd == wd then
         table.insert(matching, s)
       end
     end
+    log(
+      string.format(
+        'pick_or_create_session cwd=%s persisted=%d live=%d merged=%d matching=%d',
+        tostring(wd),
+        #((response and response.persisted) or {}),
+        #((response and response.live) or {}),
+        #sessions,
+        #matching
+      ),
+      vim.log.levels.INFO
+    )
 
     if #matching == 0 then
+      log('pick_or_create_session no matching session; creating new session', vim.log.levels.WARN)
       create_session(callback)
       return
     end
@@ -167,14 +279,15 @@ function M.pick_or_create_session(callback)
     if #matching == 1 then
       local s = matching[1]
       append_entry('system', 'Resuming session ' .. formatted_session_label(s.summary, s.sessionId))
+      log('pick_or_create_session resuming single match ' .. formatted_session_label(s.summary, s.sessionId), vim.log.levels.INFO)
       M.resume_session(s.sessionId, callback)
       return
     end
 
     -- Multiple matches: sort newest-first.
     table.sort(matching, function(a, b)
-      local ta = a.modifiedTime or a.startTime or ''
-      local tb = b.modifiedTime or b.startTime or ''
+      local ta = session_sort_key(a)
+      local tb = session_sort_key(b)
       return ta > tb
     end)
 
@@ -182,6 +295,7 @@ function M.pick_or_create_session(callback)
     if state.config.session.auto_resume == 'auto' then
       local s = matching[1]
       append_entry('system', 'Resuming most recent session ' .. formatted_session_label(s.summary, s.sessionId))
+      log('pick_or_create_session auto-resume ' .. formatted_session_label(s.summary, s.sessionId), vim.log.levels.INFO)
       M.resume_session(s.sessionId, callback)
       return
     end
@@ -200,7 +314,7 @@ function M.pick_or_create_session(callback)
     end
     table.insert(choices, { label = 'Create new session', id = nil })
     -- Offer access to sessions from other directories.
-    local other_count = #persisted - #matching
+    local other_count = #sessions - #matching
     if other_count > 0 then
       table.insert(choices, { label = 'Show all sessions (' .. other_count .. ' from other dirs)…', id = '__all__' })
     end
@@ -215,6 +329,7 @@ function M.pick_or_create_session(callback)
         local default = choices[1]
         if default.id then
           append_entry('system', 'Resumed most recent session ' .. format_session_id(default.id) .. ' (picker cancelled)')
+          log('pick_or_create_session picker cancelled; resuming ' .. format_session_id(default.id), vim.log.levels.INFO)
           M.resume_session(default.id, callback)
         else
           create_session(callback)
@@ -228,12 +343,12 @@ function M.pick_or_create_session(callback)
         -- (some picker backends need time to tear down their window).
         vim.defer_fn(function()
           local all_choices = {}
-          table.sort(persisted, function(a, b)
-            return (a.modifiedTime or a.startTime or '') > (b.modifiedTime or b.startTime or '')
+          table.sort(sessions, function(a, b)
+            return session_sort_key(a) > session_sort_key(b)
           end)
-          for _, s in ipairs(persisted) do
+          for _, s in ipairs(sessions) do
             local label = formatted_session_label(s.summary, s.sessionId)
-            local cwd = s.context and s.context.cwd or ''
+            local cwd = session_cwd_of(s) or ''
             if cwd ~= '' then
               label = label .. '  ' .. vim.fn.fnamemodify(cwd, ':~')
             end
@@ -256,6 +371,7 @@ function M.pick_or_create_session(callback)
             local p = all_choices[idx2]
             if p.id then
               append_entry('system', 'Resuming session ' .. format_session_id(p.id))
+              log('pick_or_create_session resumed from all-sessions picker ' .. format_session_id(p.id), vim.log.levels.INFO)
               M.resume_session(p.id, callback)
             else
               create_session(callback)
@@ -264,6 +380,7 @@ function M.pick_or_create_session(callback)
         end, 100)
       elseif picked.id then
         append_entry('system', 'Resuming session ' .. format_session_id(picked.id))
+        log('pick_or_create_session resumed from matching picker ' .. format_session_id(picked.id), vim.log.levels.INFO)
         M.resume_session(picked.id, callback)
       else
         create_session(callback)
@@ -274,10 +391,21 @@ end
 
 create_session = function(callback, opts)
   opts = opts or {}
+  local requested_wd = working_directory()
+  log(
+    string.format(
+      'create_session request cwd=%s model=%s agent=%s permission=%s',
+      requested_wd,
+      tostring(state.config.session.model or '<default>'),
+      tostring(state.config.session.agent or '<default>'),
+      tostring(state.permission_mode or state.config.permission_mode)
+    ),
+    vim.log.levels.DEBUG
+  )
   request('POST', '/sessions', {
     clientName = state.config.client_name,
     permissionMode = state.permission_mode or state.config.permission_mode,
-    workingDirectory = working_directory(),
+    workingDirectory = requested_wd,
     streaming = state.config.session.streaming,
     enableConfigDiscovery = state.config.session.enable_config_discovery,
     model = state.config.session.model,
@@ -313,6 +441,7 @@ create_session = function(callback, opts)
       end
       notify('Failed to create session: ' .. err, vim.log.levels.ERROR)
       append_entry('error', 'Failed to create session: ' .. err)
+      log('create_session failed: ' .. tostring(err), vim.log.levels.ERROR)
       on_session_ready(nil, err)
       return
     end
@@ -321,6 +450,7 @@ create_session = function(callback, opts)
     if not state.session_id then
       local message = 'Server did not return a sessionId'
       append_entry('error', message)
+      log(message, vim.log.levels.ERROR)
       on_session_ready(nil, message)
       return
     end
@@ -333,6 +463,18 @@ create_session = function(callback, opts)
     local formatted_id = format_session_id(state.session_id)
     local msg = 'New session created' .. '  id:' .. formatted_id .. (name ~= '' and ('  name:' .. name) or '') .. '  dir:' .. wd
     append_entry('system', msg)
+    log(msg, vim.log.levels.INFO)
+    log(
+      string.format(
+        'create_session attached id=%s requested_cwd=%s response_wd=%s workspace=%s summary=%s',
+        formatted_id,
+        requested_wd,
+        tostring(response and response.workingDirectory or '<none>'),
+        tostring(response and response.workspacePath or '<none>'),
+        name ~= '' and name or '<none>'
+      ),
+      vim.log.levels.DEBUG
+    )
 
     -- Sync the agent mode with the server if the user already picked one.
     if state.input_mode and state.input_mode ~= 'agent' then
@@ -411,31 +553,34 @@ function M.switch_session()
       return
     end
 
-    local persisted = (response and response.persisted) or {}
-    if #persisted == 0 then
+    local sessions = merge_sessions(response)
+    log_session_catalog('switch_session', sessions)
+    log(string.format('switch_session persisted=%d live=%d merged=%d', #((response and response.persisted) or {}), #((response and response.live) or {}), #sessions), vim.log.levels.INFO)
+    if #sessions == 0 then
       notify('No sessions found. Use :CopilotAgentNewSession to create one.', vim.log.levels.INFO)
       return
     end
 
     -- Sort newest-first.
-    table.sort(persisted, function(a, b)
-      local ta = a.modifiedTime or a.startTime or ''
-      local tb = b.modifiedTime or b.startTime or ''
+    table.sort(sessions, function(a, b)
+      local ta = session_sort_key(a)
+      local tb = session_sort_key(b)
       return ta > tb
     end)
 
     local choices = {}
-    for _, s in ipairs(persisted) do
+    for _, s in ipairs(sessions) do
       local label = formatted_session_label(s.summary, s.sessionId)
       if label == (s.sessionId or '') then
-        local ts = s.modifiedTime or s.startTime or ''
+        local ts = session_sort_key(s)
         if ts ~= '' then
           label = label .. ' (' .. ts .. ')'
         end
       end
       local cwd_label = ''
-      if s.context and s.context.cwd then
-        cwd_label = '  ' .. vim.fn.fnamemodify(s.context.cwd, ':~')
+      local session_cwd = session_cwd_of(s)
+      if session_cwd then
+        cwd_label = '  ' .. vim.fn.fnamemodify(session_cwd, ':~')
       end
       -- Mark the currently active session.
       local active = (state.session_id and s.sessionId == state.session_id) and ' ●' or ''
@@ -470,8 +615,10 @@ function M.switch_session()
       M.disconnect_session(previous_session_id, false, function(disconnect_err)
         if disconnect_err then
           append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
+          log('switch_session disconnect failed: ' .. tostring(disconnect_err), vim.log.levels.ERROR)
         end
         append_entry('system', 'Switching to session ' .. format_session_id(picked.id) .. '…')
+        log('switch_session switching to ' .. format_session_id(picked.id), vim.log.levels.INFO)
         M.resume_session(picked.id)
       end)
     end)

@@ -101,6 +101,19 @@ function M.statusline_attachments()
   return n > 0 and ('📎' .. n) or ''
 end
 
+function M.statusline_session()
+  if not state.session_id or state.session_id == '' then
+    return ''
+  end
+
+  local formatted_id = '#' .. format_session_id(state.session_id):gsub('T', ' ', 1)
+  if state.session_name and state.session_name ~= '' then
+    return 'session: [' .. truncate_session_summary(state.session_name, 32) .. ' ' .. formatted_id .. ']'
+  end
+
+  return 'session: [' .. formatted_id .. ']'
+end
+
 local function statusline_count_segment(icon, label, value, highlight_number)
   local rendered = tostring(value)
   if highlight_number then
@@ -185,6 +198,7 @@ function M.refresh_input_statusline()
         M.statusline_intent(),
         M.statusline_context(),
         M.statusline_config_highlighted(),
+        M.statusline_session(),
         M.statusline_attachments()
       ),
       '  '
@@ -197,14 +211,6 @@ function M.refresh_chat_statusline()
   if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then
     return
   end
-  local session_label = ''
-  if state.session_id then
-    if state.session_name and state.session_name ~= '' then
-      session_label = 'session: ' .. truncate_session_summary(state.session_name, 32)
-    else
-      session_label = 'session: ' .. format_session_id(state.session_id)
-    end
-  end
   local line = ' '
     .. table.concat(
       build_parts(
@@ -216,7 +222,7 @@ function M.refresh_chat_statusline()
         M.statusline_intent(),
         M.statusline_context(),
         M.statusline_config_highlighted(),
-        session_label
+        M.statusline_session()
       ),
       '  '
     )

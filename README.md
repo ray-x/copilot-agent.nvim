@@ -249,6 +249,7 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file
       },
       notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
+      file_log_level = "WARN",  -- DEBUG | INFO | WARN | ERROR for stdpath("log") .. "/copilot_agent.log"
     })
     -- Start the combined HTTP + LSP service.
     -- Called automatically by CopilotAgentChat / CopilotAgentAsk if auto_start = true.

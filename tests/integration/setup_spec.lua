@@ -138,6 +138,69 @@ describe('M.setup', function()
     agent.setup({ auto_create_session = false })
     assert_eq(0, #agent.state.entries)
   end)
+
+  it('writes notify messages to copilot_agent.log', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false })
+    require('copilot_agent.config').notify('logger smoke test', vim.log.levels.WARN)
+
+    vim.fn.stdpath = original_stdpath
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    assert_true(#lines > 0)
+    assert_true(lines[#lines]:find('logger smoke test', 1, true) ~= nil)
+  end)
+
+  it('defaults file logging to WARN threshold', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false })
+    local cfg = require('copilot_agent.config')
+    cfg.log('info should be skipped', vim.log.levels.INFO)
+    cfg.log('warn should be written', vim.log.levels.WARN)
+
+    vim.fn.stdpath = original_stdpath
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    assert_eq(1, #lines)
+    assert_true(lines[1]:find('warn should be written', 1, true) ~= nil)
+  end)
+
+  it('allows overriding file log threshold', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'INFO' })
+    local cfg = require('copilot_agent.config')
+    cfg.log('info should be written', vim.log.levels.INFO)
+
+    vim.fn.stdpath = original_stdpath
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    assert_eq(1, #lines)
+    assert_true(lines[1]:find('info should be written', 1, true) ~= nil)
+  end)
 end)
 
 describe('user commands', function()
@@ -197,21 +260,28 @@ describe('statusline API', function()
     assert_true(#v > 0)
   end)
 
-  it('chat statusline truncates session summaries and formats timestamp session ids', function()
+  it('chat and input statuslines show truncated session summaries with formatted ids', function()
     local statusline = require('copilot_agent.statusline')
-    local winid = vim.api.nvim_get_current_win()
-    local expected_id = expected_local_session_id('nvim', 1717245296)
+    local expected_id = '#' .. expected_local_session_id('nvim', 1717245296):gsub('T', ' ', 1)
+    local chat_winid = vim.api.nvim_get_current_win()
+    vim.cmd('belowright new')
+    local input_winid = vim.api.nvim_get_current_win()
 
-    agent.state.chat_winid = winid
+    agent.state.chat_winid = chat_winid
+    agent.state.input_winid = input_winid
     agent.state.session_id = 'nvim-1717245296789000000'
     agent.state.session_name = nil
     statusline.refresh_chat_statusline()
-    assert_true(vim.wo[winid].statusline:find('session: ' .. expected_id, 1, true) ~= nil)
+    statusline.refresh_input_statusline()
+    assert_true(vim.wo[chat_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) ~= nil)
+    assert_true(vim.wo[input_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) ~= nil)
 
     agent.state.session_name = 'abcdefghijklmnopqrstuvwxyz0123456789'
     statusline.refresh_chat_statusline()
-    assert_true(vim.wo[winid].statusline:find('session: abcdefghijklmnopqrstuvwxyz012345', 1, true) ~= nil)
-    assert_true(vim.wo[winid].statusline:find('session: abcdefghijklmnopqrstuvwxyz0123456789', 1, true) == nil)
+    statusline.refresh_input_statusline()
+    assert_true(vim.wo[chat_winid].statusline:find('session: [abcdefghijklmnopqrstuvwxyz012345 ' .. expected_id .. ']', 1, true) ~= nil)
+    assert_true(vim.wo[input_winid].statusline:find('session: [abcdefghijklmnopqrstuvwxyz012345 ' .. expected_id .. ']', 1, true) ~= nil)
+    assert_true(vim.wo[chat_winid].statusline:find('session: abcdefghijklmnopqrstuvwxyz0123456789', 1, true) == nil)
   end)
 end)
 
@@ -351,7 +421,6 @@ describe('session picker labels', function()
         items = items,
         prompt = opts.prompt,
       }
-      on_choice(nil)
     end
 
     package.loaded['copilot_agent.session'] = nil
@@ -362,6 +431,50 @@ describe('session picker labels', function()
     assert_eq('abcdefghijklmnopqrstuvwxyz012345 [' .. expected_id .. ']', captured.items[1])
     assert_eq('custom-id', captured.items[2])
     assert_eq('+ New session', captured.items[3])
+  end)
+
+  it('includes live sessions in the startup session picker matching', function()
+    local captured
+    local expected_id = expected_local_session_id('nvim', 1717245296)
+    local expected_id_2 = expected_local_session_id('nvim', 1717245297)
+
+    http.request = function(method, path, body, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions', path)
+      callback({
+        persisted = {},
+        live = {
+          {
+            sessionId = 'nvim-1717245296789000000',
+            summary = 'abcdefghijklmnopqrstuvwxyz0123456789',
+            workingDirectory = require('copilot_agent.service').working_directory(),
+            live = true,
+          },
+          {
+            sessionId = 'nvim-1717245297789000000',
+            summary = 'second live session summary',
+            workingDirectory = require('copilot_agent.service').working_directory(),
+            live = true,
+          },
+        },
+      }, nil)
+    end
+
+    vim.ui.select = function(items, opts, on_choice)
+      captured = {
+        items = items,
+        prompt = opts.prompt,
+      }
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    local session = require('copilot_agent.session')
+    session.pick_or_create_session(function() end)
+
+    assert_eq('Resume a session or start new?', captured.prompt)
+    assert_eq('abcdefghijklmnopqrstuvwxyz012345 [' .. expected_id .. ']', captured.items[1])
+    assert_eq('second live session summary [' .. expected_id_2 .. ']', captured.items[2])
+    assert_eq('Create new session', captured.items[3])
   end)
 end)
 

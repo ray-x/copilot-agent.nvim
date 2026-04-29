@@ -365,6 +365,7 @@ func (s *service) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	persisted = enrichPersistedSessionsFromWorkspace(persisted, defaultSessionStateDir())
 	live := s.liveSessionSummaries()
 	writeJSON(w, http.StatusOK, listSessionsResponse{Persisted: persisted, Live: live})
 }
@@ -1312,6 +1313,74 @@ func resolveWorkingDirectory(value string) (string, error) {
 		return "", fmt.Errorf("resolve working directory: %w", err)
 	}
 	return resolved, nil
+}
+
+func defaultSessionStateDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".copilot", "session-state")
+}
+
+func enrichPersistedSessionsFromWorkspace(sessions []copilot.SessionMetadata, stateDir string) []copilot.SessionMetadata {
+	if len(sessions) == 0 || strings.TrimSpace(stateDir) == "" {
+		return sessions
+	}
+
+	enriched := make([]copilot.SessionMetadata, len(sessions))
+	copy(enriched, sessions)
+	for i := range enriched {
+		if enriched[i].Context != nil && strings.TrimSpace(enriched[i].Context.Cwd) != "" {
+			continue
+		}
+
+		context, ok := readWorkspaceContext(stateDir, enriched[i].SessionID)
+		if !ok {
+			continue
+		}
+		enriched[i].Context = context
+	}
+	return enriched
+}
+
+func readWorkspaceContext(stateDir, sessionID string) (*copilot.SessionContext, bool) {
+	if strings.TrimSpace(stateDir) == "" || strings.TrimSpace(sessionID) == "" {
+		return nil, false
+	}
+
+	data, err := os.ReadFile(filepath.Join(stateDir, sessionID, "workspace.yaml"))
+	if err != nil {
+		return nil, false
+	}
+
+	context := &copilot.SessionContext{}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(strings.Trim(value, `"'`))
+		if value == "" {
+			continue
+		}
+
+		switch strings.TrimSpace(key) {
+		case "cwd":
+			context.Cwd = value
+		case "git_root":
+			context.GitRoot = value
+		case "repository":
+			context.Repository = value
+		case "branch":
+			context.Branch = value
+		}
+	}
+
+	if strings.TrimSpace(context.Cwd) == "" {
+		return nil, false
+	}
+	return context, true
 }
 
 func resolveModelAlias(requested string, models []copilot.ModelInfo) (string, bool) {

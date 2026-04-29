@@ -369,9 +369,16 @@ local function diff_command(args)
     return true
   end
 
-  local diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--stat', '--', '.' }
+  local prefix, prefix_err = run_command({ 'git', '-C', cwd, 'rev-parse', '--show-prefix' }, cwd)
+  if prefix_err then
+    append_entry('error', 'Diff unavailable: ' .. prefix_err)
+    return true
+  end
+  local pathspec = prefix ~= '' and prefix or '.'
+
+  local diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--stat', '--', pathspec }
   if vim.trim(args or '') == 'cached' then
-    diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--cached', '--stat', '--', '.' }
+    diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--cached', '--stat', '--', pathspec }
   end
 
   local output, diff_err = run_command(diff_args, git_root)

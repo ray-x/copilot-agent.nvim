@@ -9,6 +9,7 @@ local discovery = require('copilot_agent.discovery')
 local events = require('copilot_agent.events')
 local http = require('copilot_agent.http')
 local init_project = require('copilot_agent.project_init')
+local lsp = require('copilot_agent.lsp')
 local model = require('copilot_agent.model')
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
@@ -500,6 +501,57 @@ local function mcp_command(args)
   return open_discovered_item('MCP config', discovery.mcp_items(), args)
 end
 
+local function lsp_status_message()
+  local parts = {
+    'LSP status:',
+    '  Active client id: ' .. tostring(state.lsp_client_id or '<none>'),
+    '  Root: ' .. tostring(working_directory()),
+    '  Service cwd: ' .. tostring(service.service_cwd()),
+  }
+  return table.concat(parts, '\n')
+end
+
+local function lsp_command(args)
+  local action = vim.trim(args or '')
+
+  local function run(choice)
+    if not choice or choice == '' or choice == 'status' then
+      append_entry('system', lsp_status_message())
+      return
+    end
+    if choice == 'start' then
+      local client_id = lsp.start_lsp({ root_dir = working_directory() })
+      append_entry('system', client_id and ('Started Copilot LSP client ' .. client_id) or 'Failed to start Copilot LSP')
+      return
+    end
+    if choice == 'install' then
+      lsp.install_binary()
+      append_entry('system', 'Installing Copilot agent binary…')
+      return
+    end
+    append_entry('error', 'Unknown /lsp action: ' .. choice)
+  end
+
+  if action ~= '' then
+    run(action)
+    return true
+  end
+
+  vim.ui.select({
+    { id = 'status', label = 'Show LSP status' },
+    { id = 'start', label = 'Start LSP for current workspace' },
+    { id = 'install', label = 'Install or update binary' },
+  }, {
+    prompt = 'Copilot LSP',
+    format_item = function(item)
+      return item.label
+    end,
+  }, function(choice)
+    run(choice and choice.id or nil)
+  end)
+  return true
+end
+
 local function transcript_lines()
   local lines = {}
   for idx, entry in ipairs(state.entries) do
@@ -784,6 +836,7 @@ local handlers = {
   fleet = fleet_mode,
   init = init_repository,
   instructions = instructions_command,
+  lsp = lsp_command,
   mcp = mcp_command,
   ['new'] = new_session_command,
   model = select_model_command,

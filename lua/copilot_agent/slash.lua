@@ -44,6 +44,23 @@ local function parse(text)
   return command:lower(), vim.trim(args or '')
 end
 
+local function run_command(args, cwd)
+  if vim.system then
+    local result = vim.system(args, { text = true, cwd = cwd }):wait()
+    local output = vim.trim((result.stdout or '') ~= '' and result.stdout or (result.stderr or ''))
+    if result.code ~= 0 then
+      return nil, output ~= '' and output or table.concat(args, ' ')
+    end
+    return output, nil
+  end
+
+  local output = vim.fn.systemlist(args)
+  if vim.v.shell_error ~= 0 then
+    return nil, vim.trim(table.concat(output, '\n'))
+  end
+  return vim.trim(table.concat(output, '\n')), nil
+end
+
 local function rename_session(args)
   if not state.session_id then
     notify('No active session to rename', vim.log.levels.WARN)
@@ -290,6 +307,73 @@ local function usage_command()
   if state.context_tokens and state.context_limit and state.context_limit > 0 then
     lines[#lines + 1] = string.format('  Context window: %d / %d tokens', state.context_tokens, state.context_limit)
   end
+  append_entry('system', table.concat(lines, '\n'))
+  return true
+end
+
+local function cwd_command(args)
+  args = vim.trim(args or '')
+  if args == '' then
+    append_entry('system', 'Working directory: ' .. working_directory())
+    return true
+  end
+
+  local resolved = vim.fn.fnamemodify(args, ':p')
+  if vim.fn.isdirectory(resolved) ~= 1 then
+    append_entry('error', 'Directory does not exist: ' .. args)
+    return true
+  end
+
+  state.config.session.working_directory = resolved
+  append_entry('system', 'Working directory set to ' .. vim.fn.fnamemodify(resolved, ':~'))
+  if state.session_id then
+    append_entry('system', 'Use /new or /resume to attach a session in the new directory')
+  end
+  return true
+end
+
+local function diff_command(args)
+  local cwd = working_directory()
+  local git_root, git_err = run_command({ 'git', '-C', cwd, 'rev-parse', '--show-toplevel' }, cwd)
+  if git_err then
+    append_entry('error', 'Diff unavailable: ' .. git_err)
+    return true
+  end
+
+  local diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--stat', '--', '.' }
+  if vim.trim(args or '') == 'cached' then
+    diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--cached', '--stat', '--', '.' }
+  end
+
+  local output, diff_err = run_command(diff_args, git_root)
+  if diff_err then
+    append_entry('error', 'Diff failed: ' .. diff_err)
+    return true
+  end
+  if output == '' then
+    append_entry('system', 'Working tree is clean')
+    return true
+  end
+
+  append_entry('system', 'Git diff summary for ' .. vim.fn.fnamemodify(git_root, ':~') .. ':\n' .. output)
+  return true
+end
+
+local function env_command()
+  local service_command = service.service_command()
+  local command_text = type(service_command) == 'table' and table.concat(service_command, ' ') or tostring(service_command)
+  local lines = {
+    'Environment snapshot:',
+    '  Working directory: ' .. tostring(working_directory()),
+    '  Service cwd: ' .. tostring(service.service_cwd()),
+    '  Service command: ' .. command_text,
+    '  Base URL: ' .. tostring(state.config.base_url),
+    '  Session: ' .. tostring(state.session_id or '<none>'),
+    '  Model: ' .. tostring(state.current_model or state.config.session.model or '<default>'),
+    '  Mode: ' .. tostring(state.input_mode or 'agent'),
+    '  Permission: ' .. tostring(state.permission_mode or 'interactive'),
+    '  Auto-start service: ' .. tostring(state.config.service.auto_start == true),
+  }
   append_entry('system', table.concat(lines, '\n'))
   return true
 end
@@ -571,6 +655,9 @@ end
 local handlers = {
   compact = compact_history,
   context = context_command,
+  cwd = cwd_command,
+  diff = diff_command,
+  env = env_command,
   fleet = fleet_mode,
   init = init_repository,
   ['new'] = new_session_command,

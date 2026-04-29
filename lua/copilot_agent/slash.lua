@@ -4,6 +4,7 @@
 
 local cfg = require('copilot_agent.config')
 local chat = require('copilot_agent.chat')
+local checkpoints = require('copilot_agent.checkpoints')
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
 local session_names = require('copilot_agent.session_names')
@@ -267,10 +268,51 @@ local function share_session(args)
   return true
 end
 
+local function undo_checkpoint()
+  if not state.session_id then
+    notify('No active session to undo', vim.log.levels.WARN)
+    return true
+  end
+
+  checkpoints.undo(state.session_id, function(err)
+    if err and err ~= '' then
+      if err == 'No checkpoints available' then
+        notify(err, vim.log.levels.INFO)
+        return
+      end
+      append_entry('error', 'Undo failed: ' .. err)
+      return
+    end
+    append_entry('system', 'Restored latest checkpoint')
+  end)
+  return true
+end
+
+local function rewind_checkpoint()
+  if not state.session_id then
+    notify('No active session to rewind', vim.log.levels.WARN)
+    return true
+  end
+
+  checkpoints.rewind(state.session_id, function(err)
+    if err and err ~= '' then
+      if err == 'No checkpoints available' then
+        notify(err, vim.log.levels.INFO)
+        return
+      end
+      append_entry('error', 'Rewind failed: ' .. err)
+      return
+    end
+  end)
+  return true
+end
+
 local handlers = {
   rename = rename_session,
   search = search_transcript,
   share = share_session,
+  undo = undo_checkpoint,
+  rewind = rewind_checkpoint,
 }
 
 function M.execute(text, opts)

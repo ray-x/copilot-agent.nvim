@@ -818,13 +818,6 @@ function M.ask(prompt, opts)
     return
   end
 
-  require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
-  append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
-  -- Mark busy immediately so the spinner shows before the first delta arrives.
-  state.chat_busy = true
-  refresh_statuslines()
-  schedule_render()
-
   -- Build attachment list for the API.
   local api_attachments = {}
   local temp_files = {} -- clipboard image temp files to delete after send
@@ -852,20 +845,37 @@ function M.ask(prompt, opts)
       append_entry('error', err)
       return
     end
-    local body = { prompt = text }
-    if #api_attachments > 0 then
-      body.attachments = api_attachments
+
+    local function dispatch_prompt()
+      require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
+      append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
+      -- Mark busy immediately so the spinner shows before the first delta arrives.
+      state.chat_busy = true
+      refresh_statuslines()
+      schedule_render()
+
+      local body = { prompt = text }
+      if #api_attachments > 0 then
+        body.attachments = api_attachments
+      end
+      request('POST', string.format('/sessions/%s/messages', session_id), body, function(_, request_err)
+        -- Clean up any clipboard temp PNGs — the HTTP request has been delivered.
+        for _, p in ipairs(temp_files) do
+          pcall(os.remove, p)
+        end
+        if request_err then
+          state.chat_busy = false
+          refresh_statuslines()
+          append_entry('error', 'Failed to send prompt: ' .. request_err)
+        end
+      end)
     end
-    request('POST', string.format('/sessions/%s/messages', session_id), body, function(_, request_err)
-      -- Clean up any clipboard temp PNGs — the HTTP request has been delivered.
-      for _, p in ipairs(temp_files) do
-        pcall(os.remove, p)
+
+    require('copilot_agent.checkpoints').create(session_id, text, function(checkpoint_err)
+      if checkpoint_err then
+        notify('Checkpoint unavailable: ' .. checkpoint_err, vim.log.levels.WARN)
       end
-      if request_err then
-        state.chat_busy = false
-        refresh_statuslines()
-        append_entry('error', 'Failed to send prompt: ' .. request_err)
-      end
+      dispatch_prompt()
     end)
   end)
 end

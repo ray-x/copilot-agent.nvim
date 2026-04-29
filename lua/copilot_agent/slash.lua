@@ -5,6 +5,7 @@
 local cfg = require('copilot_agent.config')
 local chat = require('copilot_agent.chat')
 local checkpoints = require('copilot_agent.checkpoints')
+local discovery = require('copilot_agent.discovery')
 local events = require('copilot_agent.events')
 local http = require('copilot_agent.http')
 local init_project = require('copilot_agent.project_init')
@@ -59,6 +60,33 @@ local function run_command(args, cwd)
     return nil, vim.trim(table.concat(output, '\n'))
   end
   return vim.trim(table.concat(output, '\n')), nil
+end
+
+local function open_path(path)
+  if type(path) ~= 'string' or path == '' then
+    return
+  end
+  vim.cmd('edit ' .. vim.fn.fnameescape(path))
+end
+
+local function matching_item(items, query)
+  query = vim.trim(query or ''):lower()
+  if query == '' then
+    return nil
+  end
+  for _, item in ipairs(items or {}) do
+    local name = (item.name or ''):lower()
+    local path = (item.path or ''):lower()
+    if name == query or path == query or vim.endswith(path, query) then
+      return item
+    end
+  end
+  for _, item in ipairs(items or {}) do
+    if (item.name or ''):lower():find(query, 1, true) then
+      return item
+    end
+  end
+  return nil
 end
 
 local function rename_session(args)
@@ -378,6 +406,100 @@ local function env_command()
   return true
 end
 
+local function agent_command(args)
+  local items = discovery.agent_items()
+  if vim.tbl_isempty(items) then
+    notify('No custom agents found in .github/agents', vim.log.levels.INFO)
+    return true
+  end
+
+  local function apply_agent(item)
+    state.config.session.agent = item and item.name or nil
+    if item then
+      append_entry('system', 'Agent for next session: ' .. item.name)
+      if state.session_id then
+        append_entry('system', 'Use /new to start a session with the selected agent')
+      end
+    else
+      append_entry('system', 'Reset to the default agent for future sessions')
+    end
+  end
+
+  args = vim.trim(args or '')
+  if args == 'default' or args == 'clear' then
+    apply_agent(nil)
+    return true
+  end
+  if args ~= '' then
+    local item = matching_item(items, args)
+    if not item then
+      append_entry('error', 'Unknown agent: ' .. args)
+      return true
+    end
+    apply_agent(item)
+    return true
+  end
+
+  local choices = { { name = 'Default agent', path = '' } }
+  vim.list_extend(choices, items)
+  vim.ui.select(choices, {
+    prompt = 'Select agent for future sessions',
+    format_item = function(item)
+      if item.path == '' then
+        return item.name
+      end
+      return string.format('%s  [%s]', item.name, vim.fn.fnamemodify(item.path, ':~:.'))
+    end,
+  }, function(choice)
+    if choice then
+      apply_agent(choice.path == '' and nil or choice)
+    end
+  end)
+  return true
+end
+
+local function open_discovered_item(kind, items, args)
+  if vim.tbl_isempty(items) then
+    notify('No ' .. kind .. ' entries found', vim.log.levels.INFO)
+    return true
+  end
+
+  args = vim.trim(args or '')
+  if args ~= '' then
+    local item = matching_item(items, args)
+    if not item then
+      append_entry('error', 'Unknown ' .. kind .. ': ' .. args)
+      return true
+    end
+    open_path(item.path)
+    return true
+  end
+
+  vim.ui.select(items, {
+    prompt = 'Open ' .. kind,
+    format_item = function(item)
+      return string.format('%s  [%s]', item.name, vim.fn.fnamemodify(item.path, ':~:.'))
+    end,
+  }, function(choice)
+    if choice then
+      open_path(choice.path)
+    end
+  end)
+  return true
+end
+
+local function skills_command(args)
+  return open_discovered_item('skill', discovery.skill_items(), args)
+end
+
+local function instructions_command(args)
+  return open_discovered_item('instruction', discovery.instruction_items(), args)
+end
+
+local function mcp_command(args)
+  return open_discovered_item('MCP config', discovery.mcp_items(), args)
+end
+
 local function transcript_lines()
   local lines = {}
   for idx, entry in ipairs(state.entries) do
@@ -658,8 +780,11 @@ local handlers = {
   cwd = cwd_command,
   diff = diff_command,
   env = env_command,
+  agent = agent_command,
   fleet = fleet_mode,
   init = init_repository,
+  instructions = instructions_command,
+  mcp = mcp_command,
   ['new'] = new_session_command,
   model = select_model_command,
   plan = plan_mode_command,
@@ -668,6 +793,7 @@ local handlers = {
   search = search_transcript,
   session = session_command,
   share = share_session,
+  skills = skills_command,
   tasks = session_tasks,
   usage = usage_command,
   ['allow-all'] = allow_all_command,

@@ -576,7 +576,9 @@ session = { auto_resume = 'auto' }
 
 ## Tutorial
 
-📖 **[Build a To-Do App with Copilot Agent](doc/tutorial-flask.md)** — A step-by-step guide covering installation (Copilot CLI + Go binary + lazy.nvim config), then building a full-stack to-do list app with a REST API and responsive UI — all from an empty folder, without leaving Neovim.
+1. 📖 **[Build a To-Do App with Copilot Agent](doc/tutorial-flask.md)** — Full-stack to-do list app with a REST API and responsive UI.
+2. 🌤️ **[Build a Weather Dashboard with Copilot Agent](doc/tutorial-weather-dashboard.md)** — Glassmorphism weather app with wttr.in data, animated UI, and backend tests.
+3. 🧩 **[Build a Weather Dashboard with Preset Copilot Agents](doc/tutorial-custom-agent-weather.md)** — Copy a ready-made `.github/agents/` pack and use separate UI, Python, and QA specialists.
 
 ---
 

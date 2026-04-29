@@ -51,6 +51,10 @@ local function command_exists(name)
   return vim.fn.exists(':' .. name) == 2
 end
 
+local function expected_local_session_id(prefix, seconds)
+  return string.format('%s-%s', prefix, os.date('%Y-%m-%dT%H:%M:%S', seconds))
+end
+
 --------------------------------------------------------------------------------
 -- Tests
 --------------------------------------------------------------------------------
@@ -192,6 +196,23 @@ describe('statusline API', function()
     assert_eq('string', type(v))
     assert_true(#v > 0)
   end)
+
+  it('chat statusline truncates session summaries and formats timestamp session ids', function()
+    local statusline = require('copilot_agent.statusline')
+    local winid = vim.api.nvim_get_current_win()
+    local expected_id = expected_local_session_id('nvim', 1717245296)
+
+    agent.state.chat_winid = winid
+    agent.state.session_id = 'nvim-1717245296789000000'
+    agent.state.session_name = nil
+    statusline.refresh_chat_statusline()
+    assert_true(vim.wo[winid].statusline:find('session: ' .. expected_id, 1, true) ~= nil)
+
+    agent.state.session_name = 'abcdefghijklmnopqrstuvwxyz0123456789'
+    statusline.refresh_chat_statusline()
+    assert_true(vim.wo[winid].statusline:find('session: abcdefghijklmnopqrstuvwxyz012345', 1, true) ~= nil)
+    assert_true(vim.wo[winid].statusline:find('session: abcdefghijklmnopqrstuvwxyz0123456789', 1, true) == nil)
+  end)
 end)
 
 describe('model state sync', function()
@@ -229,6 +250,9 @@ describe('model state sync', function()
         model = 'claude-opus-4.7',
         reasoningEffort = 'medium',
         summary = 'Attached session',
+        instructionCount = 2,
+        agentCount = 1,
+        skillCount = 3,
       },
     })
 
@@ -236,6 +260,9 @@ describe('model state sync', function()
     assert_eq('claude-opus-4.7', agent.state.config.session.model)
     assert_eq('medium', agent.state.reasoning_effort)
     assert_eq('Attached session', agent.state.session_name)
+    assert_eq(2, agent.state.instruction_count)
+    assert_eq(1, agent.state.agent_count)
+    assert_eq(3, agent.state.skill_count)
   end)
 
   it('syncs model and reasoning effort from session events', function()
@@ -253,6 +280,91 @@ describe('model state sync', function()
   end)
 end)
 
+describe('statusline config counts', function()
+  local agent
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+  end)
+
+  it('includes discovered instruction, agent, and skill counts', function()
+    agent.state.instruction_count = 2
+    agent.state.agent_count = 1
+    agent.state.skill_count = 3
+
+    local expected = '󱃕 instructions: 2 󱜙 agents: 1 󱨚 skills: 3'
+    local highlighted = '󱃕 instructions: %#CopilotAgentStatuslineCount#2%* 󱜙 agents: %#CopilotAgentStatuslineCount#1%* 󱨚 skills: %#CopilotAgentStatuslineCount#3%*'
+
+    assert_eq(expected, require('copilot_agent.statusline').statusline_config())
+    assert_eq(highlighted, require('copilot_agent.statusline').statusline_config_highlighted())
+    assert_true(agent.statusline():find(expected, 1, true) ~= nil)
+  end)
+end)
+
+describe('session picker labels', function()
+  local agent
+  local http
+  local original_request
+  local original_ui_select
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    agent.state.session_id = nil
+    agent.state.session_name = nil
+    http = require('copilot_agent.http')
+    original_request = http.request
+    original_ui_select = vim.ui.select
+  end)
+
+  after_each(function()
+    http.request = original_request
+    vim.ui.select = original_ui_select
+  end)
+
+  it('uses truncated summaries and readable timestamp ids in the switch-session picker', function()
+    local captured
+    local expected_id = expected_local_session_id('nvim', 1717245296)
+
+    http.request = function(method, path, body, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions', path)
+      callback({
+        persisted = {
+          {
+            sessionId = 'nvim-1717245296789000000',
+            summary = 'abcdefghijklmnopqrstuvwxyz0123456789',
+          },
+          {
+            sessionId = 'custom-id',
+          },
+        },
+      }, nil)
+    end
+
+    vim.ui.select = function(items, opts, on_choice)
+      captured = {
+        items = items,
+        prompt = opts.prompt,
+      }
+      on_choice(nil)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    local session = require('copilot_agent.session')
+    session.switch_session()
+
+    assert_eq('Switch session', captured.prompt)
+    assert_eq('abcdefghijklmnopqrstuvwxyz012345 [' .. expected_id .. ']', captured.items[1])
+    assert_eq('custom-id', captured.items[2])
+    assert_eq('+ New session', captured.items[3])
+  end)
+end)
+
 describe('chat session activation', function()
   local agent
   local session
@@ -262,6 +374,8 @@ describe('chat session activation', function()
     package.loaded['copilot_agent.session'] = nil
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false })
+    agent.state.session_id = nil
+    agent.state.session_name = nil
     session = require('copilot_agent.session')
   end)
 
@@ -324,5 +438,76 @@ describe('chat session activation', function()
 
     assert_true(opened)
     assert_false(agent.state.open_input_on_session_ready)
+  end)
+end)
+
+describe('chat input behavior', function()
+  local agent
+  local input
+  local original_ui_select
+
+  before_each(function()
+    vim.cmd('tabonly | only')
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.chat'] = nil
+    package.loaded['copilot_agent.input'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    input = require('copilot_agent.input')
+    original_ui_select = vim.ui.select
+  end)
+
+  after_each(function()
+    vim.ui.select = original_ui_select
+    vim.cmd('tabonly | only')
+  end)
+
+  it('prompts before closing input with unsent text', function()
+    local captured
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. 'draft message' })
+
+    vim.ui.select = function(items, opts, on_choice)
+      captured = {
+        items = items,
+        prompt = opts.prompt,
+      }
+      on_choice(nil)
+    end
+
+    input._cancel_input()
+    vim.wait(100)
+
+    assert_eq('Discard unsent chat input?', captured.prompt)
+    assert_eq('Keep editing', captured.items[1])
+    assert_eq('Close input', captured.items[2])
+    assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
+  end)
+
+  it('reanchors the input window below the active chat window', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. 'draft message' })
+
+    local stale_chat_win = agent.state.chat_winid
+    local source_buf = vim.api.nvim_create_buf(false, true)
+
+    vim.cmd('leftabove vnew')
+    local moved_chat_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(moved_chat_win, agent.state.chat_bufnr)
+    vim.api.nvim_win_set_buf(stale_chat_win, source_buf)
+    agent.state.chat_winid = stale_chat_win
+
+    input.open_input_window()
+
+    assert_eq(moved_chat_win, input._resolve_chat_window())
+    assert_true(input._is_input_anchored_below_chat(moved_chat_win, agent.state.input_winid))
+    assert_eq(prefix .. 'draft message', vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, -1, false)[1])
   end)
 end)

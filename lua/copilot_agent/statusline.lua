@@ -5,9 +5,14 @@
 -- Statusline components and window statusline refreshers.
 
 local cfg = require('copilot_agent.config')
+local utils = require('copilot_agent.utils')
 local state = cfg.state
+local format_session_id = utils.format_session_id
+local truncate_session_summary = utils.truncate_session_summary
 
 local M = {}
+local _statusline_count_hl = '%#CopilotAgentStatuslineCount#'
+local _statusline_reset_hl = '%*'
 
 local _mode_icon = {
   ask = '💬',
@@ -96,6 +101,34 @@ function M.statusline_attachments()
   return n > 0 and ('📎' .. n) or ''
 end
 
+local function statusline_count_segment(icon, label, value, highlight_number)
+  local rendered = tostring(value)
+  if highlight_number then
+    rendered = _statusline_count_hl .. rendered .. _statusline_reset_hl
+  end
+  return string.format('%s %s: %s', icon, label, rendered)
+end
+
+local function statusline_config_segments(highlight_numbers)
+  local instructions = tonumber(state.instruction_count) or 0
+  local agents = tonumber(state.agent_count) or 0
+  local skills = tonumber(state.skill_count) or 0
+
+  return {
+    statusline_count_segment('󱃕', 'instructions', instructions, highlight_numbers),
+    statusline_count_segment('󱜙', 'agents', agents, highlight_numbers),
+    statusline_count_segment('󱨚', 'skills', skills, highlight_numbers),
+  }
+end
+
+function M.statusline_config()
+  return table.concat(statusline_config_segments(false), ' ')
+end
+
+function M.statusline_config_highlighted()
+  return table.concat(statusline_config_segments(true), ' ')
+end
+
 local _perm_icons = {
   interactive = '🔐',
   ['approve-reads'] = '📂',
@@ -130,6 +163,7 @@ function M.statusline_component()
       M.statusline_tool(),
       M.statusline_intent(),
       M.statusline_context(),
+      M.statusline_config(),
       M.statusline_attachments()
     ),
     ' '
@@ -150,6 +184,7 @@ function M.refresh_input_statusline()
         M.statusline_tool(),
         M.statusline_intent(),
         M.statusline_context(),
+        M.statusline_config_highlighted(),
         M.statusline_attachments()
       ),
       '  '
@@ -165,14 +200,24 @@ function M.refresh_chat_statusline()
   local session_label = ''
   if state.session_id then
     if state.session_name and state.session_name ~= '' then
-      session_label = 'session: ' .. state.session_name
+      session_label = 'session: ' .. truncate_session_summary(state.session_name, 32)
     else
-      session_label = '#' .. state.session_id:sub(1, 8)
+      session_label = 'session: ' .. format_session_id(state.session_id)
     end
   end
   local line = ' '
     .. table.concat(
-      build_parts(M.statusline_mode(), M.statusline_permission(), M.statusline_busy(), M.statusline_model(), M.statusline_tool(), M.statusline_intent(), M.statusline_context(), session_label),
+      build_parts(
+        M.statusline_mode(),
+        M.statusline_permission(),
+        M.statusline_busy(),
+        M.statusline_model(),
+        M.statusline_tool(),
+        M.statusline_intent(),
+        M.statusline_context(),
+        M.statusline_config_highlighted(),
+        session_label
+      ),
       '  '
     )
   vim.wo[state.chat_winid].statusline = line

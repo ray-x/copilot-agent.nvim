@@ -32,9 +32,24 @@ local start_event_stream = events.start_event_stream
 local stale_service_hint = model.stale_service_hint
 local prompt_supported_model_selection = model.prompt_supported_model_selection
 
+local format_session_id = utils.format_session_id
+local truncate_session_summary = utils.truncate_session_summary
 local unavailable_model_from_error = utils.unavailable_model_from_error
 
 local M = {}
+
+local function formatted_session_summary(summary)
+  return truncate_session_summary(summary, 32)
+end
+
+local function formatted_session_label(summary, session_id)
+  local formatted_id = format_session_id(session_id)
+  local formatted_summary = formatted_session_summary(summary)
+  if formatted_summary ~= '' then
+    return formatted_summary .. ' [' .. formatted_id .. ']'
+  end
+  return formatted_id
+end
 
 -- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
 function M.discard_pending_attachments()
@@ -151,7 +166,7 @@ function M.pick_or_create_session(callback)
     -- Auto-resume the single match silently — no need to prompt.
     if #matching == 1 then
       local s = matching[1]
-      append_entry('system', 'Resuming session ' .. s.sessionId)
+      append_entry('system', 'Resuming session ' .. formatted_session_label(s.summary, s.sessionId))
       M.resume_session(s.sessionId, callback)
       return
     end
@@ -166,7 +181,7 @@ function M.pick_or_create_session(callback)
     -- auto_resume='auto': silently resume the most recent without prompting.
     if state.config.session.auto_resume == 'auto' then
       local s = matching[1]
-      append_entry('system', 'Resuming most recent session ' .. s.sessionId)
+      append_entry('system', 'Resuming most recent session ' .. formatted_session_label(s.summary, s.sessionId))
       M.resume_session(s.sessionId, callback)
       return
     end
@@ -174,13 +189,11 @@ function M.pick_or_create_session(callback)
     -- Show a picker; most recent session is listed first (default selection).
     local choices = {}
     for _, s in ipairs(matching) do
-      local label = s.sessionId
-      if s.summary and s.summary ~= '' then
-        label = s.summary .. ' [' .. s.sessionId:sub(1, 8) .. ']'
-      else
+      local label = formatted_session_label(s.summary, s.sessionId)
+      if label == (s.sessionId or '') then
         local ts = s.modifiedTime or s.startTime or ''
         if ts ~= '' then
-          label = s.sessionId:sub(1, 8) .. ' (' .. ts .. ')'
+          label = label .. ' (' .. ts .. ')'
         end
       end
       table.insert(choices, { label = label, id = s.sessionId })
@@ -201,7 +214,7 @@ function M.pick_or_create_session(callback)
         -- <Esc> dismissed the picker — default to the most recent session.
         local default = choices[1]
         if default.id then
-          append_entry('system', 'Resumed most recent session ' .. default.id:sub(1, 8) .. ' (picker cancelled)')
+          append_entry('system', 'Resumed most recent session ' .. format_session_id(default.id) .. ' (picker cancelled)')
           M.resume_session(default.id, callback)
         else
           create_session(callback)
@@ -219,10 +232,7 @@ function M.pick_or_create_session(callback)
             return (a.modifiedTime or a.startTime or '') > (b.modifiedTime or b.startTime or '')
           end)
           for _, s in ipairs(persisted) do
-            local label = s.sessionId:sub(1, 8)
-            if s.summary and s.summary ~= '' then
-              label = s.summary .. ' [' .. label .. ']'
-            end
+            local label = formatted_session_label(s.summary, s.sessionId)
             local cwd = s.context and s.context.cwd or ''
             if cwd ~= '' then
               label = label .. '  ' .. vim.fn.fnamemodify(cwd, ':~')
@@ -245,7 +255,7 @@ function M.pick_or_create_session(callback)
             end
             local p = all_choices[idx2]
             if p.id then
-              append_entry('system', 'Resuming session ' .. p.id)
+              append_entry('system', 'Resuming session ' .. format_session_id(p.id))
               M.resume_session(p.id, callback)
             else
               create_session(callback)
@@ -253,7 +263,7 @@ function M.pick_or_create_session(callback)
           end)
         end, 100)
       elseif picked.id then
-        append_entry('system', 'Resuming session ' .. picked.id)
+        append_entry('system', 'Resuming session ' .. format_session_id(picked.id))
         M.resume_session(picked.id, callback)
       else
         create_session(callback)
@@ -319,9 +329,9 @@ create_session = function(callback, opts)
 
     -- Announce the new session.
     local wd = (response.workingDirectory and response.workingDirectory ~= '') and vim.fn.fnamemodify(response.workingDirectory, ':~') or vim.fn.fnamemodify(working_directory(), ':~')
-    local name = (response.summary and response.summary ~= '') and response.summary or nil
-    local id_short = state.session_id:sub(1, 8)
-    local msg = 'New session created' .. '  id:' .. id_short .. (name and ('  name:' .. name) or '') .. '  dir:' .. wd
+    local name = formatted_session_summary(response.summary)
+    local formatted_id = format_session_id(state.session_id)
+    local msg = 'New session created' .. '  id:' .. formatted_id .. (name ~= '' and ('  name:' .. name) or '') .. '  dir:' .. wd
     append_entry('system', msg)
 
     -- Sync the agent mode with the server if the user already picked one.
@@ -416,10 +426,8 @@ function M.switch_session()
 
     local choices = {}
     for _, s in ipairs(persisted) do
-      local label = s.sessionId:sub(1, 8)
-      if s.summary and s.summary ~= '' then
-        label = s.summary .. ' [' .. label .. ']'
-      else
+      local label = formatted_session_label(s.summary, s.sessionId)
+      if label == (s.sessionId or '') then
         local ts = s.modifiedTime or s.startTime or ''
         if ts ~= '' then
           label = label .. ' (' .. ts .. ')'
@@ -463,7 +471,7 @@ function M.switch_session()
         if disconnect_err then
           append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
         end
-        append_entry('system', 'Switching to session ' .. picked.id:sub(1, 8) .. '…')
+        append_entry('system', 'Switching to session ' .. format_session_id(picked.id) .. '…')
         M.resume_session(picked.id)
       end)
     end)

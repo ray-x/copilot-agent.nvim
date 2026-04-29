@@ -27,6 +27,89 @@ local M = {}
 
 local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
 
+local function resolve_chat_window()
+  if type(chat.find_chat_window) == 'function' then
+    return chat.find_chat_window()
+  end
+  if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
+    return state.chat_winid
+  end
+  return nil
+end
+
+local function is_input_anchored_below_chat(chat_winid, input_winid)
+  if not (chat_winid and input_winid) then
+    return false
+  end
+  if not (vim.api.nvim_win_is_valid(chat_winid) and vim.api.nvim_win_is_valid(input_winid)) then
+    return false
+  end
+  if vim.api.nvim_win_get_tabpage(chat_winid) ~= vim.api.nvim_win_get_tabpage(input_winid) then
+    return false
+  end
+
+  local chat_pos = vim.api.nvim_win_get_position(chat_winid)
+  local input_pos = vim.api.nvim_win_get_position(input_winid)
+  local same_col = chat_pos[2] == input_pos[2]
+  local same_width = vim.api.nvim_win_get_width(chat_winid) == vim.api.nvim_win_get_width(input_winid)
+  local below_chat = input_pos[1] > chat_pos[1]
+
+  return same_col and same_width and below_chat
+end
+
+local function get_existing_input_text()
+  if not (state.input_bufnr and vim.api.nvim_buf_is_valid(state.input_bufnr)) then
+    return ''
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(state.input_bufnr, 0, -1, false)
+  local prompt = vim.fn.prompt_getprompt(state.input_bufnr)
+  local text = table.concat(lines, '\n')
+  if prompt ~= '' and vim.startswith(text, prompt) then
+    text = text:sub(#prompt + 1)
+  end
+  return text
+end
+
+local function close_existing_input_window(opts)
+  opts = opts or {}
+  if not opts.preserve_contents and state.input_bufnr and vim.api.nvim_buf_is_valid(state.input_bufnr) then
+    vim.api.nvim_buf_set_lines(state.input_bufnr, 0, -1, false, {})
+    state.prompt_history_index = nil
+    state.prompt_history_draft = ''
+  end
+  if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+    vim.api.nvim_win_close(state.input_winid, true)
+    state.input_winid = nil
+  end
+  local chat_winid = resolve_chat_window()
+  if not opts.skip_focus and chat_winid and vim.api.nvim_win_is_valid(chat_winid) then
+    vim.api.nvim_set_current_win(chat_winid)
+  end
+end
+
+local function cancel_existing_input_window()
+  local text = vim.trim(get_existing_input_text())
+  if text == '' then
+    close_existing_input_window()
+    return
+  end
+
+  vim.ui.select({ 'Keep editing', 'Close input' }, { prompt = 'Discard unsent chat input?' }, function(choice)
+    if choice == 'Close input' then
+      close_existing_input_window()
+      return
+    end
+
+    vim.schedule(function()
+      if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+        vim.api.nvim_set_current_win(state.input_winid)
+        vim.cmd('startinsert!')
+      end
+    end)
+  end)
+end
+
 local _mode_permission = {
   ask = 'interactive',
   plan = 'interactive',
@@ -129,19 +212,6 @@ local function create_input_buffer()
     set_input_text(state.prompt_history[next_index])
   end
 
-  local function close_input_window()
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
-    state.prompt_history_index = nil
-    state.prompt_history_draft = ''
-    if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
-      vim.api.nvim_win_close(state.input_winid, true)
-      state.input_winid = nil
-    end
-    if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
-      vim.api.nvim_set_current_win(state.chat_winid)
-    end
-  end
-
   local function submit(text)
     remember_prompt(text)
     -- Clear the input line and reset history navigation, but keep the window open.
@@ -160,10 +230,6 @@ local function create_input_buffer()
     end
   end
 
-  local function cancel()
-    close_input_window()
-  end
-
   vim.fn.prompt_setcallback(bufnr, function(text)
     submit(vim.trim(text or ''))
   end)
@@ -177,8 +243,8 @@ local function create_input_buffer()
 
   -- <C-s> submits in prompt mode; <CR> submits via prompt_setcallback().
   vim.keymap.set({ 'n', 'i' }, '<C-s>', submit_buffer, { buffer = bufnr, silent = true, desc = 'Submit prompt to Copilot' })
-  vim.keymap.set('n', 'q', cancel, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
-  vim.keymap.set('n', '<Esc>', cancel, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
+  vim.keymap.set('n', 'q', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
+  vim.keymap.set('n', '<Esc>', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('i', '<Esc>', '<Esc>', { buffer = bufnr, silent = true, desc = 'Switch to normal mode' })
   -- <C-t> in input also refreshes the prompt prefix and returns to insert mode.
   vim.keymap.set({ 'n', 'i' }, '<C-t>', function()
@@ -304,6 +370,22 @@ function M.open_input_window()
     end
   end
 
+  local chat_winid = resolve_chat_window()
+  if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+    if chat_winid and not is_input_anchored_below_chat(chat_winid, state.input_winid) then
+      M._close_input_window({ preserve_contents = true, skip_focus = true })
+    else
+      vim.api.nvim_set_current_win(state.input_winid)
+      vim.cmd('startinsert')
+      apply_prefill()
+      return
+    end
+  end
+
+  if not chat_winid then
+    chat_winid = 0
+  end
+
   if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
     vim.api.nvim_set_current_win(state.input_winid)
     vim.cmd('startinsert')
@@ -315,8 +397,8 @@ function M.open_input_window()
     state.input_bufnr = create_input_buffer()
   end
 
-  -- Open a small horizontal split below the chat window via the API.
-  local parent_win = (state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid)) and state.chat_winid or 0
+  -- Open a small horizontal split below the active chat window via the API.
+  local parent_win = chat_winid
   state.input_winid = vim.api.nvim_open_win(state.input_bufnr, true, {
     split = 'below',
     win = parent_win,
@@ -346,5 +428,10 @@ function M.open_input_window()
     end
   end)
 end
+
+M._close_input_window = close_existing_input_window
+M._cancel_input = cancel_existing_input_window
+M._resolve_chat_window = resolve_chat_window
+M._is_input_anchored_below_chat = is_input_anchored_below_chat
 
 return M

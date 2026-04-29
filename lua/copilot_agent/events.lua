@@ -50,6 +50,12 @@ local function sync_model_state(model, reasoning_effort)
   end
 end
 
+local function sync_config_counts(data)
+  state.instruction_count = tonumber(data.instructionCount) or 0
+  state.agent_count = tonumber(data.agentCount) or 0
+  state.skill_count = tonumber(data.skillCount) or 0
+end
+
 local function show_user_input_picker(payload)
   local request_payload = payload and payload.data and payload.data.request or nil
   if type(request_payload) ~= 'table' or type(request_payload.id) ~= 'string' then
@@ -132,6 +138,7 @@ local function handle_host_event(event_name, payload)
   local data = payload and payload.data or {}
   if event_name == 'host.session_attached' then
     sync_model_state(data.model, data.reasoningEffort)
+    sync_config_counts(data)
     if data.summary and data.summary ~= '' then
       state.session_name = data.summary
     end
@@ -144,6 +151,11 @@ local function handle_host_event(event_name, payload)
     sync_model_state(data.model, data.reasoningEffort)
     refresh_statuslines()
     append_entry('system', 'Model changed to ' .. tostring(data.model or '<unknown>'))
+  elseif event_name == 'host.session_disconnected' then
+    state.instruction_count = 0
+    state.agent_count = 0
+    state.skill_count = 0
+    refresh_statuslines()
   elseif event_name == 'host.permission_requested' then
     -- In interactive mode, Go sends a request object with an ID; ask the user.
     local req = data.request or {}

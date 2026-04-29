@@ -32,6 +32,50 @@ function M.normalize_base_url(url, default_url)
   return (url or default_url or ''):gsub('/+$', '')
 end
 
+function M.truncate_session_summary(summary, max_len)
+  if type(summary) ~= 'string' or summary == '' then
+    return ''
+  end
+  max_len = tonumber(max_len) or 32
+  if max_len < 1 or #summary <= max_len then
+    return summary
+  end
+  return summary:sub(1, max_len)
+end
+
+local function format_unix_ns_timestamp(ns)
+  if type(ns) ~= 'string' or #ns ~= 19 or ns:find('^%d+$') == nil then
+    return nil
+  end
+
+  local seconds = tonumber(ns:sub(1, #ns - 9))
+  if not seconds then
+    return nil
+  end
+
+  local stamp = os.date('%Y-%m-%dT%H:%M:%S', seconds)
+  if type(stamp) ~= 'string' or stamp == '' then
+    return nil
+  end
+  return stamp
+end
+
+function M.format_session_id(session_id)
+  if type(session_id) ~= 'string' or session_id == '' then
+    return ''
+  end
+
+  local prefix, timestamp_ns = session_id:match('^(.-)%-(%d+)$')
+  if prefix and prefix ~= '' then
+    local stamp = format_unix_ns_timestamp(timestamp_ns)
+    if stamp then
+      return string.format('%s-%s', prefix, stamp)
+    end
+  end
+
+  return session_id
+end
+
 -- Normalise a model entry from the API (handles both camelCase and PascalCase keys).
 -- Returns { id, name, label } or nil when the entry is invalid.
 function M.normalize_model_entry(entry)

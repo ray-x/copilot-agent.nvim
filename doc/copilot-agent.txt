@@ -1,7 +1,7 @@
 *copilot-agent.txt*  Neovim plugin for GitHub Copilot agentic sessions
 
-Author:   Ray Xu
-License:  MIT
+Author:   Ray-X
+License:  Apache-2.0
 Homepage: https://github.com/ray-x/copilot-agent.nvim
 
 ==============================================================================

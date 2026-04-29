@@ -26,6 +26,37 @@ local schedule_render = render.schedule_render
 
 local M = {}
 
+function M.find_chat_window()
+  if not (state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr)) then
+    state.chat_winid = nil
+    return nil
+  end
+
+  if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
+    if vim.api.nvim_win_get_buf(state.chat_winid) == state.chat_bufnr then
+      return state.chat_winid
+    end
+  end
+
+  local current_tab = vim.api.nvim_get_current_tabpage()
+  for _, winid in ipairs(vim.fn.win_findbuf(state.chat_bufnr)) do
+    if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_tabpage(winid) == current_tab then
+      state.chat_winid = winid
+      return winid
+    end
+  end
+
+  for _, winid in ipairs(vim.fn.win_findbuf(state.chat_bufnr)) do
+    if vim.api.nvim_win_is_valid(winid) then
+      state.chat_winid = winid
+      return winid
+    end
+  end
+
+  state.chat_winid = nil
+  return nil
+end
+
 local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
 local _perm_cycle = { 'interactive', 'approve-reads', 'approve-all', 'autopilot' }
 
@@ -278,8 +309,9 @@ function M.ensure_chat_window(opts)
   local buf_name = (state.config.chat and state.config.chat.buf_name) or 'CopilotAgentChat'
 
   if state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr) then
-    if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
-      vim.api.nvim_set_current_win(state.chat_winid)
+    local chat_winid = M.find_chat_window()
+    if chat_winid then
+      vim.api.nvim_set_current_win(chat_winid)
       state._chat_was_open = true
       return state.chat_bufnr
     end

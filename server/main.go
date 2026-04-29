@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -91,6 +92,9 @@ type sessionSummary struct {
 	Agent             string                      `json:"agent,omitempty"`
 	ConfigDiscovery   bool                        `json:"configDiscovery"`
 	ClientName        string                      `json:"clientName,omitempty"`
+	InstructionCount  int                         `json:"instructionCount,omitempty"`
+	AgentCount        int                         `json:"agentCount,omitempty"`
+	SkillCount        int                         `json:"skillCount,omitempty"`
 }
 
 type listSessionsResponse struct {
@@ -156,6 +160,9 @@ type managedSession struct {
 	agent                string
 	configDiscovery      bool
 	clientName           string
+	instructionCount     int
+	agentCount           int
+	skillCount           int
 	subscribers          map[chan sseMessage]struct{}
 	subscribersMu        sync.RWMutex
 	pendingInputs        map[string]*pendingUserInput
@@ -420,6 +427,9 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		pendingInputs:      make(map[string]*pendingUserInput),
 		pendingPermissions: make(map[string]*pendingPermission),
 		inputResponseGrace: defaultInputTimeout,
+	}
+	if configDiscovery {
+		managed.instructionCount, managed.agentCount, managed.skillCount = countDiscoverableConfig(workingDirectory)
 	}
 
 	// Pre-populate the session name from persisted metadata so it's available
@@ -1149,7 +1159,65 @@ func (m *managedSession) summary() sessionSummary {
 		Agent:             m.agent,
 		ConfigDiscovery:   m.configDiscovery,
 		ClientName:        m.clientName,
+		InstructionCount:  m.instructionCount,
+		AgentCount:        m.agentCount,
+		SkillCount:        m.skillCount,
 	}
+}
+
+func countDiscoverableConfig(workingDirectory string) (instructionCount, agentCount, skillCount int) {
+	if strings.TrimSpace(workingDirectory) == "" {
+		return 0, 0, 0
+	}
+
+	githubDir := filepath.Join(workingDirectory, ".github")
+	if _, err := os.Stat(githubDir); err != nil {
+		return 0, 0, 0
+	}
+
+	if fileExists(filepath.Join(githubDir, "copilot-instructions.md")) {
+		instructionCount++
+	}
+
+	instructionsDir := filepath.Join(githubDir, "instructions")
+	_ = filepath.WalkDir(instructionsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".instructions.md") {
+			instructionCount++
+		}
+		return nil
+	})
+
+	agentsDir := filepath.Join(githubDir, "agents")
+	_ = filepath.WalkDir(agentsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".agent.md") {
+			agentCount++
+		}
+		return nil
+	})
+
+	skillsDir := filepath.Join(githubDir, "skills")
+	_ = filepath.WalkDir(skillsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		if d.Name() == "SKILL.md" || d.Name() == "skill.md" {
+			skillCount++
+		}
+		return nil
+	})
+
+	return instructionCount, agentCount, skillCount
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func (m *managedSession) pendingUserInputsSnapshot() []pendingUserInputView {

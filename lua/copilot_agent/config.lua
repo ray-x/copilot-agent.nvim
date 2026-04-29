@@ -119,6 +119,9 @@ local state = {
   current_intent = nil, -- latest intent string from assistant.intent event
   context_tokens = nil, -- current token count in context window
   context_limit = nil, -- max token count for context window
+  instruction_count = 0, -- discovered repository instructions for the active session
+  agent_count = 0, -- discovered repository agents for the active session
+  skill_count = 0, -- discovered repository skills for the active session
 }
 
 -- Static list of slash commands supported by the Copilot CLI backend.

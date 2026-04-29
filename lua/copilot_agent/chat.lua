@@ -7,6 +7,7 @@ local http = require('copilot_agent.http')
 local service = require('copilot_agent.service')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
+local win = require('copilot_agent.window')
 
 local state = cfg.state
 local notify = cfg.notify
@@ -302,6 +303,7 @@ local function open_chat_win(bufnr, opts)
       win = 0,
     })
   end
+  win.protect_markdown_buffer(bufnr, state.chat_winid)
   vim.wo[state.chat_winid].conceallevel = 2
 end
 
@@ -345,6 +347,9 @@ function M.ensure_chat_window(opts)
   if state.config.chat and state.config.chat.render_markdown ~= false then
     vim.schedule(function()
       if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      if vim.b[bufnr].copilot_agent_treesitter_disabled then
         return
       end
       local ok, rm = pcall(require, 'render-markdown')
@@ -798,6 +803,7 @@ function M.setup_action_keymaps(bufnr)
       title = ' Help ',
       title_pos = 'center',
     })
+    win.disable_folds(help_win)
     vim.wo[help_win].cursorline = false
     for _, key in ipairs({ '<Space>', '<CR>', '<Esc>', 'q', '?' }) do
       vim.keymap.set('n', key, function()

@@ -583,6 +583,16 @@ session = { auto_resume = 'auto' }
 
 ---
 
+## Included repo-local custom agents
+
+- **Go Quality Engineer** — runs the repository's existing Go quality checks
+- **Selene Lua Quality Engineer** — runs Selene against the Lua sources
+- **Git Commit Agent** — inspects git status, runs repo-appropriate pre-commit checks, and prepares commit messages from the staged diff
+
+Customize the commit agent's default checks and feedback rules in `.github/commit-agent.md`.
+
+---
+
 ## Quick Start (HTTP API)
 
 ```bash

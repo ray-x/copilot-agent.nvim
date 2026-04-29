@@ -9,6 +9,7 @@ local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local chat = require('copilot_agent.chat')
 local utils = require('copilot_agent.utils')
+local win = require('copilot_agent.window')
 
 local state = cfg.state
 local SLASH_COMMANDS = cfg.SLASH_COMMANDS
@@ -710,6 +711,7 @@ function M.open_input_window()
     win = parent_win,
     height = 5,
   })
+  win.protect_markdown_buffer(state.input_bufnr, state.input_winid)
 
   local wo = vim.wo[state.input_winid]
   wo.winfixheight = true

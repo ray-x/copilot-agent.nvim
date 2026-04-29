@@ -12,6 +12,7 @@ local service = require('copilot_agent.service')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
+local window = require('copilot_agent.window')
 
 local state = cfg.state
 local notify = cfg.notify
@@ -308,6 +309,7 @@ local function handle_host_event(event_name, payload)
         if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 and vim.fn.executable(diff_cmd[1]) == 1 then
           local buf = vim.api.nvim_create_buf(false, true)
           local win = vim.api.nvim_open_win(buf, true, win_opts)
+          window.disable_folds(win)
           vim.fn.jobstart(diff_cmd, {
             term = true,
             on_exit = function()
@@ -336,6 +338,7 @@ local function handle_host_event(event_name, payload)
         vim.bo[buf].filetype = 'diff'
         vim.bo[buf].modifiable = false
         local win = vim.api.nvim_open_win(buf, true, win_opts)
+        window.disable_folds(win)
         setup_close_keys(buf, win)
       end
 
@@ -452,6 +455,7 @@ local function offer_diff_review(abs_path, rel_path)
       vim.bo[scratch].filetype = ft
     end
     vim.bo[scratch].modifiable = false
+    window.disable_folds(vim.api.nvim_get_current_win())
     vim.cmd('diffthis')
   end)
 end
@@ -860,6 +864,7 @@ local function review_diff()
       vim.bo[scratch].filetype = ft
     end
     vim.bo[scratch].modifiable = false
+    window.disable_folds(vim.api.nvim_get_current_win())
     vim.cmd('diffthis')
   end)
 end

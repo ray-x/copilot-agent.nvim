@@ -18,6 +18,7 @@ local session = require('copilot_agent.session')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local tasks = require('copilot_agent.tasks')
+local window = require('copilot_agent.window')
 
 local state = cfg.state
 local notify = cfg.notify
@@ -138,7 +139,7 @@ local function show_markdown_result(title, lines)
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = 'markdown'
   vim.bo[buf].modifiable = false
-  local win = vim.api.nvim_open_win(buf, true, {
+  local winid = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
     height = height,
@@ -149,9 +150,10 @@ local function show_markdown_result(title, lines)
     title = ' ' .. title .. ' ',
     title_pos = 'center',
   })
+  window.protect_markdown_buffer(buf, winid)
   local function close()
-    if vim.api.nvim_win_is_valid(win) then
-      vim.api.nvim_win_close(win, true)
+    if vim.api.nvim_win_is_valid(winid) then
+      vim.api.nvim_win_close(winid, true)
     end
   end
   vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })

@@ -100,6 +100,9 @@ function M.notify_render_plugins(bufnr)
     if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
       return
     end
+    if vim.b[bufnr].copilot_agent_treesitter_disabled then
+      return
+    end
     local ok, rm = pcall(require, 'render-markdown')
     if ok and rm.refresh then
       pcall(rm.refresh)

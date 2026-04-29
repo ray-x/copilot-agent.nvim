@@ -123,6 +123,7 @@ local state = {
   instruction_count = 0, -- discovered repository instructions for the active session
   agent_count = 0, -- discovered repository agents for the active session
   skill_count = 0, -- discovered repository skills for the active session
+  mcp_count = 0, -- discovered repository MCP servers for the active session
 }
 
 -- Static list of slash commands supported by the Copilot CLI backend.

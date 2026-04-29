@@ -40,7 +40,27 @@ function M.truncate_session_summary(summary, max_len)
   if max_len < 1 or #summary <= max_len then
     return summary
   end
-  return summary:sub(1, max_len)
+
+  local prefix = summary:sub(1, max_len)
+  local last_sep_start
+  local search_from = 1
+  while true do
+    local sep_start = prefix:find('[%.,:%s_-]+', search_from)
+    if not sep_start then
+      break
+    end
+    last_sep_start = sep_start
+    search_from = sep_start + 1
+  end
+
+  if last_sep_start and last_sep_start > 1 then
+    local trimmed = prefix:sub(1, last_sep_start - 1):gsub('[%.,:%s_-]+$', '')
+    if trimmed ~= '' then
+      return trimmed
+    end
+  end
+
+  return prefix
 end
 
 local function format_unix_ns_timestamp(ns)

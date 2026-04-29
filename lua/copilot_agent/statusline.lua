@@ -126,11 +126,13 @@ local function statusline_config_segments(highlight_numbers)
   local instructions = tonumber(state.instruction_count) or 0
   local agents = tonumber(state.agent_count) or 0
   local skills = tonumber(state.skill_count) or 0
+  local mcp = tonumber(state.mcp_count) or 0
 
   return {
     statusline_count_segment('󱃕', 'instructions', instructions, highlight_numbers),
     statusline_count_segment('󱜙', 'agents', agents, highlight_numbers),
     statusline_count_segment('󱨚', 'skills', skills, highlight_numbers),
+    statusline_count_segment('', 'mcp', mcp, highlight_numbers),
   }
 end
 

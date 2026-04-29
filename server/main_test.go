@@ -361,6 +361,53 @@ func TestEnrichPersistedSessionsFromWorkspacePreservesExistingContext(t *testing
 	}
 }
 
+func TestCountDiscoverableConfigCountsMCPServers(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".github"), 0o755); err != nil {
+		t.Fatalf("mkdir .github: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".github", "copilot-instructions.md"), []byte("# hi"), 0o644); err != nil {
+		t.Fatalf("write instructions: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".github", "agents"), 0o755); err != nil {
+		t.Fatalf("mkdir agents: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".github", "agents", "qa.agent.md"), []byte("# agent"), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".github", "skills", "review"), 0o755); err != nil {
+		t.Fatalf("mkdir skills: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".github", "skills", "review", "SKILL.md"), []byte("# skill"), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"local":{},"docs":{}}}`), 0o644); err != nil {
+		t.Fatalf("write root mcp config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".vscode"), 0o755); err != nil {
+		t.Fatalf("mkdir .vscode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".vscode", "mcp.json"), []byte(`{"servers":[{"name":"browser"}]}`), 0o644); err != nil {
+		t.Fatalf("write vscode mcp config: %v", err)
+	}
+
+	instructions, agents, skills, mcp := countDiscoverableConfig(root)
+	if instructions != 1 {
+		t.Fatalf("expected 1 instruction, got %d", instructions)
+	}
+	if agents != 1 {
+		t.Fatalf("expected 1 agent, got %d", agents)
+	}
+	if skills != 1 {
+		t.Fatalf("expected 1 skill, got %d", skills)
+	}
+	if mcp != 3 {
+		t.Fatalf("expected 3 MCP servers, got %d", mcp)
+	}
+}
+
 // ── decodeJSON ────────────────────────────────────────────────────────────────
 
 func TestDecodeJSONAcceptsValidBody(t *testing.T) {

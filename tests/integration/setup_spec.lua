@@ -323,6 +323,7 @@ describe('model state sync', function()
         instructionCount = 2,
         agentCount = 1,
         skillCount = 3,
+        mcpCount = 4,
       },
     })
 
@@ -333,6 +334,7 @@ describe('model state sync', function()
     assert_eq(2, agent.state.instruction_count)
     assert_eq(1, agent.state.agent_count)
     assert_eq(3, agent.state.skill_count)
+    assert_eq(4, agent.state.mcp_count)
   end)
 
   it('syncs model and reasoning effort from session events', function()
@@ -359,13 +361,14 @@ describe('statusline config counts', function()
     agent.setup({ auto_create_session = false })
   end)
 
-  it('includes discovered instruction, agent, and skill counts', function()
+  it('includes discovered instruction, agent, skill, and MCP counts', function()
     agent.state.instruction_count = 2
     agent.state.agent_count = 1
     agent.state.skill_count = 3
+    agent.state.mcp_count = 4
 
-    local expected = '󱃕 instructions: 2 󱜙 agents: 1 󱨚 skills: 3'
-    local highlighted = '󱃕 instructions: %#CopilotAgentStatuslineCount#2%* 󱜙 agents: %#CopilotAgentStatuslineCount#1%* 󱨚 skills: %#CopilotAgentStatuslineCount#3%*'
+    local expected = '󱃕 instructions: 2 󱜙 agents: 1 󱨚 skills: 3  mcp: 4'
+    local highlighted = '󱃕 instructions: %#CopilotAgentStatuslineCount#2%* 󱜙 agents: %#CopilotAgentStatuslineCount#1%* 󱨚 skills: %#CopilotAgentStatuslineCount#3%*  mcp: %#CopilotAgentStatuslineCount#4%*'
 
     assert_eq(expected, require('copilot_agent.statusline').statusline_config())
     assert_eq(highlighted, require('copilot_agent.statusline').statusline_config_highlighted())

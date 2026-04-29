@@ -54,6 +54,7 @@ local function sync_config_counts(data)
   state.instruction_count = tonumber(data.instructionCount) or 0
   state.agent_count = tonumber(data.agentCount) or 0
   state.skill_count = tonumber(data.skillCount) or 0
+  state.mcp_count = tonumber(data.mcpCount) or 0
 end
 
 local function show_user_input_picker(payload)
@@ -155,6 +156,7 @@ local function handle_host_event(event_name, payload)
     state.instruction_count = 0
     state.agent_count = 0
     state.skill_count = 0
+    state.mcp_count = 0
     refresh_statuslines()
   elseif event_name == 'host.permission_requested' then
     -- In interactive mode, Go sends a request object with an ID; ask the user.

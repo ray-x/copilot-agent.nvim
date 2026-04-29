@@ -95,6 +95,7 @@ type sessionSummary struct {
 	InstructionCount  int                         `json:"instructionCount,omitempty"`
 	AgentCount        int                         `json:"agentCount,omitempty"`
 	SkillCount        int                         `json:"skillCount,omitempty"`
+	MCPCount          int                         `json:"mcpCount,omitempty"`
 }
 
 type listSessionsResponse struct {
@@ -163,6 +164,7 @@ type managedSession struct {
 	instructionCount     int
 	agentCount           int
 	skillCount           int
+	mcpCount             int
 	subscribers          map[chan sseMessage]struct{}
 	subscribersMu        sync.RWMutex
 	pendingInputs        map[string]*pendingUserInput
@@ -430,7 +432,7 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		inputResponseGrace: defaultInputTimeout,
 	}
 	if configDiscovery {
-		managed.instructionCount, managed.agentCount, managed.skillCount = countDiscoverableConfig(workingDirectory)
+		managed.instructionCount, managed.agentCount, managed.skillCount, managed.mcpCount = countDiscoverableConfig(workingDirectory)
 	}
 
 	// Pre-populate the session name from persisted metadata so it's available
@@ -1163,17 +1165,18 @@ func (m *managedSession) summary() sessionSummary {
 		InstructionCount:  m.instructionCount,
 		AgentCount:        m.agentCount,
 		SkillCount:        m.skillCount,
+		MCPCount:          m.mcpCount,
 	}
 }
 
-func countDiscoverableConfig(workingDirectory string) (instructionCount, agentCount, skillCount int) {
+func countDiscoverableConfig(workingDirectory string) (instructionCount, agentCount, skillCount, mcpCount int) {
 	if strings.TrimSpace(workingDirectory) == "" {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	githubDir := filepath.Join(workingDirectory, ".github")
 	if _, err := os.Stat(githubDir); err != nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	if fileExists(filepath.Join(githubDir, "copilot-instructions.md")) {
@@ -1213,7 +1216,38 @@ func countDiscoverableConfig(workingDirectory string) (instructionCount, agentCo
 		return nil
 	})
 
-	return instructionCount, agentCount, skillCount
+	mcpCount += countMCPServersInFile(filepath.Join(workingDirectory, ".mcp.json"))
+	mcpCount += countMCPServersInFile(filepath.Join(workingDirectory, ".vscode", "mcp.json"))
+
+	return instructionCount, agentCount, skillCount, mcpCount
+}
+
+func countMCPServersInFile(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return 0
+	}
+
+	if count := countMCPServerEntries(payload["mcpServers"]); count > 0 {
+		return count
+	}
+	return countMCPServerEntries(payload["servers"])
+}
+
+func countMCPServerEntries(value any) int {
+	switch v := value.(type) {
+	case map[string]any:
+		return len(v)
+	case []any:
+		return len(v)
+	default:
+		return 0
+	}
 }
 
 func fileExists(path string) bool {

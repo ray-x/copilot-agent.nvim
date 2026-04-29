@@ -80,6 +80,26 @@ describe('normalize_base_url', function()
   end)
 end)
 
+describe('truncate_session_summary', function()
+  it('returns the summary unchanged when it already fits', function()
+    assert.equal('short summary', utils.truncate_session_summary('short summary', 32))
+  end)
+
+  it('prefers trimming at separators within the limit', function()
+    assert.equal('my.long.session',
+      utils.truncate_session_summary('my.long.session.name.with.extra.parts', 18))
+  end)
+
+  it('drops trailing separators from the trimmed result', function()
+    assert.equal('topic:subtopic',
+      utils.truncate_session_summary('topic:subtopic-detail-more', 20))
+  end)
+
+  it('falls back to hard truncation when there is no separator', function()
+    assert.equal('abcdefghij', utils.truncate_session_summary('abcdefghijklmnopqrstuvwxyz', 10))
+  end)
+end)
+
 describe('normalize_model_entry', function()
   it('returns nil for non-table input', function()
     assert.is_nil(utils.normalize_model_entry('string'))

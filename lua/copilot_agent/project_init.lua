@@ -210,8 +210,12 @@ local function count_mcp_servers_in_file(path)
   if not exists(path) then
     return 0
   end
-  local decoded = vim.json.decode(read_file(path) or '{}')
-  if type(decoded) ~= 'table' then
+  local raw = read_file(path)
+  if not raw or raw == '' then
+    return 0
+  end
+  local ok, decoded = pcall(vim.json.decode, raw)
+  if not ok or type(decoded) ~= 'table' then
     return 0
   end
   local servers = decoded.mcpServers or decoded.servers

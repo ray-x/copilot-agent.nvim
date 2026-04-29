@@ -342,10 +342,10 @@ local function restore(session_id, checkpoint_id, callback)
       local index = load_index(session_id)
       local truncated = {}
       for _, item in ipairs(index.checkpoints) do
+        truncated[#truncated + 1] = item
         if item.id == checkpoint_id then
           break
         end
-        truncated[#truncated + 1] = item
       end
       index.checkpoints = truncated
       save_index(session_id, index)

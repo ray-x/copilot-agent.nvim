@@ -11,6 +11,7 @@ local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 local events = require('copilot_agent.events')
 local model = require('copilot_agent.model')
+local approvals = require('copilot_agent.approvals')
 local session_names = require('copilot_agent.session_names')
 local utils = require('copilot_agent.utils')
 
@@ -163,6 +164,7 @@ end
 
 function M.disconnect_session(session_id, delete_state, callback)
   stop_event_stream()
+  approvals.reset()
   if not session_id then
     if callback then
       callback(nil)
@@ -227,6 +229,7 @@ function M.resume_session(session_id, callback)
       ),
       vim.log.levels.DEBUG
     )
+    approvals.reset()
     start_event_stream(state.session_id)
     on_session_ready(state.session_id)
     if callback then
@@ -456,6 +459,7 @@ create_session = function(callback, opts)
       return
     end
 
+    approvals.reset()
     start_event_stream(state.session_id)
 
     -- Announce the new session.

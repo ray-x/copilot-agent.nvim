@@ -5,6 +5,7 @@
 -- SSE event stream: parser, host/session event handlers.
 
 local utils = require('copilot_agent.utils')
+local approvals = require('copilot_agent.approvals')
 local cfg = require('copilot_agent.config')
 local http = require('copilot_agent.http')
 local service = require('copilot_agent.service')
@@ -36,6 +37,14 @@ local scroll_to_bottom = render.scroll_to_bottom
 local is_thinking_content = utils.is_thinking_content
 
 local M = {}
+
+local function answer_permission(session_id, request_id, approved, callback)
+  request('POST', '/sessions/' .. session_id .. '/permission/' .. request_id, { approved = approved }, callback or function(_, err)
+    if err then
+      notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+    end
+  end)
+end
 
 local function sync_model_state(model, reasoning_effort)
   if type(model) == 'string' and model ~= '' then
@@ -169,6 +178,17 @@ local function handle_host_event(event_name, payload)
     if mode == 'interactive' and req_id then
       local perm = req.request or {}
       local kind = perm.kind or 'unknown'
+      local sid = state.session_id
+      local auto_allowed = false
+      if kind == 'read' or kind == 'write' then
+        auto_allowed = approvals.directory_allowed(perm.path or perm.fileName)
+      else
+        auto_allowed = approvals.tool_allowed(perm)
+      end
+      if auto_allowed and sid then
+        answer_permission(sid, req_id, true)
+        return
+      end
       local parts = {}
 
       -- Build a descriptive prompt based on the permission kind.
@@ -225,6 +245,8 @@ local function handle_host_event(event_name, payload)
       -- For read/write with a file path, also offer "Allow this directory".
       local choices = { 'Allow', 'Deny', 'Allow all for this session' }
       local dir_path = nil
+      local tool_label = approvals.tool_label(perm)
+      local allow_tool_choice = nil
       local has_diff = kind == 'write' and perm.diff and perm.diff ~= ''
       if kind == 'read' or kind == 'write' then
         local file = perm.path or perm.fileName
@@ -234,6 +256,9 @@ local function handle_host_event(event_name, payload)
             table.insert(choices, 3, 'Allow this directory (' .. vim.fn.fnamemodify(dir_path, ':~') .. ')')
           end
         end
+      elseif tool_label then
+        allow_tool_choice = 'Allow ' .. tool_label .. ' for the rest of this session'
+        table.insert(choices, 2, allow_tool_choice)
       end
       if has_diff then
         table.insert(choices, 2, 'Show diff')
@@ -324,8 +349,6 @@ local function handle_host_event(event_name, payload)
             return
           end
 
-          local sid = state.session_id
-
           if choice == 'Show diff' then
             show_diff_float(perm.diff, function()
               vim.schedule(show_permission_picker)
@@ -335,11 +358,7 @@ local function handle_host_event(event_name, payload)
 
           if choice == 'Allow all for this session' then
             -- Approve this request, then switch to approve-all mode.
-            request('POST', '/sessions/' .. sid .. '/permission/' .. req_id, { approved = true }, function(_, err)
-              if err then
-                notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
-              end
-            end)
+            answer_permission(sid, req_id, true)
             state.permission_mode = 'approve-all'
             request('POST', '/sessions/' .. sid .. '/permission-mode', { mode = 'approve-all' }, function(_, err)
               if err then
@@ -349,29 +368,25 @@ local function handle_host_event(event_name, payload)
                 refresh_statuslines()
               end
             end)
+          elseif allow_tool_choice and choice == allow_tool_choice then
+            local ok, allow_err = approvals.allow_tool(perm)
+            if not ok then
+              notify('Failed to allow tool: ' .. tostring(allow_err), vim.log.levels.WARN)
+              return
+            end
+            answer_permission(sid, req_id, true)
+            notify('Allowed ' .. tool_label .. ' for this session', vim.log.levels.INFO)
           elseif choice:match('^Allow this directory') then
-            -- Approve this request, then send /add-dir via the captured session.
-            request('POST', '/sessions/' .. sid .. '/permission/' .. req_id, { approved = true }, function(_, err)
-              if err then
-                notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+            answer_permission(sid, req_id, true)
+            if dir_path then
+              local normalized = approvals.add_directory(dir_path)
+              if normalized then
+                notify('Added directory: ' .. vim.fn.fnamemodify(normalized, ':~'), vim.log.levels.INFO)
               end
-            end)
-            if dir_path and sid then
-              request('POST', '/sessions/' .. sid .. '/messages', { message = '/add-dir ' .. dir_path }, function(_, add_err)
-                if add_err then
-                  notify('Failed to add directory: ' .. tostring(add_err), vim.log.levels.WARN)
-                else
-                  notify('Added directory: ' .. dir_path, vim.log.levels.INFO)
-                end
-              end)
             end
           else
             local approved = (choice == 'Allow')
-            request('POST', '/sessions/' .. sid .. '/permission/' .. req_id, { approved = approved }, function(_, err)
-              if err then
-                notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
-              end
-            end)
+            answer_permission(sid, req_id, approved)
           end
         end)
       end

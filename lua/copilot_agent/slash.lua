@@ -3,6 +3,7 @@
 -- license that can be found in the LICENSE file.
 
 local cfg = require('copilot_agent.config')
+local approvals = require('copilot_agent.approvals')
 local chat = require('copilot_agent.chat')
 local checkpoints = require('copilot_agent.checkpoints')
 local discovery = require('copilot_agent.discovery')
@@ -68,6 +69,136 @@ local function open_path(path)
     return
   end
   vim.cmd('edit ' .. vim.fn.fnameescape(path))
+end
+
+local function now_ms()
+  local uv = vim.uv or vim.loop
+  return uv and uv.now and uv.now() or math.floor(vim.fn.reltimefloat(vim.fn.reltime()) * 1000)
+end
+
+local function clear_consumed_attachments(opts)
+  if not opts or type(opts.attachments) ~= 'table' or vim.tbl_isempty(opts.attachments) then
+    return
+  end
+  state.pending_attachments = {}
+  refresh_statuslines()
+end
+
+local function build_api_attachments(attachments)
+  local api_attachments = {}
+  local temp_files = {}
+  for _, attachment in ipairs(attachments or {}) do
+    if attachment.type == 'file' or attachment.type == 'directory' or attachment.type == 'image' then
+      api_attachments[#api_attachments + 1] = { type = 'file', path = attachment.path }
+      if attachment.temp then
+        temp_files[#temp_files + 1] = attachment.path
+      end
+    elseif attachment.type == 'selection' then
+      api_attachments[#api_attachments + 1] = {
+        type = 'selection',
+        filePath = attachment.path,
+        text = attachment.text,
+        lineRange = attachment.start_line and { start = attachment.start_line, ['end'] = attachment.end_line } or nil,
+      }
+    end
+  end
+  return api_attachments, temp_files
+end
+
+local function cleanup_temp_files(paths)
+  for _, path in ipairs(paths or {}) do
+    pcall(os.remove, path)
+  end
+end
+
+local function resolve_path_arg(path)
+  path = vim.trim(path or '')
+  if path == '' then
+    return nil
+  end
+  local expanded = vim.fn.expand(path)
+  if not vim.startswith(expanded, '/') and not expanded:match('^%a:[/\\]') then
+    expanded = working_directory() .. '/' .. expanded
+  end
+  return approvals.normalize_directory(expanded)
+end
+
+local function dispatch_prompt(prompt, opts)
+  clear_consumed_attachments(opts)
+  require('copilot_agent').ask(prompt, { attachments = vim.deepcopy((opts or {}).attachments or {}) })
+end
+
+local function show_markdown_result(title, lines)
+  local width = math.min(math.floor(vim.o.columns * 0.8), 120)
+  local height = math.min(math.max(#lines + 2, 12), math.floor(vim.o.lines * 0.8))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].modifiable = false
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = height,
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = 'minimal',
+    border = 'rounded',
+    title = ' ' .. title .. ' ',
+    title_pos = 'center',
+  })
+  local function close()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+  vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
+end
+
+local function delete_side_session(session_id, callback)
+  request('DELETE', string.format('/sessions/%s?delete=true', session_id), nil, function(_, err)
+    if callback then
+      callback(err)
+    end
+  end, { auto_start = false })
+end
+
+local function extract_side_session_answer(events)
+  local answer = nil
+  local turn_started = false
+  local turn_finished = false
+  for _, event in ipairs(events or {}) do
+    local event_type = event and event.type or nil
+    local data = event and event.data or {}
+    if event_type == 'assistant.turn_start' then
+      turn_started = true
+    elseif event_type == 'assistant.message' and type(data.content) == 'string' and vim.trim(data.content) ~= '' then
+      answer = data.content
+    elseif event_type == 'assistant.turn_end' and turn_started then
+      turn_finished = true
+    elseif event_type == 'error' then
+      return nil, true, vim.inspect(data)
+    end
+  end
+  return answer, turn_finished, nil
+end
+
+local function show_side_question_result(prompt, answer)
+  local lines = {
+    '# /ask',
+    '',
+    '## Question',
+    '',
+    prompt,
+    '',
+    '## Answer',
+    '',
+  }
+  vim.list_extend(lines, vim.split(vim.trim(answer or 'No answer returned.'), '\n', { plain = true }))
+  show_markdown_result('Copilot /ask', lines)
 end
 
 local function matching_item(items, query)
@@ -337,6 +468,58 @@ local function usage_command()
     lines[#lines + 1] = string.format('  Context window: %d / %d tokens', state.context_tokens, state.context_limit)
   end
   append_entry('system', table.concat(lines, '\n'))
+  return true
+end
+
+local function add_directory(args)
+  local resolved = resolve_path_arg(args)
+  if not resolved then
+    vim.ui.input({
+      prompt = 'Directory to allow: ',
+      default = working_directory(),
+      completion = 'dir',
+    }, function(input)
+      local picked = resolve_path_arg(input)
+      if not picked then
+        return
+      end
+      if vim.fn.isdirectory(picked) ~= 1 then
+        append_entry('error', 'Directory does not exist: ' .. tostring(input))
+        return
+      end
+      approvals.add_directory(picked)
+      append_entry('system', 'Allowed directory: ' .. vim.fn.fnamemodify(picked, ':~'))
+    end)
+    return true
+  end
+
+  if vim.fn.isdirectory(resolved) ~= 1 then
+    append_entry('error', 'Directory does not exist: ' .. args)
+    return true
+  end
+  approvals.add_directory(resolved)
+  append_entry('system', 'Allowed directory: ' .. vim.fn.fnamemodify(resolved, ':~'))
+  return true
+end
+
+local function list_directories_command()
+  local directories = approvals.list_directories()
+  if vim.tbl_isempty(directories) then
+    append_entry('system', 'No allowed directories in this session')
+    return true
+  end
+
+  local lines = { 'Allowed directories:' }
+  for _, directory in ipairs(directories) do
+    lines[#lines + 1] = '  - ' .. vim.fn.fnamemodify(directory, ':~')
+  end
+  append_entry('system', table.concat(lines, '\n'))
+  return true
+end
+
+local function reset_allowed_tools_command()
+  local cleared = approvals.reset_tools()
+  append_entry('system', cleared > 0 and ('Cleared ' .. cleared .. ' allowed tools for this session') or 'No allowed tools were set')
   return true
 end
 
@@ -683,6 +866,169 @@ local function share_session(args)
   return true
 end
 
+local function review_command(args, opts)
+  local scope = vim.trim(args or '')
+  local lines = {
+    'Review the current changes in the working directory.',
+    'If a code-review subagent is available, use it.',
+    'Focus only on genuine bugs, security vulnerabilities, regressions, and logic errors.',
+    'Ignore style-only or formatting-only feedback.',
+    'Reference files and lines when possible.',
+  }
+  if scope ~= '' then
+    lines[#lines + 1] = 'Additional review focus: ' .. scope
+  end
+  local prompt = table.concat(lines, '\n')
+  dispatch_prompt(prompt, opts)
+  return true
+end
+
+local function research_command(args, opts)
+  local topic = vim.trim(args or '')
+  local function run(topic_text)
+    topic_text = vim.trim(topic_text or '')
+    if topic_text == '' then
+      return
+    end
+    local prompt = table.concat({
+      'Investigate the following topic using GitHub search and web sources when helpful:',
+      topic_text,
+      '',
+      'Summarize the findings, cite the sources you relied on, and call out uncertainty clearly.',
+    }, '\n')
+    dispatch_prompt(prompt, opts)
+  end
+
+  if topic ~= '' then
+    run(topic)
+    return true
+  end
+
+  vim.ui.input({ prompt = 'Research topic: ' }, run)
+  return true
+end
+
+local function ask_side_question(prompt, opts)
+  prompt = vim.trim(prompt or '')
+  if prompt == '' then
+    return
+  end
+
+  local request_prompt = table.concat({
+    'Answer this side question briefly.',
+    'Use read-only tools only. Do not modify files, write files, or run shell commands.',
+    '',
+    prompt,
+  }, '\n')
+  local api_attachments, temp_files = build_api_attachments((opts or {}).attachments or {})
+  clear_consumed_attachments(opts)
+  notify('Running side question…', vim.log.levels.INFO)
+
+  local side_session_id
+  local deadline = now_ms() + 120000
+
+  local function finish(answer, err)
+    cleanup_temp_files(temp_files)
+    if not side_session_id then
+      if err then
+        append_entry('error', '/ask failed: ' .. err)
+      end
+      return
+    end
+    delete_side_session(side_session_id, function(delete_err)
+      if err then
+        append_entry('error', '/ask failed: ' .. err)
+        return
+      end
+      if delete_err then
+        notify('Failed to clean up side session: ' .. delete_err, vim.log.levels.WARN)
+      end
+      show_side_question_result(prompt, answer)
+    end)
+  end
+
+  local function poll_messages()
+    request('GET', string.format('/sessions/%s/messages', side_session_id), nil, function(response, err)
+      if err then
+        finish(nil, err)
+        return
+      end
+
+      local answer, done, answer_err = extract_side_session_answer((response and response.events) or {})
+      if answer_err then
+        finish(nil, answer_err)
+        return
+      end
+      if done then
+        finish(answer, nil)
+        return
+      end
+      if now_ms() >= deadline then
+        finish(nil, 'timed out waiting for side response')
+        return
+      end
+      vim.defer_fn(poll_messages, 400)
+    end, { auto_start = false })
+  end
+
+  local function send_prompt()
+    local body = { prompt = request_prompt }
+    if #api_attachments > 0 then
+      body.attachments = api_attachments
+    end
+    request('POST', string.format('/sessions/%s/messages', side_session_id), body, function(_, err)
+      if err then
+        finish(nil, err)
+        return
+      end
+      poll_messages()
+    end, { auto_start = false })
+  end
+
+  local function configure_mode()
+    request('POST', string.format('/sessions/%s/mode', side_session_id), { mode = 'ask' }, function(_, err)
+      if err then
+        notify('Failed to set /ask mode: ' .. err, vim.log.levels.WARN)
+      end
+      send_prompt()
+    end, { auto_start = false })
+  end
+
+  request('POST', '/sessions', {
+    clientName = state.config.client_name,
+    permissionMode = 'approve-reads',
+    workingDirectory = working_directory(),
+    streaming = state.config.session.streaming,
+    enableConfigDiscovery = state.config.session.enable_config_discovery,
+    model = state.current_model or state.config.session.model,
+    agent = state.config.session.agent,
+  }, function(response, err)
+    if err then
+      finish(nil, err)
+      return
+    end
+    side_session_id = response and response.sessionId or nil
+    if not side_session_id then
+      finish(nil, 'Server did not return a side-session ID')
+      return
+    end
+    configure_mode()
+  end)
+end
+
+local function ask_command(args, opts)
+  local prompt = vim.trim(args or '')
+  if prompt ~= '' then
+    ask_side_question(prompt, opts)
+    return true
+  end
+
+  vim.ui.input({ prompt = 'Side question: ' }, function(input)
+    ask_side_question(input, opts)
+  end)
+  return true
+end
+
 local function init_repository(args)
   return init_project.run(args)
 end
@@ -834,6 +1180,8 @@ local function rewind_checkpoint()
 end
 
 local handlers = {
+  ['add-dir'] = add_directory,
+  ask = ask_command,
   compact = compact_history,
   context = context_command,
   cwd = cwd_command,
@@ -843,12 +1191,17 @@ local handlers = {
   fleet = fleet_mode,
   init = init_repository,
   instructions = instructions_command,
+  ['list-dir'] = list_directories_command,
+  ['list-dirs'] = list_directories_command,
   lsp = lsp_command,
   mcp = mcp_command,
   ['new'] = new_session_command,
   model = select_model_command,
   plan = plan_mode_command,
   rename = rename_session,
+  research = research_command,
+  ['reset-allowed-tools'] = reset_allowed_tools_command,
+  review = review_command,
   resume = resume_session_command,
   search = search_transcript,
   session = session_command,

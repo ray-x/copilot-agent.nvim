@@ -124,6 +124,8 @@ local state = {
   agent_count = 0, -- discovered repository agents for the active session
   skill_count = 0, -- discovered repository skills for the active session
   mcp_count = 0, -- discovered repository MCP servers for the active session
+  allowed_directories = {}, -- user-approved directories for file access in this session
+  allowed_tools = {}, -- user-approved tools for the rest of this session
 }
 
 -- Static list of slash commands supported by the Copilot CLI backend.

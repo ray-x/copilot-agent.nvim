@@ -5,6 +5,7 @@
 local cfg = require('copilot_agent.config')
 local chat = require('copilot_agent.chat')
 local checkpoints = require('copilot_agent.checkpoints')
+local init_project = require('copilot_agent.project_init')
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
 local session_names = require('copilot_agent.session_names')
@@ -268,6 +269,10 @@ local function share_session(args)
   return true
 end
 
+local function init_repository(args)
+  return init_project.run(args)
+end
+
 local function undo_checkpoint()
   if not state.session_id then
     notify('No active session to undo', vim.log.levels.WARN)
@@ -308,6 +313,7 @@ local function rewind_checkpoint()
 end
 
 local handlers = {
+  init = init_repository,
   rename = rename_session,
   search = search_transcript,
   share = share_session,

@@ -64,6 +64,10 @@ type sendMessageRequest struct {
 	RequestHeaders map[string]string    `json:"requestHeaders,omitempty"`
 }
 
+type fleetStartRequest struct {
+	Prompt string `json:"prompt,omitempty"`
+}
+
 type setModelRequest struct {
 	Model           string `json:"model"`
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
@@ -252,6 +256,7 @@ func main() {
 	mux.HandleFunc("POST /sessions/{id}/mode", svc.handleSetAgentMode)
 	mux.HandleFunc("GET /sessions/{id}/messages", svc.handleGetMessages)
 	mux.HandleFunc("POST /sessions/{id}/messages", svc.handleSendMessage)
+	mux.HandleFunc("POST /sessions/{id}/fleet", svc.handleStartFleet)
 	mux.HandleFunc("GET /sessions/{id}/events", svc.handleEvents)
 	mux.HandleFunc("POST /sessions/{id}/user-input/{requestID}", svc.handleAnswerUserInput)
 	mux.HandleFunc("POST /sessions/{id}/permission/{requestID}", svc.handleAnswerPermission)
@@ -644,6 +649,45 @@ func (s *service) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"sessionId": managed.session.SessionID, "messageId": messageID})
+}
+
+func (s *service) handleStartFleet(w http.ResponseWriter, r *http.Request) {
+	managed, ok := s.getManagedSession(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session is not attached to this service")
+		return
+	}
+
+	var req fleetStartRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var params *rpc.FleetStartRequest
+	if prompt := strings.TrimSpace(req.Prompt); prompt != "" {
+		params = &rpc.FleetStartRequest{Prompt: &prompt}
+	}
+
+	result, err := managed.session.RPC.Fleet.Start(r.Context(), params)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("start fleet: %v", err))
+		return
+	}
+
+	started := result != nil && result.Started
+	if started {
+		managed.broadcastHostEvent("host.fleet_started", map[string]any{
+			"sessionId": managed.session.SessionID,
+			"prompt":    strings.TrimSpace(req.Prompt),
+			"started":   true,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sessionId": managed.session.SessionID,
+		"started":   started,
+	})
 }
 
 func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {

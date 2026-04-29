@@ -8,6 +8,7 @@ local checkpoints = require('copilot_agent.checkpoints')
 local init_project = require('copilot_agent.project_init')
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
+local session = require('copilot_agent.session')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 
@@ -273,6 +274,44 @@ local function init_repository(args)
   return init_project.run(args)
 end
 
+local function start_fleet(prompt)
+  session.with_session(function(session_id, err)
+    if err then
+      append_entry('error', err)
+      return
+    end
+
+    request('POST', string.format('/sessions/%s/fleet', session_id), { prompt = prompt ~= '' and prompt or nil }, function(response, request_err)
+      if request_err then
+        append_entry('error', 'Fleet start failed: ' .. request_err)
+        return
+      end
+
+      if response and response.started then
+        append_entry('system', prompt ~= '' and ('Fleet mode started: ' .. prompt) or 'Fleet mode started')
+        return
+      end
+
+      append_entry('system', 'Fleet mode request was accepted, but the runtime did not report a started state')
+    end)
+  end)
+end
+
+local function fleet_mode(args)
+  if args ~= '' then
+    start_fleet(args)
+    return true
+  end
+
+  vim.ui.input({ prompt = 'Fleet prompt (optional): ' }, function(input)
+    if input == nil then
+      return
+    end
+    start_fleet(vim.trim(input))
+  end)
+  return true
+end
+
 local function undo_checkpoint()
   if not state.session_id then
     notify('No active session to undo', vim.log.levels.WARN)
@@ -313,6 +352,7 @@ local function rewind_checkpoint()
 end
 
 local handlers = {
+  fleet = fleet_mode,
   init = init_repository,
   rename = rename_session,
   search = search_transcript,

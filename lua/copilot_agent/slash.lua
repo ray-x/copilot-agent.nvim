@@ -7,6 +7,7 @@ local chat = require('copilot_agent.chat')
 local checkpoints = require('copilot_agent.checkpoints')
 local events = require('copilot_agent.events')
 local init_project = require('copilot_agent.project_init')
+local model = require('copilot_agent.model')
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
 local session = require('copilot_agent.session')
@@ -145,6 +146,15 @@ local function search_transcript(args)
   vim.ui.input({ prompt = 'Search transcript: ' }, function(input)
     run_search(input)
   end)
+  return true
+end
+
+local function select_model_command(args)
+  if args ~= '' then
+    model.select_model(args)
+    return true
+  end
+  model.select_model()
   return true
 end
 
@@ -426,6 +436,7 @@ local handlers = {
   compact = compact_history,
   fleet = fleet_mode,
   init = init_repository,
+  model = select_model_command,
   rename = rename_session,
   search = search_transcript,
   share = share_session,

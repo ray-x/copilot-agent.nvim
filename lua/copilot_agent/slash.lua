@@ -158,6 +158,43 @@ local function select_model_command(args)
   return true
 end
 
+local function resume_session_command(args)
+  if args ~= '' then
+    session.switch_to_session_id(args)
+    return true
+  end
+  session.switch_session()
+  return true
+end
+
+local function new_session_command()
+  session.new_session()
+  return true
+end
+
+local function clear_session_command()
+  session.clear_and_new_session()
+  return true
+end
+
+local function session_command(args)
+  local action = vim.trim(args or '')
+  if action == '' then
+    session.switch_session()
+    return true
+  end
+  if action == 'new' then
+    session.new_session()
+    return true
+  end
+  if action == 'clear' then
+    session.clear_and_new_session()
+    return true
+  end
+  session.switch_to_session_id(action)
+  return true
+end
+
 local function transcript_lines()
   local lines = {}
   for idx, entry in ipairs(state.entries) do
@@ -436,11 +473,15 @@ local handlers = {
   compact = compact_history,
   fleet = fleet_mode,
   init = init_repository,
+  ['new'] = new_session_command,
   model = select_model_command,
   rename = rename_session,
+  resume = resume_session_command,
   search = search_transcript,
+  session = session_command,
   share = share_session,
   tasks = session_tasks,
+  clear = clear_session_command,
   undo = undo_checkpoint,
   rewind = rewind_checkpoint,
 }

@@ -546,6 +546,67 @@ function M.new_session()
   end)
 end
 
+function M.clear_and_new_session()
+  local previous_session_id = state.session_id
+  state.session_id = nil
+  state.session_name = nil
+  M.discard_pending_attachments()
+  clear_transcript()
+  require('copilot_agent').open_chat()
+
+  local function create_replacement()
+    M.create_new_session(function(session_id, create_err)
+      if create_err then
+        append_entry('error', create_err)
+        return
+      end
+      append_entry('system', 'Created session ' .. session_id)
+    end)
+  end
+
+  if not previous_session_id then
+    create_replacement()
+    return
+  end
+
+  M.disconnect_session(previous_session_id, true, function(err)
+    if err then
+      append_entry('error', 'Failed to clear previous session: ' .. err)
+      return
+    end
+    create_replacement()
+  end)
+end
+
+function M.switch_to_session_id(target_session_id)
+  target_session_id = vim.trim(target_session_id or '')
+  if target_session_id == '' then
+    notify('Session ID is required', vim.log.levels.WARN)
+    return
+  end
+  if state.session_id and target_session_id == state.session_id then
+    notify('Already on this session', vim.log.levels.INFO)
+    return
+  end
+
+  local previous_session_id = state.session_id
+  state.session_id = nil
+  state.session_name = nil
+  state.creating_session = true
+  M.discard_pending_attachments()
+  clear_transcript()
+  require('copilot_agent')._ensure_chat_window()
+  M.disconnect_session(previous_session_id, false, function(disconnect_err)
+    if disconnect_err then
+      append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
+      log('switch_to_session_id disconnect failed: ' .. tostring(disconnect_err), vim.log.levels.ERROR)
+    end
+    append_entry('system', 'Switching to session ' .. format_session_id(target_session_id) .. '…')
+    log('switch_to_session_id switching to ' .. format_session_id(target_session_id), vim.log.levels.INFO)
+    M.resume_session(target_session_id)
+  end)
+end
+
 --- Show a picker of all persisted sessions and switch to the selected one.
 function M.switch_session()
   request('GET', '/sessions', nil, function(response, err)
@@ -602,26 +663,7 @@ function M.switch_session()
         M.new_session()
         return
       end
-      if state.session_id and picked.id == state.session_id then
-        notify('Already on this session', vim.log.levels.INFO)
-        return
-      end
-      local previous_session_id = state.session_id
-      state.session_id = nil
-      state.session_name = nil
-      state.creating_session = true
-      M.discard_pending_attachments()
-      clear_transcript()
-      require('copilot_agent')._ensure_chat_window()
-      M.disconnect_session(previous_session_id, false, function(disconnect_err)
-        if disconnect_err then
-          append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
-          log('switch_session disconnect failed: ' .. tostring(disconnect_err), vim.log.levels.ERROR)
-        end
-        append_entry('system', 'Switching to session ' .. format_session_id(picked.id) .. '…')
-        log('switch_session switching to ' .. format_session_id(picked.id), vim.log.levels.INFO)
-        M.resume_session(picked.id)
-      end)
+      M.switch_to_session_id(picked.id)
     end)
   end)
 end

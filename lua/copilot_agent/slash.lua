@@ -6,6 +6,7 @@ local cfg = require('copilot_agent.config')
 local chat = require('copilot_agent.chat')
 local checkpoints = require('copilot_agent.checkpoints')
 local events = require('copilot_agent.events')
+local http = require('copilot_agent.http')
 local init_project = require('copilot_agent.project_init')
 local model = require('copilot_agent.model')
 local render = require('copilot_agent.render')
@@ -19,10 +20,17 @@ local state = cfg.state
 local notify = cfg.notify
 local append_entry = render.append_entry
 local refresh_statuslines = sl.refresh_statuslines
+local request = http.request
 
 local M = {}
 local search_label_max_len = 72
 local working_directory = service.working_directory
+local mode_permission = {
+  ask = 'interactive',
+  plan = 'interactive',
+  agent = 'approve-reads',
+  autopilot = 'approve-all',
+}
 
 local function parse(text)
   if type(text) ~= 'string' then
@@ -192,6 +200,97 @@ local function session_command(args)
     return true
   end
   session.switch_to_session_id(action)
+  return true
+end
+
+local function set_input_mode(mode)
+  local next_mode = vim.trim(mode or ''):lower()
+  if next_mode == '' then
+    notify('Mode is required', vim.log.levels.WARN)
+    return
+  end
+  if not mode_permission[next_mode] then
+    notify('Unsupported mode: ' .. next_mode, vim.log.levels.WARN)
+    return
+  end
+
+  state.input_mode = next_mode
+  require('copilot_agent')._set_agent_mode(next_mode)
+
+  local had_manual = state.permission_mode_manual
+  state.permission_mode_manual = false
+  local natural_perm = mode_permission[next_mode]
+  if natural_perm and not had_manual and natural_perm ~= state.permission_mode then
+    state.permission_mode = natural_perm
+    if state.session_id then
+      request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = natural_perm }, function(_, err)
+        if err then
+          notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+        end
+      end)
+    end
+  end
+
+  refresh_statuslines()
+  append_entry('system', 'Mode: ' .. next_mode)
+end
+
+local function plan_mode_command(args)
+  set_input_mode('plan')
+  args = vim.trim(args or '')
+  if args ~= '' then
+    state.prompt_prefill = args
+    require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
+    require('copilot_agent')._open_input_window()
+  end
+  return true
+end
+
+local function allow_all_command()
+  local next_mode = 'approve-all'
+  state.permission_mode = next_mode
+  state.permission_mode_manual = true
+  if state.session_id then
+    request('POST', '/sessions/' .. state.session_id .. '/permission-mode', { mode = next_mode }, function(_, err)
+      if err then
+        append_entry('error', 'Failed to set permission mode: ' .. tostring(err))
+      end
+    end)
+  end
+  refresh_statuslines()
+  append_entry('system', 'Permission mode: ' .. next_mode)
+  return true
+end
+
+local function context_command()
+  if not state.context_tokens or not state.context_limit or state.context_limit <= 0 then
+    notify('Context window usage is not available yet for this session', vim.log.levels.INFO)
+    return true
+  end
+  local percent = math.floor((state.context_tokens / state.context_limit) * 100 + 0.5)
+  append_entry('system', string.format('Context window: %d / %d tokens (%d%%)', state.context_tokens, state.context_limit, percent))
+  return true
+end
+
+local function usage_command()
+  local lines = {
+    'Session usage snapshot:',
+    '  Session: ' .. tostring(state.session_id or '<none>'),
+    '  Model: ' .. tostring(state.current_model or state.config.session.model or '<default>'),
+    '  Mode: ' .. tostring(state.input_mode or 'agent'),
+    '  Permission: ' .. tostring(state.permission_mode or 'interactive'),
+    string.format(
+      '  Config discovery: %d instructions, %d agents, %d skills, %d MCP servers',
+      tonumber(state.instruction_count) or 0,
+      tonumber(state.agent_count) or 0,
+      tonumber(state.skill_count) or 0,
+      tonumber(state.mcp_count) or 0
+    ),
+  }
+  if state.context_tokens and state.context_limit and state.context_limit > 0 then
+    lines[#lines + 1] = string.format('  Context window: %d / %d tokens', state.context_tokens, state.context_limit)
+  end
+  append_entry('system', table.concat(lines, '\n'))
   return true
 end
 
@@ -471,16 +570,20 @@ end
 
 local handlers = {
   compact = compact_history,
+  context = context_command,
   fleet = fleet_mode,
   init = init_repository,
   ['new'] = new_session_command,
   model = select_model_command,
+  plan = plan_mode_command,
   rename = rename_session,
   resume = resume_session_command,
   search = search_transcript,
   session = session_command,
   share = share_session,
   tasks = session_tasks,
+  usage = usage_command,
+  ['allow-all'] = allow_all_command,
   clear = clear_session_command,
   undo = undo_checkpoint,
   rewind = rewind_checkpoint,

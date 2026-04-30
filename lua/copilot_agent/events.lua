@@ -906,6 +906,20 @@ local function check_open_buffers_for_external_changes(opts)
   end
 end
 
+local open_buffer_refresh_pending = false
+
+local function schedule_open_buffer_refresh()
+  if open_buffer_refresh_pending then
+    return
+  end
+
+  open_buffer_refresh_pending = true
+  vim.defer_fn(function()
+    open_buffer_refresh_pending = false
+    check_open_buffers_for_external_changes()
+  end, 60)
+end
+
 local function handle_session_event(payload)
   local event_type = payload and payload.type or nil
   local data = payload and payload.data or {}
@@ -1017,6 +1031,7 @@ local function handle_session_event(payload)
     state.current_intent = nil
     refresh_statuslines()
     render_chat() -- immediate full render on turn completion
+    schedule_open_buffer_refresh()
     return
   end
 
@@ -1035,6 +1050,7 @@ local function handle_session_event(payload)
       kind = 'subagent',
       status = 'completed',
     })
+    schedule_open_buffer_refresh()
     return
   end
 
@@ -1043,6 +1059,7 @@ local function handle_session_event(payload)
       kind = 'subagent',
       status = 'failed',
     })
+    schedule_open_buffer_refresh()
     return
   end
 
@@ -1114,6 +1131,7 @@ local function handle_session_event(payload)
         kind = 'background',
         status = kind.status == 'failed' and 'failed' or 'completed',
       })
+      schedule_open_buffer_refresh()
     end
     return
   end

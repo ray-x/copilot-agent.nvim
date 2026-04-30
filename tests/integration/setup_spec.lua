@@ -639,6 +639,66 @@ describe('workspace file reload', function()
     assert_eq('print(other)', lines[2])
   end)
 
+  it('checks open file buffers when the turn completes', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    vim.fn.writefile({ 'local value = 4', 'print(value)', 'return value' }, temp_file)
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    vim.wait(150)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq('local value = 4', lines[1])
+    assert_eq('print(value)', lines[2])
+  end)
+
+  it('checks open file buffers when a background task completes', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr = vim.api.nvim_get_current_buf()
+
+    vim.fn.writefile({ 'local value = 5', 'print(value)', 'return value' }, temp_file)
+    events.handle_session_event({
+      type = 'system.notification',
+      data = {
+        kind = {
+          type = 'agent_completed',
+          agentId = 'bg-1',
+        },
+      },
+    })
+    vim.wait(150)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq('local value = 5', lines[1])
+    assert_eq('print(value)', lines[2])
+  end)
+
+  it('checks all open clean file buffers when the turn completes', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr_one = vim.api.nvim_get_current_buf()
+    vim.cmd('vsplit ' .. vim.fn.fnameescape(temp_file_two))
+    local bufnr_two = vim.api.nvim_get_current_buf()
+    vim.cmd('buffer ' .. bufnr_one)
+
+    vim.fn.writefile({ 'local value = 6', 'print(value)', 'return value' }, temp_file)
+    vim.fn.writefile({ 'local other = 6', 'print(other)', 'return other' }, temp_file_two)
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    vim.wait(150)
+
+    local lines_one = vim.api.nvim_buf_get_lines(bufnr_one, 0, -1, false)
+    local lines_two = vim.api.nvim_buf_get_lines(bufnr_two, 0, -1, false)
+    assert_eq('local value = 6', lines_one[1])
+    assert_eq('print(value)', lines_one[2])
+    assert_eq('local other = 6', lines_two[1])
+    assert_eq('print(other)', lines_two[2])
+  end)
+
   it('does not reload externally changed buffers with unsaved edits during focus checks', function()
     vim.cmd('edit ' .. vim.fn.fnameescape(temp_file_two))
     local bufnr = vim.api.nvim_get_current_buf()

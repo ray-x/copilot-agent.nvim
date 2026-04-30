@@ -42,6 +42,91 @@ local active_prompt_id = nil
 local queued_prompt_requests = {}
 local queued_prompt_request_ids = {}
 local prompt_handoff_delay_ms = 20
+local intentionally_stopped_event_jobs = {}
+
+local function is_recoverable_stream_exit(code, stderr_message)
+  if code == 7 or code == 18 or code == 52 or code == 56 then
+    return true
+  end
+  if utils.is_connection_error(stderr_message) then
+    return true
+  end
+  return false
+end
+
+local function format_stream_exit_message(code, stderr_message)
+  if type(stderr_message) == 'string' and stderr_message ~= '' then
+    return stderr_message
+  end
+  return 'Event stream stopped with exit code ' .. tostring(code)
+end
+
+local function neovim_is_exiting()
+  local exiting = vim.v.exiting
+  if exiting == vim.NIL or exiting == nil then
+    return false
+  end
+  if type(exiting) == 'number' then
+    return exiting ~= 0
+  end
+  if type(exiting) == 'string' then
+    return exiting ~= '' and exiting ~= '0'
+  end
+  return true
+end
+
+function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
+  opts = opts or {}
+  local exit_message = format_stream_exit_message(code, stderr_message)
+
+  if opts.stopped_intentionally or code == 0 or state.session_id ~= session_id or neovim_is_exiting() then
+    return
+  end
+
+  if state.config.service.auto_start ~= true or not is_recoverable_stream_exit(code, stderr_message) then
+    append_entry('error', exit_message)
+    return
+  end
+
+  if state.event_stream_recovery_session_id == session_id then
+    return
+  end
+
+  state.event_stream_recovery_session_id = session_id
+  state.history_loading = false
+  state.chat_busy = false
+  stop_thinking_spinner()
+  refresh_statuslines()
+  append_entry('system', 'Event stream disconnected. Reconnecting...')
+
+  service.ensure_service_live(function(service_err)
+    if state.session_id ~= session_id then
+      state.event_stream_recovery_session_id = nil
+      return
+    end
+
+    if service_err then
+      state.event_stream_recovery_session_id = nil
+      append_entry('error', exit_message)
+      append_entry('error', 'Failed to recover event stream: ' .. service_err)
+      return
+    end
+
+    state.creating_session = true
+    require('copilot_agent.session').resume_session(session_id, function(_, resume_err)
+      if state.session_id ~= session_id then
+        state.event_stream_recovery_session_id = nil
+        return
+      end
+      state.event_stream_recovery_session_id = nil
+      if resume_err then
+        append_entry('error', 'Failed to recover event stream: ' .. resume_err)
+      end
+    end, {
+      guard_current_session_id = session_id,
+    })
+  end)
+end
 
 local function sanitize_permission_text(text)
   if type(text) ~= 'string' then
@@ -946,6 +1031,7 @@ end
 
 function M.stop_event_stream()
   if state.events_job_id then
+    intentionally_stopped_event_jobs[state.events_job_id] = true
     pcall(vim.fn.jobstop, state.events_job_id)
     state.events_job_id = nil
   end
@@ -974,6 +1060,7 @@ function M.start_event_stream(session_id)
   -- we accumulate chunks and drain them on a debounced timer.
   local uv = vim.uv or vim.loop
   local sse_batch = {}
+  local sse_stderr = {}
   local sse_batch_timer = uv.new_timer()
   local sse_batch_pending = false
   local SSE_BATCH_MS = 50
@@ -987,7 +1074,7 @@ function M.start_event_stream(session_id)
     end
   end
 
-  state.events_job_id = vim.fn.jobstart(args, {
+  local job_id = vim.fn.jobstart(args, {
     stdout_buffered = false,
     stderr_buffered = false,
     on_stdout = function(_, data)
@@ -999,33 +1086,45 @@ function M.start_event_stream(session_id)
     end,
     on_stderr = function(_, data)
       if data and not vim.tbl_isempty(data) then
-        local message = table.concat(data, '\n')
-        if message ~= '' then
-          vim.schedule(function()
-            append_entry('error', message)
-          end)
+        for _, line in ipairs(data) do
+          if type(line) == 'string' and line ~= '' then
+            table.insert(sse_stderr, line)
+          end
         end
       end
     end,
-    on_exit = function(_, code)
+    on_exit = function(exited_job_id, code)
       -- Drain any remaining chunks before handling exit.
       sse_batch_timer:stop()
       pcall(function()
         sse_batch_timer:close()
       end)
       vim.schedule(function()
+        local stopped_intentionally = intentionally_stopped_event_jobs[exited_job_id] == true
+        intentionally_stopped_event_jobs[exited_job_id] = nil
         -- Process any remaining buffered chunks.
         for _, chunk in ipairs(sse_batch) do
           handle_sse_chunk(chunk)
         end
         sse_batch = {}
-        state.events_job_id = nil
-        if code ~= 0 and state.session_id == session_id then
-          append_entry('error', 'Event stream stopped with exit code ' .. tostring(code))
+        if state.events_job_id == exited_job_id then
+          state.events_job_id = nil
         end
+        M._handle_event_stream_exit(session_id, code, table.concat(sse_stderr, '\n'), {
+          stopped_intentionally = stopped_intentionally,
+        })
       end)
     end,
   })
+  if job_id <= 0 then
+    pcall(function()
+      sse_batch_timer:close()
+    end)
+    state.history_loading = false
+    append_entry('error', 'failed to start event stream')
+    return
+  end
+  state.events_job_id = job_id
 end
 
 function M.reload_session_history(session_id, callback)

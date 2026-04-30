@@ -203,6 +203,76 @@ describe('M.setup', function()
   end)
 end)
 
+describe('service coordination', function()
+  local agent
+  local service
+  local original_stdpath
+  local temp_state_dir
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.service'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    service = require('copilot_agent.service')
+    original_stdpath = vim.fn.stdpath
+    temp_state_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_state_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'state' then
+        return temp_state_dir
+      end
+      return original_stdpath(kind)
+    end
+  end)
+
+  after_each(function()
+    vim.fn.stdpath = original_stdpath
+    pcall(service._release_spawn_lock)
+  end)
+
+  it('refreshes the managed base url from the shared addr file', function()
+    agent.state.base_url_managed = true
+    agent.state.config.base_url = 'http://127.0.0.1:1111'
+
+    service._save_service_addr('127.0.0.1:2222')
+
+    assert_true(service._refresh_service_addr_from_state())
+    assert_eq('http://127.0.0.1:2222', agent.state.config.base_url)
+  end)
+
+  it('does not override an explicit base url from the shared addr file', function()
+    agent.state.base_url_managed = false
+    agent.state.config.base_url = 'http://127.0.0.1:9999'
+
+    service._save_service_addr('127.0.0.1:2222')
+
+    assert_false(service._refresh_service_addr_from_state())
+    assert_eq('http://127.0.0.1:9999', agent.state.config.base_url)
+  end)
+
+  it('uses a startup lock to serialize service spawns', function()
+    local acquired1 = service._try_acquire_spawn_lock(1000)
+    local acquired2 = service._try_acquire_spawn_lock(1000)
+
+    service._release_spawn_lock()
+
+    local acquired3 = service._try_acquire_spawn_lock(1000)
+
+    assert_true(acquired1)
+    assert_false(acquired2)
+    assert_true(acquired3)
+  end)
+
+  it('reclaims stale startup locks', function()
+    local lock_dir = service._addr_lock_dir()
+    vim.fn.mkdir(lock_dir, 'p')
+    vim.fn.writefile({ '0', tostring(vim.fn.getpid()) }, lock_dir .. '/owner')
+
+    assert_true(service._try_acquire_spawn_lock(1000))
+  end)
+end)
+
 describe('user commands', function()
   before_each(function()
     package.loaded['copilot_agent'] = nil
@@ -239,7 +309,12 @@ describe('statusline API', function()
   before_each(function()
     package.loaded['copilot_agent'] = nil
     agent = require('copilot_agent')
-    agent.setup({ auto_create_session = false })
+    agent.setup({
+      auto_create_session = false,
+      service = {
+        auto_start = true,
+      },
+    })
   end)
 
   it('statusline_mode returns a string', function()
@@ -317,7 +392,12 @@ describe('model state sync', function()
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.events'] = nil
     agent = require('copilot_agent')
-    agent.setup({ auto_create_session = false })
+    agent.setup({
+      auto_create_session = false,
+      service = {
+        auto_start = true,
+      },
+    })
     events = require('copilot_agent.events')
   end)
 
@@ -382,7 +462,12 @@ describe('statusline config counts', function()
   before_each(function()
     package.loaded['copilot_agent'] = nil
     agent = require('copilot_agent')
-    agent.setup({ auto_create_session = false })
+    agent.setup({
+      auto_create_session = false,
+      service = {
+        auto_start = true,
+      },
+    })
   end)
 
   it('uses responsive labels for discovered instruction, agent, skill, and MCP counts', function()
@@ -667,6 +752,127 @@ describe('permission request prompts', function()
     end)
 
     assert_eq('Need a value? ', input_calls[1].prompt)
+  end)
+end)
+
+describe('event stream recovery', function()
+  local agent
+  local events
+  local service
+  local session
+  local original_ensure_service_live
+  local original_resume_session
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    package.loaded['copilot_agent.service'] = nil
+    agent = require('copilot_agent')
+    agent.setup({
+      auto_create_session = false,
+      service = {
+        auto_start = true,
+      },
+    })
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.event_stream_recovery_session_id = nil
+    events = require('copilot_agent.events')
+    service = require('copilot_agent.service')
+    session = require('copilot_agent.session')
+    original_ensure_service_live = service.ensure_service_live
+    original_resume_session = session.resume_session
+  end)
+
+  after_each(function()
+    service.ensure_service_live = original_ensure_service_live
+    session.resume_session = original_resume_session
+  end)
+
+  it('reconnects the active session after a recoverable stream disconnect', function()
+    local ensured = 0
+    local resumed_session_id
+
+    service.ensure_service_live = function(callback)
+      ensured = ensured + 1
+      callback(nil)
+    end
+    session.resume_session = function(session_id, callback)
+      resumed_session_id = session_id
+      if callback then
+        callback(session_id, nil)
+      end
+    end
+
+    events._handle_event_stream_exit(
+      'session-123',
+      18,
+      'curl: (18) transfer closed with outstanding read data remaining'
+    )
+
+    assert_eq(1, ensured)
+    assert_eq('session-123', resumed_session_id)
+    assert_eq('system', agent.state.entries[#agent.state.entries].kind)
+    assert_eq('Event stream disconnected. Reconnecting...', agent.state.entries[#agent.state.entries].content)
+    assert_eq(nil, agent.state.event_stream_recovery_session_id)
+  end)
+end)
+
+describe('session resume guards', function()
+  local agent
+  local http
+  local events
+  local session
+  local original_request
+  local original_start_event_stream
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    package.loaded['copilot_agent.http'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    http = require('copilot_agent.http')
+    events = require('copilot_agent.events')
+    original_request = http.request
+    original_start_event_stream = events.start_event_stream
+  end)
+
+  after_each(function()
+    http.request = original_request
+    events.start_event_stream = original_start_event_stream
+  end)
+
+  it('ignores stale recovery resumes after the active session changes', function()
+    local started_session_id
+    local callback_error
+
+    agent.state.session_id = 'session-a'
+    http.request = function(_, _, _, callback)
+      agent.state.session_id = 'session-b'
+      callback({
+        sessionId = 'session-a',
+        workingDirectory = '/tmp/project-a',
+        summary = 'Recovered session',
+      }, nil)
+    end
+    events.start_event_stream = function(session_id)
+      started_session_id = session_id
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.resume_session('session-a', function(_, err)
+      callback_error = err
+    end, {
+      guard_current_session_id = 'session-a',
+    })
+
+    assert_eq('session-b', agent.state.session_id)
+    assert_eq(nil, started_session_id)
+    assert_eq('resume cancelled: active session changed', callback_error)
   end)
 end)
 

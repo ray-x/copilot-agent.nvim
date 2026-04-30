@@ -121,19 +121,42 @@ local function addr_state_file()
   return vim.fn.stdpath('state') .. '/copilot-agent.addr'
 end
 
-local function save_service_addr(addr)
-  pcall(function()
-    local f = io.open(addr_state_file(), 'w')
-    if f then
-      f:write(addr)
-      f:close()
-    end
-  end)
+local function addr_lock_dir()
+  return vim.fn.stdpath('state') .. '/copilot-agent.addr.lock'
 end
 
-local function load_service_addr()
+local function addr_lock_owner_file()
+  return addr_lock_dir() .. '/owner'
+end
+
+local function now_ms()
+  if uv and uv.hrtime then
+    return math.floor(uv.hrtime() / 1e6)
+  end
+  return os.time() * 1000
+end
+
+local function interval_settings()
+  local timeout_ms = tonumber(state.config.service.startup_timeout_ms) or defaults.service.startup_timeout_ms
+  local interval_ms = tonumber(state.config.service.startup_poll_interval_ms) or defaults.service.startup_poll_interval_ms
+  return timeout_ms, interval_ms
+end
+
+local function write_text_file(path, content)
+  local ok, err = pcall(function()
+    local f = assert(io.open(path, 'w'))
+    f:write(content)
+    f:close()
+  end)
+  if ok then
+    return true
+  end
+  return nil, err
+end
+
+local function read_first_line(path)
   local ok, data = pcall(function()
-    local f = io.open(addr_state_file(), 'r')
+    local f = io.open(path, 'r')
     if not f then
       return nil
     end
@@ -142,6 +165,95 @@ local function load_service_addr()
     return v
   end)
   return ok and data or nil
+end
+
+local function lock_started_at_ms()
+  local line = read_first_line(addr_lock_owner_file())
+  if line and line:find('^%d+$') then
+    return tonumber(line)
+  end
+  local stat = uv.fs_stat(addr_lock_dir())
+  if not stat or not stat.mtime then
+    return nil
+  end
+  if type(stat.mtime) == 'number' then
+    return math.floor(stat.mtime * 1000)
+  end
+  if type(stat.mtime) == 'table' then
+    local sec = stat.mtime.sec or stat.mtime.tv_sec or stat.mtime[1] or 0
+    local nsec = stat.mtime.nsec or stat.mtime.tv_nsec or stat.mtime[2] or 0
+    return (sec * 1000) + math.floor(nsec / 1e6)
+  end
+  return nil
+end
+
+local function save_service_addr(addr)
+  write_text_file(addr_state_file(), addr)
+end
+
+local function load_service_addr()
+  return read_first_line(addr_state_file())
+end
+
+local function refresh_service_addr_from_state()
+  if state.base_url_managed == false then
+    return false
+  end
+  local saved_addr = load_service_addr()
+  if saved_addr and saved_addr ~= '' then
+    state.config.base_url = 'http://' .. saved_addr
+    return true
+  end
+  return false
+end
+
+local function release_spawn_lock()
+  pcall(uv.fs_unlink, addr_lock_owner_file())
+  pcall(uv.fs_rmdir, addr_lock_dir())
+end
+
+local function try_acquire_spawn_lock(stale_after_ms)
+  local ok, err = uv.fs_mkdir(addr_lock_dir(), 448)
+  if ok then
+    local write_ok, write_err = write_text_file(addr_lock_owner_file(), string.format('%d\n%d\n', now_ms(), vim.fn.getpid()))
+    if not write_ok then
+      release_spawn_lock()
+      return nil, 'failed to write service lock metadata: ' .. tostring(write_err)
+    end
+    return true
+  end
+
+  local message = tostring(err or '')
+  if not message:find('EEXIST', 1, true) then
+    return nil, 'failed to create service lock: ' .. message
+  end
+
+  local started_at_ms = lock_started_at_ms()
+  if started_at_ms and (now_ms() - started_at_ms) > stale_after_ms then
+    release_spawn_lock()
+    ok, err = uv.fs_mkdir(addr_lock_dir(), 448)
+    if ok then
+      local write_ok, write_err = write_text_file(addr_lock_owner_file(), string.format('%d\n%d\n', now_ms(), vim.fn.getpid()))
+      if not write_ok then
+        release_spawn_lock()
+        return nil, 'failed to write service lock metadata: ' .. tostring(write_err)
+      end
+      return true
+    end
+    message = tostring(err or '')
+    if not message:find('EEXIST', 1, true) then
+      return nil, 'failed to create service lock: ' .. message
+    end
+  end
+
+  return false
+end
+
+local function lock_wait_delay_ms(interval_ms)
+  local base = math.max(25, math.floor(interval_ms / 2))
+  local span = math.max(25, interval_ms)
+  local entropy = ((uv and uv.hrtime and uv.hrtime()) or 0) + (vim.fn.getpid() * 131)
+  return base + (entropy % span)
 end
 
 function M.remember_service_output(data)
@@ -168,6 +280,41 @@ function M.last_service_output()
   return state.service_output[#state.service_output]
 end
 
+local function check_service_health(callback)
+  refresh_service_addr_from_state()
+  local http = require('copilot_agent.http')
+  http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
+    callback(err == nil and status and status < 400, err, status)
+  end)
+end
+
+function M.ensure_service_live(callback)
+  if type(callback) ~= 'function' then
+    return
+  end
+
+  check_service_health(function(healthy, err, status)
+    if healthy then
+      callback(nil)
+      return
+    end
+
+    if state.config.service.auto_start ~= true then
+      local message = err
+      if not message then
+        message = 'service health check failed'
+        if status then
+          message = message .. ' with status ' .. tostring(status)
+        end
+      end
+      callback(message)
+      return
+    end
+
+    M.ensure_service_running(callback)
+  end)
+end
+
 function M.ensure_service_running(callback)
   if type(callback) ~= 'function' then
     return
@@ -183,10 +330,15 @@ function M.ensure_service_running(callback)
     return
   end
 
-  -- Lazy-require to break circular dependency with render/init.
-  local http = require('copilot_agent.http')
+  local timeout_ms, interval_ms = interval_settings()
+  local deadline_ms = now_ms() + timeout_ms
+  local spawn_lock_owned = false
 
   local function finish(err)
+    if spawn_lock_owned then
+      release_spawn_lock()
+      spawn_lock_owned = false
+    end
     state.service_starting = false
     local callbacks = state.pending_service_callbacks
     state.pending_service_callbacks = {}
@@ -196,12 +348,8 @@ function M.ensure_service_running(callback)
   end
 
   local function poll_service_health(attempts_left)
-    if state.service_addr_known then
-      finish(nil)
-      return
-    end
-    http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
-      if err == nil and status and status < 400 then
+    check_service_health(function(healthy)
+      if healthy then
         finish(nil)
         return
       end
@@ -216,7 +364,111 @@ function M.ensure_service_running(callback)
       end
       vim.defer_fn(function()
         poll_service_health(attempts_left - 1)
-      end, state.config.service.startup_poll_interval_ms)
+      end, interval_ms)
+    end)
+  end
+
+  local function start_service_with_lock()
+    check_service_health(function(healthy)
+      if healthy then
+        finish(nil)
+        return
+      end
+
+      if state.service_job_id then
+        local attempts = math.max(1, math.floor(timeout_ms / interval_ms))
+        poll_service_health(attempts)
+        return
+      end
+
+      local command = M.service_command()
+      if command == nil or command == '' or (type(command) == 'table' and vim.tbl_isempty(command)) then
+        finish('service.command is empty')
+        return
+      end
+
+      -- Lazy-require append_entry to avoid circular dependency with render.
+      local function append_entry(kind, content)
+        local init = require('copilot_agent')
+        if init._append_entry then
+          init._append_entry(kind, content)
+        end
+      end
+
+      local service_job_id = vim.fn.jobstart(command, {
+        cwd = M.service_cwd(),
+        env = state.config.service.env,
+        detach = state.config.service.detach and 1 or 0,
+        stdout_buffered = false,
+        stderr_buffered = false,
+        on_stdout = function(_, data)
+          M.remember_service_output(data)
+        end,
+        on_stderr = function(_, data)
+          M.remember_service_output(data)
+        end,
+        on_exit = function(job_id, code)
+          vim.schedule(function()
+            if state.service_job_id == job_id then
+              state.service_job_id = nil
+            end
+            if state.service_starting then
+              local message = 'service exited before becoming ready with code ' .. tostring(code)
+              local output = M.last_service_output()
+              if output then
+                message = message .. ': ' .. output
+              end
+              finish(message)
+              return
+            end
+            if code ~= 0 then
+              local message = 'Service exited with code ' .. tostring(code)
+              local output = M.last_service_output()
+              if output then
+                message = message .. ': ' .. output
+              end
+              append_entry('error', message)
+            end
+          end)
+        end,
+      })
+      if service_job_id <= 0 then
+        finish('failed to start service command: ' .. vim.inspect(command))
+        return
+      end
+
+      state.service_job_id = service_job_id
+      append_entry('system', 'Starting service: ' .. (type(command) == 'table' and table.concat(command, ' ') or command))
+
+      local attempts = math.max(1, math.floor(timeout_ms / interval_ms))
+      poll_service_health(attempts)
+    end)
+  end
+
+  local function wait_for_service_start()
+    check_service_health(function(healthy)
+      if healthy then
+        finish(nil)
+        return
+      end
+
+      local acquired, acquire_err = try_acquire_spawn_lock(timeout_ms)
+      if acquire_err then
+        finish(acquire_err)
+        return
+      end
+      if acquired then
+        spawn_lock_owned = true
+        start_service_with_lock()
+        return
+      end
+
+      if now_ms() >= deadline_ms then
+        finish('timed out waiting for another Neovim instance to start the service')
+        return
+      end
+
+      vim.defer_fn(wait_for_service_start, lock_wait_delay_ms(interval_ms))
     end)
   end
 
@@ -224,95 +476,38 @@ function M.ensure_service_running(callback)
   state.service_output = {}
   state.service_addr_known = false
 
-  -- Restore the address from a previous (detached) session so the health check
-  -- hits the right port even when port_range is set.
-  local saved_addr = load_service_addr()
-  if saved_addr and saved_addr ~= '' then
-    local current = state.config.base_url or ''
-    -- Only restore if the user has not explicitly configured a different base_url.
-    if current == '' or current == 'http://' .. (defaults.base_url or '') or current == defaults.base_url then
-      state.config.base_url = 'http://' .. saved_addr
-    end
-  end
+  refresh_service_addr_from_state()
 
-  http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, health_err, status)
-    if health_err == nil and status and status < 400 then
+  check_service_health(function(healthy)
+    if healthy then
       finish(nil)
       return
     end
 
     if state.service_job_id then
-      local timeout_ms = tonumber(state.config.service.startup_timeout_ms) or defaults.service.startup_timeout_ms
-      local interval_ms = tonumber(state.config.service.startup_poll_interval_ms) or defaults.service.startup_poll_interval_ms
       local attempts = math.max(1, math.floor(timeout_ms / interval_ms))
       poll_service_health(attempts)
       return
     end
-
-    local command = M.service_command()
-    if command == nil or command == '' or (type(command) == 'table' and vim.tbl_isempty(command)) then
-      finish('service.command is empty')
+    local acquired, acquire_err = try_acquire_spawn_lock(timeout_ms)
+    if acquire_err then
+      finish(acquire_err)
       return
     end
-
-    -- Lazy-require append_entry to avoid circular dependency with render.
-    local function append_entry(kind, content)
-      local init = require('copilot_agent')
-      if init._append_entry then
-        init._append_entry(kind, content)
-      end
-    end
-
-    local service_job_id = vim.fn.jobstart(command, {
-      cwd = M.service_cwd(),
-      env = state.config.service.env,
-      detach = state.config.service.detach and 1 or 0,
-      stdout_buffered = false,
-      stderr_buffered = false,
-      on_stdout = function(_, data)
-        M.remember_service_output(data)
-      end,
-      on_stderr = function(_, data)
-        M.remember_service_output(data)
-      end,
-      on_exit = function(job_id, code)
-        vim.schedule(function()
-          if state.service_job_id == job_id then
-            state.service_job_id = nil
-          end
-          if state.service_starting then
-            local message = 'service exited before becoming ready with code ' .. tostring(code)
-            local output = M.last_service_output()
-            if output then
-              message = message .. ': ' .. output
-            end
-            finish(message)
-            return
-          end
-          if code ~= 0 then
-            local message = 'Service exited with code ' .. tostring(code)
-            local output = M.last_service_output()
-            if output then
-              message = message .. ': ' .. output
-            end
-            append_entry('error', message)
-          end
-        end)
-      end,
-    })
-    if service_job_id <= 0 then
-      finish('failed to start service command: ' .. vim.inspect(command))
+    if acquired then
+      spawn_lock_owned = true
+      start_service_with_lock()
       return
     end
-
-    state.service_job_id = service_job_id
-    append_entry('system', 'Starting service: ' .. (type(command) == 'table' and table.concat(command, ' ') or command))
-
-    local timeout_ms = tonumber(state.config.service.startup_timeout_ms) or defaults.service.startup_timeout_ms
-    local interval_ms = tonumber(state.config.service.startup_poll_interval_ms) or defaults.service.startup_poll_interval_ms
-    local attempts = math.max(1, math.floor(timeout_ms / interval_ms))
-    poll_service_health(attempts)
+    wait_for_service_start()
   end)
 end
+
+M._save_service_addr = save_service_addr
+M._load_service_addr = load_service_addr
+M._refresh_service_addr_from_state = refresh_service_addr_from_state
+M._try_acquire_spawn_lock = try_acquire_spawn_lock
+M._release_spawn_lock = release_spawn_lock
+M._addr_lock_dir = addr_lock_dir
 
 return M

@@ -76,6 +76,7 @@ local state = {
   config = vim.deepcopy(defaults),
   session_id = nil,
   events_job_id = nil,
+  event_stream_recovery_session_id = nil,
   sse_partial = '',
   sse_event = { event = 'message', data = {} },
   entries = {},
@@ -87,6 +88,7 @@ local state = {
   service_job_id = nil,
   service_starting = false,
   service_addr_known = false, -- set true when COPILOT_AGENT_ADDR= line received
+  base_url_managed = true, -- true unless setup() was given an explicit base_url
   pending_service_callbacks = {},
   service_output = {},
   model_cache = {},

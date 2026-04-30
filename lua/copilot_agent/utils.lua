@@ -141,6 +141,9 @@ function M.is_connection_error(err)
     "Couldn't connect to server",
     'Connection refused',
     'Empty reply from server',
+    'transfer closed with outstanding read data remaining',
+    'Connection reset by peer',
+    'Recv failure',
   }) do
     if err:find(pattern, 1, true) then
       return true

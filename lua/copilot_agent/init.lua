@@ -44,6 +44,7 @@ end
 function M.setup(opts)
   state.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
   state.config.base_url = normalize_base_url(state.config.base_url)
+  state.base_url_managed = opts == nil or opts.base_url == nil
   -- Initialize runtime permission mode from config.
   state.permission_mode = state.config.permission_mode or 'interactive'
 

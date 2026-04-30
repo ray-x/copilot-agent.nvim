@@ -204,7 +204,8 @@ local function on_session_ready(session_id, err)
   end
 end
 
-function M.resume_session(session_id, callback)
+function M.resume_session(session_id, callback, opts)
+  opts = opts or {}
   local requested_wd = working_directory()
   log(string.format('resume_session request id=%s cwd=%s', format_session_id(session_id), requested_wd), vim.log.levels.DEBUG)
   request('POST', '/sessions', {
@@ -223,13 +224,36 @@ function M.resume_session(session_id, callback)
       notify('Failed to resume session: ' .. err, vim.log.levels.ERROR)
       append_entry('error', 'Failed to resume session: ' .. err)
       on_session_ready(nil, err)
+      if callback then
+        callback(nil, err)
+      end
       return
     end
-    state.session_id = response and response.sessionId or nil
-    if not state.session_id then
+    local resumed_session_id = response and response.sessionId or nil
+    if opts.guard_current_session_id and state.session_id ~= nil and state.session_id ~= opts.guard_current_session_id then
+      local message = 'resume cancelled: active session changed'
+      log(
+        string.format(
+          'resume_session ignored stale response id=%s current=%s expected=%s',
+          format_session_id(resumed_session_id),
+          format_session_id(state.session_id),
+          format_session_id(opts.guard_current_session_id)
+        ),
+        vim.log.levels.DEBUG
+      )
+      if callback then
+        callback(nil, message)
+      end
+      return
+    end
+    state.session_id = resumed_session_id
+    if not resumed_session_id then
       local message = 'Server did not return a sessionId'
       append_entry('error', message)
       on_session_ready(nil, message)
+      if callback then
+        callback(nil, message)
+      end
       return
     end
     log(
@@ -246,7 +270,7 @@ function M.resume_session(session_id, callback)
     start_event_stream(state.session_id)
     on_session_ready(state.session_id)
     if callback then
-      callback(state.session_id)
+      callback(state.session_id, nil)
     end
   end)
 end

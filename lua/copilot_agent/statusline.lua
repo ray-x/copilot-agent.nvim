@@ -58,8 +58,36 @@ function M.statusline_model()
   return label
 end
 
+local function active_background_task_count()
+  local count = 0
+  for _, task in pairs(state.background_tasks or {}) do
+    if type(task) == 'table' and (task.status == 'running' or task.status == 'inbox' or task.status == 'idle') then
+      count = count + 1
+    end
+  end
+  return count
+end
+
 function M.statusline_busy()
-  return state.chat_busy and '⏳' or '✓'
+  if state.pending_user_input then
+    return '❓input'
+  end
+
+  local pending_sync = (tonumber(state.pending_checkpoint_ops) or 0) + (tonumber(state.pending_workspace_updates) or 0)
+  if state.history_loading or state.event_stream_recovery_session_id or pending_sync > 0 then
+    return '📝sync'
+  end
+
+  if state.chat_busy or (state.active_tool and state.active_tool ~= '') or (state.current_intent and state.current_intent ~= '') then
+    return '⏳working'
+  end
+
+  local active_background = active_background_task_count()
+  if active_background > 0 then
+    return string.format('🧩%d %s', active_background, active_background == 1 and 'task' or 'tasks')
+  end
+
+  return '✅ready'
 end
 
 -- Format token count compactly: 1234 → "1k", 200000 → "200k"

@@ -336,7 +336,7 @@ local function input_omnifunc(findstart, base)
     for _, name in ipairs(discovered_agent_names()) do
       if query == '' or vim.startswith(name:lower(), query) then
         table.insert(items, {
-          word = '/agent ' .. name,
+          word = name,
           abbr = name,
           menu = '[agent]',
         })

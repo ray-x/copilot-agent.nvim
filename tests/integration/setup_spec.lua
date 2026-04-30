@@ -319,6 +319,14 @@ describe('statusline API', function()
     })
   end)
 
+  after_each(function()
+    agent.state.chat_busy = false
+    agent.state.pending_checkpoint_ops = 0
+    agent.state.pending_workspace_updates = 0
+    agent.state.background_tasks = {}
+    agent.state.pending_user_input = nil
+  end)
+
   it('statusline_mode returns a string', function()
     assert_eq('string', type(agent.statusline_mode()))
   end)
@@ -329,6 +337,28 @@ describe('statusline API', function()
 
   it('statusline_busy returns a string', function()
     assert_eq('string', type(agent.statusline_busy()))
+  end)
+
+  it('statusline_busy reports ready, working, syncing, active tasks, and input-needed states', function()
+    assert_eq('✅ready', agent.statusline_busy())
+
+    agent.state.chat_busy = true
+    assert_eq('⏳working', agent.statusline_busy())
+
+    agent.state.chat_busy = false
+    agent.state.pending_checkpoint_ops = 1
+    assert_eq('📝sync', agent.statusline_busy())
+
+    agent.state.pending_checkpoint_ops = 0
+    agent.state.background_tasks = {
+      ['subagent:task-1'] = { status = 'running' },
+      ['background:task-2'] = { status = 'idle' },
+    }
+    assert_eq('🧩2 tasks', agent.statusline_busy())
+
+    agent.state.background_tasks = {}
+    agent.state.pending_user_input = { data = { request = { id = 'req-1' } } }
+    assert_eq('❓input', agent.statusline_busy())
   end)
 
   it('statusline returns a non-empty string', function()
@@ -556,11 +586,13 @@ describe('workspace file reload', function()
       },
     })
 
+    assert_eq('📝sync', agent.statusline_busy())
     vim.wait(100)
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert_eq('local value = 2', lines[1])
     assert_eq('print(value)', lines[2])
+    assert_eq('✅ready', agent.statusline_busy())
     assert_true(#notifications > 0)
     assert_true(notifications[#notifications].message:find('Agent reloaded:', 1, true) ~= nil)
     assert_true(notifications[#notifications].message:find('+1', 1, true) ~= nil)
@@ -1824,11 +1856,11 @@ describe('chat input behavior', function()
     local mcp_words = completion_words('/mcp ')
     local instruction_words = completion_words('/instructions ')
 
-    assert_true(vim.tbl_contains(agent_words, '/agent Code Review Engineer'))
-    assert_true(vim.tbl_contains(agent_words, '/agent Document Update Agent'))
-    assert_true(vim.tbl_contains(agent_words, '/agent Go Quality Engineer'))
-    assert_true(vim.tbl_contains(agent_words, '/agent Selene Lua Quality Engineer'))
-    assert_true(vim.tbl_contains(inline_agent_words, '/agent Code Review Engineer'))
+    assert_true(vim.tbl_contains(agent_words, 'Code Review Engineer'))
+    assert_true(vim.tbl_contains(agent_words, 'Document Update Agent'))
+    assert_true(vim.tbl_contains(agent_words, 'Go Quality Engineer'))
+    assert_true(vim.tbl_contains(agent_words, 'Selene Lua Quality Engineer'))
+    assert_true(vim.tbl_contains(inline_agent_words, 'Code Review Engineer'))
     assert_true(vim.tbl_contains(skill_words, '/skills nvim-integration-tests'))
     assert_true(vim.tbl_contains(skill_words, '/skills selene-check'))
     assert_true(vim.tbl_contains(model_words, '/model gpt-5.4'))
@@ -1893,8 +1925,35 @@ describe('chat input behavior', function()
       vim.tbl_map(function(item)
         return item.word
       end, completions[2].items),
-      '/agent Code Review Engineer'
+      'Code Review Engineer'
     ))
+  end)
+
+  it('replaces /agent completion text with only the selected agent name', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local line = prefix .. '/agent Git'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local replace_start = input._input_omnifunc(1, '')
+    local items = input._input_omnifunc(0, '')
+    local selected
+    for _, item in ipairs(items) do
+      if item.word == 'Git Commit Agent' then
+        selected = item.word
+        break
+      end
+    end
+
+    assert_eq(#prefix, replace_start)
+    assert_eq('Git Commit Agent', selected)
+
+    local replaced = line:sub(1, replace_start) .. selected .. line:sub(#line + 1)
+    assert_eq(prefix .. 'Git Commit Agent', replaced)
   end)
 end)
 
@@ -2002,6 +2061,11 @@ describe('checkpoint id assignment', function()
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false, notify = false })
     agent.state.session_id = 'session-123'
+    agent.state.chat_busy = false
+    agent.state.pending_checkpoint_ops = 0
+    agent.state.pending_workspace_updates = 0
+    agent.state.background_tasks = {}
+    agent.state.pending_user_input = nil
     events = require('copilot_agent.events')
     checkpoints = require('copilot_agent.checkpoints')
     original_create = checkpoints.create
@@ -2013,6 +2077,7 @@ describe('checkpoint id assignment', function()
 
   it('assigns the checkpoint id after assistant.turn_end for the active turn', function()
     local captured
+    local checkpoint_callback
     agent.state.entries = {
       { kind = 'user', content = 'prompt without id yet' },
       { kind = 'assistant', content = 'final answer' },
@@ -2029,8 +2094,10 @@ describe('checkpoint id assignment', function()
         prompt = prompt,
         opts = opts,
       }
-      agent.state.entries[opts.entry_index].checkpoint_id = 'v001'
-      callback(nil, 'v001', 'deadbeef')
+      checkpoint_callback = function()
+        agent.state.entries[opts.entry_index].checkpoint_id = 'v001'
+        callback(nil, 'v001', 'deadbeef')
+      end
     end
 
     events.handle_session_event({
@@ -2038,11 +2105,15 @@ describe('checkpoint id assignment', function()
       data = {},
     })
 
+    assert_eq('📝sync', agent.statusline_busy())
+    checkpoint_callback()
+
     assert_eq('session-123', captured.session_id)
     assert_eq('prompt without id yet', captured.prompt)
     assert_eq(1, captured.opts.entry_index)
     assert_eq('v001', agent.state.entries[1].checkpoint_id)
     assert_eq(nil, agent.state.pending_checkpoint_turn)
+    assert_eq('✅ready', agent.statusline_busy())
   end)
 
   it('records the assistant message id with the completed turn checkpoint', function()
@@ -2072,5 +2143,47 @@ describe('checkpoint id assignment', function()
     })
 
     assert_eq('assistant-42', captured.assistant_message_id)
+  end)
+
+  it('tracks background tasks until they complete', function()
+    events.handle_session_event({
+      type = 'subagent.started',
+      data = {
+        toolCallId = 'task-1',
+        agentDisplayName = 'Document Update Agent',
+      },
+    })
+    assert_eq('🧩1 task', agent.statusline_busy())
+
+    events.handle_session_event({
+      type = 'system.notification',
+      data = {
+        kind = {
+          type = 'agent_idle',
+          agentId = 'bg-1',
+          description = 'Git Commit Agent',
+        },
+      },
+    })
+    assert_eq('🧩2 tasks', agent.statusline_busy())
+
+    events.handle_session_event({
+      type = 'subagent.completed',
+      data = {
+        toolCallId = 'task-1',
+      },
+    })
+    assert_eq('🧩1 task', agent.statusline_busy())
+
+    events.handle_session_event({
+      type = 'system.notification',
+      data = {
+        kind = {
+          type = 'agent_completed',
+          agentId = 'bg-1',
+        },
+      },
+    })
+    assert_eq('✅ready', agent.statusline_busy())
   end)
 end)

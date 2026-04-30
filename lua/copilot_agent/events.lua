@@ -77,6 +77,52 @@ local function assign_history_checkpoint_id(assistant_message_id)
   end
 end
 
+local function first_non_empty(...)
+  for i = 1, select('#', ...) do
+    local value = select(i, ...)
+    if type(value) == 'string' and value ~= '' then
+      return value
+    end
+  end
+  return nil
+end
+
+local active_background_task_status = {
+  running = true,
+  inbox = true,
+  idle = true,
+}
+
+local function reset_live_activity_state()
+  state.pending_checkpoint_ops = 0
+  state.pending_workspace_updates = 0
+  state.background_tasks = {}
+end
+
+local function set_background_task(key, opts)
+  if type(key) ~= 'string' or key == '' then
+    return
+  end
+
+  opts = opts or {}
+  local status = opts.status
+  if not active_background_task_status[status] then
+    if state.background_tasks[key] ~= nil then
+      state.background_tasks[key] = nil
+      refresh_statuslines()
+    end
+    return
+  end
+
+  local task = state.background_tasks[key] or { id = key }
+  task.kind = opts.kind or task.kind
+  task.status = status
+  task.title = first_non_empty(opts.title, task.title)
+  task.description = first_non_empty(opts.description, task.description)
+  state.background_tasks[key] = task
+  refresh_statuslines()
+end
+
 -- Show a diff in a floating window.
 -- Tries the configured external diff command (e.g. delta) in a terminal buffer;
 -- falls back to a plain diff buffer if the command is unavailable.
@@ -646,6 +692,7 @@ local function handle_host_event(event_name, payload)
     state.mcp_count = 0
     state.session_name = nil
     state.pending_user_input = nil
+    reset_live_activity_state()
     reset_prompt_state()
     refresh_statuslines()
     append_entry('system', 'Session disconnected')
@@ -683,6 +730,7 @@ local function handle_host_event(event_name, payload)
     state.history_loading = false
     state.history_checkpoint_ids = nil
     state.history_pending_user_entries = {}
+    refresh_statuslines()
     render_chat()
     scroll_to_bottom()
   end
@@ -948,10 +996,13 @@ local function handle_session_event(payload)
       local pending_turn = state.pending_checkpoint_turn
       if pending_turn and pending_turn.session_id == state.session_id then
         state.pending_checkpoint_turn = nil
+        state.pending_checkpoint_ops = state.pending_checkpoint_ops + 1
         checkpoints.create(state.session_id, pending_turn.prompt, function(checkpoint_err)
+          state.pending_checkpoint_ops = math.max((tonumber(state.pending_checkpoint_ops) or 1) - 1, 0)
           if checkpoint_err then
             notify('Checkpoint unavailable: ' .. checkpoint_err, vim.log.levels.WARN)
           end
+          refresh_statuslines()
           render_chat()
         end, {
           assistant_message_id = pending_turn.assistant_message_id,
@@ -966,6 +1017,32 @@ local function handle_session_event(payload)
     state.current_intent = nil
     refresh_statuslines()
     render_chat() -- immediate full render on turn completion
+    return
+  end
+
+  if event_type == 'subagent.started' then
+    set_background_task('subagent:' .. (data.toolCallId or ''), {
+      kind = 'subagent',
+      status = 'running',
+      title = first_non_empty(data.agentDisplayName, data.agentName, 'Subagent'),
+      description = data.agentDescription,
+    })
+    return
+  end
+
+  if event_type == 'subagent.completed' then
+    set_background_task('subagent:' .. (data.toolCallId or ''), {
+      kind = 'subagent',
+      status = 'completed',
+    })
+    return
+  end
+
+  if event_type == 'subagent.failed' then
+    set_background_task('subagent:' .. (data.toolCallId or ''), {
+      kind = 'subagent',
+      status = 'failed',
+    })
     return
   end
 
@@ -1011,6 +1088,36 @@ local function handle_session_event(payload)
     return
   end
 
+  if event_type == 'system.notification' then
+    local kind = data.kind or {}
+    local key = first_non_empty(kind.agentId, kind.entryId)
+    if not key then
+      return
+    end
+
+    if kind.type == 'agent_idle' then
+      set_background_task('background:' .. key, {
+        kind = 'background',
+        status = 'idle',
+        title = first_non_empty(kind.description, kind.summary, kind.agentType, 'Background agent'),
+        description = kind.description,
+      })
+    elseif kind.type == 'new_inbox_message' then
+      set_background_task('background:' .. key, {
+        kind = 'background',
+        status = 'inbox',
+        title = first_non_empty(kind.description, kind.summary, kind.agentType, 'Background agent'),
+        description = kind.description,
+      })
+    elseif kind.type == 'agent_completed' then
+      set_background_task('background:' .. key, {
+        kind = 'background',
+        status = kind.status == 'failed' and 'failed' or 'completed',
+      })
+    end
+    return
+  end
+
   if event_type == 'session.workspace_file_changed' then
     local op = data.operation or 'update'
     local rel_path = data.path or ''
@@ -1022,6 +1129,8 @@ local function handle_session_event(payload)
     local wd = working_directory()
     local abs_path = vim.fn.fnamemodify(wd .. '/' .. rel_path, ':p')
 
+    state.pending_workspace_updates = state.pending_workspace_updates + 1
+    refresh_statuslines()
     vim.schedule(function()
       -- Find any loaded buffer for this file.
       local bufnr_match = nil
@@ -1052,6 +1161,8 @@ local function handle_session_event(payload)
         notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
       end
       check_open_buffers_for_external_changes()
+      state.pending_workspace_updates = math.max((tonumber(state.pending_workspace_updates) or 1) - 1, 0)
+      refresh_statuslines()
     end)
     return
   end
@@ -1137,9 +1248,11 @@ function M.start_event_stream(session_id)
   M.stop_event_stream()
   state.sse_event = { event = 'message', data = {} }
   state.sse_partial = ''
+  reset_live_activity_state()
   state.history_loading = true -- suppress rendering until host.history_done arrives
   state.history_pending_user_entries = {}
   preload_history_checkpoint_ids(session_id)
+  refresh_statuslines()
 
   local args = {
     state.config.curl_bin,

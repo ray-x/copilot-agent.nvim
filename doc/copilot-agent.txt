@@ -442,7 +442,7 @@ Each function returns a short display string and is safe to call at any time.
 
   require("copilot_agent").statusline_mode()        -- [ask] / [plan] / [agent] / [autopilot]
   require("copilot_agent").statusline_model()       -- claude-sonnet-4.6
-  require("copilot_agent").statusline_busy()        -- ✓ or ⏳
+  require("copilot_agent").statusline_busy()        -- ✅ready / ⏳working / 📝sync / 🧩2 tasks / ❓input
   require("copilot_agent").statusline_permission()  -- 🔐interactive / ✅approve-all / …
   require("copilot_agent").statusline_attachments() -- 📎3 (only when N > 0)
   require("copilot_agent").statusline_tool()        -- 🔧 read_file (active tool)

@@ -122,6 +122,9 @@ local state = {
   history_checkpoint_ids = nil, -- replay mapping keyed by assistant message id for completed turns
   history_pending_user_entries = {}, -- replayed user entries waiting for their completed-turn checkpoint label
   pending_user_input = nil, -- last unanswered ask_user request (for retry on dismiss)
+  pending_checkpoint_ops = 0, -- completed turns still waiting on checkpoint persistence
+  pending_workspace_updates = 0, -- file updates still being applied in Neovim
+  background_tasks = {}, -- non-terminal background/subagent tasks still in flight
   -- Live agent activity (updated from SSE events, shown in statusline)
   current_model = nil, -- model ID from SDK events (overrides config default in display)
   active_tool = nil, -- name of currently executing tool (nil when idle)

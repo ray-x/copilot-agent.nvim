@@ -357,6 +357,8 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 
 The input buffer supports built-in slash commands handled by the plugin before the text is sent as a normal Copilot prompt. Type `/` and press `<Tab>` to browse and complete the available commands. Some of the commands are still experimental.
 
+`/agent` completion is optimized for inline prompting: selecting an agent suggestion inserts the agent name without the `/agent` prefix, so `/agent Git Commit Agent` completion becomes `Git Commit Agent`.
+
 Supported slash commands:
 
 | Command                | Arguments                  | What it does                                                                        |
@@ -519,6 +521,20 @@ The action builds a prompt from the selected text, file path, and line range, th
 
 Expose Copilot state in your statusline. Each function returns a short string.
 
+When your cursor is in a Copilot Agent window, the plugin replaces that window's local statusline with its own statusline. This applies to both the chat window and the input window, so your normal global statusline stays visible everywhere else.
+
+Default examples:
+
+```text
+input window
+🤖agent (loop·approve-all)  ✅approve-all  ✅ready  default  󱃕 Instruction: 0 󱜙 Agent: 0 󱨚 Skill: 0  MCP: 0  (? for help)
+
+chat window
+🤖agent (loop·approve-all)  ✅approve-all  ✅ready  default  󱃕 Instruction: 0 󱜙 Agent: 0 󱨚 Skill: 0  MCP: 0  session: [#20260501 0905]
+```
+
+As the session becomes active, the statusline updates live with readiness (`⏳working`, `📝sync`, `🧩2 tasks`, `❓input`, `✅ready`), the current tool/intent, token usage, pending attachments, and the active session label.
+
 ```lua
 -- lualine
 require("lualine").setup {
@@ -526,7 +542,7 @@ require("lualine").setup {
     lualine_x = {
       require("copilot_agent").statusline_mode,        -- [ask] / [plan] / [agent] / [autopilot]
       require("copilot_agent").statusline_model,       -- claude-sonnet-4.6 / default
-      require("copilot_agent").statusline_busy,        -- ✓ or ⏳
+      require("copilot_agent").statusline_busy,        -- ✅ready / ⏳working / 📝sync / 🧩2 tasks / ❓input
       require("copilot_agent").statusline_permission,  -- 🔐interactive / ✅approve-all / 🤖autopilot
       require("copilot_agent").statusline_attachments, -- 📎3 (when attachments pending)
       require("copilot_agent").statusline_tool,        -- 🔧 read_file (active tool)

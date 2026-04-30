@@ -753,6 +753,146 @@ describe('permission request prompts', function()
 
     assert_eq('Need a value? ', input_calls[1].prompt)
   end)
+
+  it('renders external diff output without a live terminal job when showing a write diff', function()
+    local permission_calls = {}
+    local original_executable = vim.fn.executable
+    local original_system = vim.fn.system
+    local original_jobstart = vim.fn.jobstart
+    local original_columns = vim.o.columns
+    local system_cmd
+    local system_input
+    local job_started = false
+
+    vim.ui.select = function(items, opts, on_choice)
+      permission_calls[#permission_calls + 1] = {
+        items = items,
+        prompt = opts.prompt,
+        on_choice = on_choice,
+      }
+    end
+    vim.o.columns = 160
+
+    vim.fn.executable = function(cmd)
+      if cmd == 'delta' then
+        return 1
+      end
+      return original_executable(cmd)
+    end
+    vim.fn.system = function(cmd, input)
+      system_cmd = cmd
+      system_input = input
+      vim.api.nvim_set_vvar('shell_error', 0)
+      return '\27[31mrendered diff\27[0m'
+    end
+    vim.fn.jobstart = function(...)
+      job_started = true
+      return original_jobstart(...)
+    end
+
+    events.handle_host_event('host.permission_requested', {
+      data = {
+        sessionId = 'session-123',
+        mode = 'interactive',
+        request = {
+          id = 'perm-write-1',
+          request = {
+            kind = 'write',
+            path = '/tmp/one.lua',
+            intention = 'Write file:\n/tmp/one.lua',
+            diff = table.concat({
+              '--- a/tmp/one.lua',
+              '+++ b/tmp/one.lua',
+              '@@ -1 +1 @@',
+              '-old',
+              '+new',
+            }, '\n'),
+          },
+        },
+      },
+    })
+
+    vim.wait(100, function()
+      return #permission_calls == 1
+    end)
+
+    assert_true(vim.tbl_contains(permission_calls[1].items, 'Show diff'))
+    permission_calls[1].on_choice('Show diff')
+
+    vim.fn.executable = original_executable
+    vim.fn.system = original_system
+    vim.fn.jobstart = original_jobstart
+    vim.o.columns = original_columns
+
+    assert_eq('delta', system_cmd[1])
+    assert_true(vim.tbl_contains(system_cmd, '--paging=never'))
+    assert_true(vim.tbl_contains(system_cmd, '--side-by-side'))
+    assert_true(system_input:find('--- a/tmp/one.lua', 1, true) ~= nil)
+    assert_false(job_started)
+
+    pcall(vim.cmd, 'tabonly | only')
+  end)
+  it('shows the close hint in the diff title and requires double escape or ctrl-c to close', function()
+    local permission_calls = {}
+
+    vim.ui.select = function(items, opts, on_choice)
+      permission_calls[#permission_calls + 1] = {
+        items = items,
+        prompt = opts.prompt,
+        on_choice = on_choice,
+      }
+    end
+
+    agent.state.config.chat.diff_cmd = false
+    events.handle_host_event('host.permission_requested', {
+      data = {
+        sessionId = 'session-123',
+        mode = 'interactive',
+        request = {
+          id = 'perm-write-2',
+          request = {
+            kind = 'write',
+            path = '/tmp/two.lua',
+            intention = 'Write file:\n/tmp/two.lua',
+            diff = table.concat({
+              '--- a/tmp/two.lua',
+              '+++ b/tmp/two.lua',
+              '@@ -1 +1 @@',
+              '-old',
+              '+new',
+            }, '\n'),
+          },
+        },
+      },
+    })
+
+    vim.wait(100, function()
+      return #permission_calls == 1
+    end)
+
+    permission_calls[1].on_choice('Show diff')
+
+    local win = vim.api.nvim_get_current_win()
+    local buf = vim.api.nvim_get_current_buf()
+    local config = vim.api.nvim_win_get_config(win)
+    local normal_maps = vim.api.nvim_buf_get_keymap(buf, 'n')
+
+    local function has_lhs(lhs)
+      for _, map in ipairs(normal_maps) do
+        if map.lhs == lhs then
+          return true
+        end
+      end
+      return false
+    end
+
+    assert_eq(' Proposed changes (<C-c> to exit) ', config.title[1][1])
+    assert_false(has_lhs('<Esc>'))
+    assert_true(has_lhs('<Esc><Esc>'))
+    assert_true(has_lhs('<C-C>'))
+
+    pcall(vim.cmd, 'tabonly | only')
+  end)
 end)
 
 describe('event stream recovery', function()

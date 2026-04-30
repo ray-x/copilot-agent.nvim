@@ -56,7 +56,8 @@ local defaults = {
     diff_review = true,
     -- External diff command for the permission "Show diff" viewer.
     -- Set to a list like { 'delta' }, { 'diff-so-fancy' }, or { 'delta', '--side-by-side' }.
-    -- Diff text is piped via stdin. Falls back to builtin float if command not found.
+    -- Command output is captured and rendered into the float to avoid terminal
+    -- exit messages and stream races. Falls back to builtin float if command not found.
     -- Set to false to always use the builtin floating diff window.
     diff_cmd = { 'delta' },
   },

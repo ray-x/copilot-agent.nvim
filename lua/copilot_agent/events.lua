@@ -44,6 +44,85 @@ local queued_prompt_request_ids = {}
 local prompt_handoff_delay_ms = 20
 local intentionally_stopped_event_jobs = {}
 
+-- Show a diff in a floating window.
+-- Tries the configured external diff command (e.g. delta) in a terminal buffer;
+-- falls back to a plain diff buffer if the command is unavailable.
+local function show_diff_float(diff_text, after_close)
+  local lines = vim.split(diff_text, '\n', { plain = true })
+  local width = math.min(math.floor(vim.o.columns * 0.8), 120)
+  local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.7))
+  local win_opts = {
+    relative = 'editor',
+    width = width,
+    height = height,
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = 'minimal',
+    border = 'rounded',
+    title = ' Proposed changes (<C-c> to exit) ',
+    title_pos = 'center',
+  }
+
+  local function setup_close_keys(buf, win)
+    local function close()
+      if vim.api.nvim_win_is_valid(win) then
+        vim.api.nvim_win_close(win, true)
+      end
+      if after_close then
+        after_close()
+      end
+    end
+    vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+    vim.keymap.set('n', '<Esc><Esc>', close, { buffer = buf, nowait = true })
+    vim.keymap.set({ 'n', 'i', 't' }, '<C-c>', close, { buffer = buf, nowait = true })
+  end
+
+  local function open_ansi_float(output)
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].buftype = 'nofile'
+    vim.bo[buf].bufhidden = 'wipe'
+    vim.bo[buf].swapfile = false
+    local win = vim.api.nvim_open_win(buf, true, win_opts)
+    window.disable_folds(win)
+    setup_close_keys(buf, win)
+    local chan = vim.api.nvim_open_term(buf, {})
+    if chan and chan > 0 then
+      vim.api.nvim_chan_send(chan, output)
+    end
+  end
+
+  local diff_cmd = state.config.chat.diff_cmd
+  if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 then
+    diff_cmd = vim.list_extend({}, diff_cmd)
+    if diff_cmd[1] == 'delta' then
+      if width >= 100 and not vim.tbl_contains(diff_cmd, '--side-by-side') then
+        table.insert(diff_cmd, '--side-by-side')
+      end
+      if not vim.tbl_contains(diff_cmd, '--paging=never') then
+        table.insert(diff_cmd, '--paging=never')
+      end
+    end
+  end
+  if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 and vim.fn.executable(diff_cmd[1]) == 1 then
+    local ok, output = pcall(vim.fn.system, diff_cmd, diff_text)
+    if ok and type(output) == 'string' and output ~= '' then
+      open_ansi_float(output)
+      return
+    end
+  end
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'diff'
+  vim.bo[buf].modifiable = false
+  local win = vim.api.nvim_open_win(buf, true, win_opts)
+  window.disable_folds(win)
+  setup_close_keys(buf, win)
+end
+
 local function is_recoverable_stream_exit(code, stderr_message)
   if code == 7 or code == 18 or code == 52 or code == 56 then
     return true
@@ -425,83 +504,6 @@ local function present_permission_picker(payload)
   end
 
   active_prompt_id = req_id
-
-  -- Show the diff in a floating window.
-  -- Tries the configured external diff command (e.g. delta) in a terminal buffer;
-  -- falls back to a plain diff buffer if the command is unavailable.
-  local function show_diff_float(diff_text, after_close)
-    local lines = vim.split(diff_text, '\n', { plain = true })
-    local width = math.min(math.floor(vim.o.columns * 0.8), 120)
-    local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.7))
-    local win_opts = {
-      relative = 'editor',
-      width = width,
-      height = height,
-      row = math.floor((vim.o.lines - height) / 2),
-      col = math.floor((vim.o.columns - width) / 2),
-      style = 'minimal',
-      border = 'rounded',
-      title = ' Proposed changes ',
-      title_pos = 'center',
-    }
-
-    local function setup_close_keys(buf, win)
-      local function close()
-        if vim.api.nvim_win_is_valid(win) then
-          vim.api.nvim_win_close(win, true)
-        end
-        if after_close then
-          after_close()
-        end
-      end
-      vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
-      vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
-    end
-
-    -- Try external diff command (e.g. delta).
-    -- Append --side-by-side automatically when the window is wide enough.
-    local diff_cmd = state.config.chat.diff_cmd
-    if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 then
-      diff_cmd = vim.list_extend({}, diff_cmd) -- shallow copy
-      if diff_cmd[1] == 'delta' and width >= 100 then
-        table.insert(diff_cmd, '--side-by-side')
-      end
-    end
-    if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 and vim.fn.executable(diff_cmd[1]) == 1 then
-      local buf = vim.api.nvim_create_buf(false, true)
-      local win = vim.api.nvim_open_win(buf, true, win_opts)
-      window.disable_folds(win)
-      vim.fn.jobstart(diff_cmd, {
-        term = true,
-        on_exit = function()
-          vim.schedule(function()
-            if vim.api.nvim_buf_is_valid(buf) then
-              setup_close_keys(buf, win)
-            end
-          end)
-        end,
-      })
-      -- Feed the diff text to the terminal's stdin.
-      local chan = vim.bo[buf].channel
-      if chan and chan > 0 then
-        pcall(vim.fn.chansend, chan, diff_text)
-        pcall(vim.fn.chanclose, chan, 'stdin')
-      end
-      return
-    end
-
-    -- Fallback: plain diff buffer.
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].buftype = 'nofile'
-    vim.bo[buf].bufhidden = 'wipe'
-    vim.bo[buf].swapfile = false
-    vim.bo[buf].filetype = 'diff'
-    vim.bo[buf].modifiable = false
-    local win = vim.api.nvim_open_win(buf, true, win_opts)
-    window.disable_folds(win)
-    setup_close_keys(buf, win)
-  end
 
   -- Permission picker (extracted so "Show diff" can re-invoke it).
   local function show_permission_picker()

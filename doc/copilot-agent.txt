@@ -183,6 +183,13 @@ optional — defaults are shown below: >lua
     A "New session" option is available at the bottom of the list.
     Rename the current session with the `/rename` slash command.
 
+                                                  *:CopilotAgentDeleteSession*
+:CopilotAgentDeleteSession
+    Show a newest-first picker of persisted sessions and delete the
+    selected one. The picker includes each session's exact ID to make
+    destructive selections unambiguous. The active session is marked
+    with ●.
+
                                                   *:CopilotAgentModel*
 :CopilotAgentModel [id]
     Switch to model [id]. Without argument, opens an interactive picker.
@@ -195,7 +202,9 @@ optional — defaults are shown below: >lua
                                                   *:CopilotAgentStop*
 :CopilotAgentStop[!]
     Disconnect the active session. With [!] also deletes persisted session
-    state so the next open starts completely fresh.
+    state so the next open starts completely fresh. Deleted sessions keep
+    their checkpoint worktree in a soft-deleted state for 7 days before
+    automatic cleanup.
 
                                                   *:CopilotAgentStatus*
 :CopilotAgentStatus
@@ -239,7 +248,7 @@ Normal and insert mode (unless noted):
   <Tab>               Trigger completion (@file or /slash-command)
   <C-p> / <M-p>       Previous prompt from history
   <C-n> / <M-n>       Next prompt from history
-  ? (normal)          Show this help in a float
+  ? (normal)          Show help with keybindings and session commands
 
 ------------------------------------------------------------------------------
 6.2 Attachments                                   *copilot-agent-attachments*
@@ -381,15 +390,22 @@ resume.
 
   :CopilotAgentNewSession       Start a fresh session in the same directory
   :CopilotAgentSwitchSession    Pick from all persisted sessions and switch
+  :CopilotAgentDeleteSession    Delete a picked session by exact ID
   :CopilotAgentStop             Disconnect (session state persisted on disk)
-  :CopilotAgentStop!            Disconnect and delete all persisted state
+  :CopilotAgentStop!            Delete active session; checkpoints kept 7 days
+
+When a session is deleted, its checkpoint git worktree is soft-deleted for
+7 days before it is pruned automatically on a later startup or checkpoint
+operation.
 
 Sessions are auto-named by the SDK after the first conversation turn. You
 can rename a session by typing `/rename My Session Name` in the input
 buffer.
 
-The session ID is shown in the chat buffer header and by
-|copilot-agent-statusline|.
+The active session summary and short session ID are shown in the
+chat/output statusline. Transcript separators between turns also render the
+completed-turn checkpoint label (for example `v001`) as a virtual rule so it is easy to copy for rewind or recovery
+workflows. See |copilot-agent-statusline|.
 
 Multiple Neovim instances can connect to separate sessions on the same
 service by using `service.port_range`: >lua
@@ -689,6 +705,11 @@ new_session()                             *copilot-agent.new_session()*
 switch_session()                          *copilot-agent.switch_session()*
   Show a picker of all persisted sessions and switch to the selected one.
   See |:CopilotAgentSwitchSession|.
+
+delete_session()                          *copilot-agent.delete_session()*
+  Show a picker of all persisted sessions and delete the selected one.
+  Deleted sessions leave their checkpoint repo in a soft-deleted state
+  for 7 days before it is pruned automatically.
 
 ask({prompt}, {opts})                     *copilot-agent.ask()*
   Send {prompt} to the active session. {opts} may include:

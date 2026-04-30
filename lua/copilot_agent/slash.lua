@@ -1168,13 +1168,14 @@ local function undo_checkpoint()
   return true
 end
 
-local function rewind_checkpoint()
+local function rewind_checkpoint(args)
   if not state.session_id then
     notify('No active session to rewind', vim.log.levels.WARN)
     return true
   end
 
-  checkpoints.rewind(state.session_id, function(err)
+  args = vim.trim(args or '')
+  checkpoints.rewind(state.session_id, args ~= '' and args or nil, function(err)
     if err and err ~= '' then
       if err == 'No checkpoints available' then
         notify(err, vim.log.levels.INFO)

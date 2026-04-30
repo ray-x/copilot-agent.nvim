@@ -27,6 +27,58 @@ local schedule_render = render.schedule_render
 
 local M = {}
 
+local function help_lines()
+  return {
+    ' Copilot Agent – Help ',
+    string.rep('─', 58),
+    '',
+    '  Send / Open input',
+    '    <CR> / i / a    Open input buffer (output pane)',
+    '    <C-s>           Send message / open input',
+    '',
+    '  Mode  (<C-t> to cycle; auto-sets permission)',
+    '    💬 ask           Single-turn Q&A            → 🔐 interactive',
+    '    📋 plan          Structured plan             → 🔐 interactive',
+    '    🤖 agent         Agentic loop                → 📂 approve-reads',
+    '    🚀 autopilot     Agentic loop, fully auto    → ✅ approve-all',
+    '',
+    '  Model / permissions',
+    '    <M-m>           Open model picker',
+    '    <M-a>           Cycle permission mode',
+    '    <C-x>           Toggle session tools',
+    '',
+    '  Session commands',
+    '    :CopilotAgentNewSession     Fresh session in current dir',
+    '    :CopilotAgentSwitchSession  Switch sessions (newest first)',
+    '    :CopilotAgentDeleteSession  Delete picked session by exact ID',
+    '    :CopilotAgentStop!          Delete active session; checkpoints kept 7 days',
+    '    Transcript separators show the completed-turn Checkpoint ID (v001...)',
+    '',
+    '  Attachments / completion',
+    '    <C-a>           Open attachment picker',
+    '    <M-v>           Paste image from clipboard',
+    '    <Tab>           Trigger completion',
+    '    @<path>         Attach a file',
+    '    /<cmd>          Run a built-in slash command',
+    '    Type / + <Tab>  Browse command completion',
+    '    Examples        /model  /new  /resume  /diff  /share',
+    '',
+    '  Review / recovery',
+    '    :CopilotAgentDiff      Review git changes vs HEAD',
+    '    /search <text>         Find transcript matches',
+    '    /undo, /rewind [vNNN]  Restore from session checkpoints',
+    '    Diff float: q / <Esc><Esc> / <C-c> close',
+    '',
+    '  Output pane',
+    '    q               Close chat window',
+    '    <C-c>           Cancel current turn',
+    '    R               Refresh/re-render',
+    '    ?               This help',
+    '',
+    '  Press any key to close',
+  }
+end
+
 function M.find_chat_window()
   if not (state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr)) then
     state.chat_winid = nil
@@ -731,66 +783,17 @@ function M.setup_action_keymaps(bufnr)
 
   -- Help popup (? in normal mode).
   vim.keymap.set('n', '?', function()
-    local help_lines = {
-      ' Copilot Agent – Keybindings ',
-      string.rep('─', 52),
-      '',
-      '  Send / Open input',
-      '    <CR> / i / a    Open input buffer (output pane)',
-      '    <C-s>           Send message / open input',
-      '',
-      '  Mode  (<C-t> to cycle; auto-sets permission)',
-      '    💬 ask           Single-turn Q&A            → 🔐 interactive',
-      '    📋 plan          Structured plan             → 🔐 interactive',
-      '    🤖 agent         Agentic loop                → 📂 approve-reads',
-      '    🚀 autopilot     Agentic loop, fully auto    → ✅ approve-all',
-      '',
-      '  Model',
-      '    <M-m>           Open model picker',
-      '',
-      '  Permission  (<M-a> cycles; manual override survives <C-t>)',
-      '    🔐 interactive   Prompt for every tool use',
-      '    📂 approve-reads Auto-approve workspace reads only',
-      '    ✅ approve-all   Auto-approve all tool uses',
-      '    🤖 autopilot     Approve all + auto-answer inputs',
-      '    🚫 reject-all    Reject all tool uses (read-only)',
-      '',
-      '  Attachments  (<C-a> to open menu)',
-      '    Current buffer, visual selection,',
-      '    file, folder, instructions file,',
-      '    image file',
-      '    <M-v>           Paste image from clipboard',
-      '',
-      '  Tools',
-      '    <C-x>           Toggle session tools',
-      '',
-      '  History  (input buffer)',
-      '    <C-p> / <M-p>   Previous prompt',
-      '    <C-n> / <M-n>   Next prompt',
-      '',
-      '  Completion  (input buffer)',
-      '    <Tab>           Trigger completion',
-      '    @<path>         Attach a file',
-      '    /<cmd>          Slash command',
-      '',
-      '  Output pane',
-      '    q               Close chat window',
-      '    <C-c>           Cancel current turn',
-      '    R               Refresh/re-render',
-      '    ?               This help',
-      '',
-      '  Press any key to close',
-    }
+    local lines = help_lines()
     local max_w = 0
-    for _, l in ipairs(help_lines) do
+    for _, l in ipairs(lines) do
       max_w = math.max(max_w, vim.fn.strdisplaywidth(l))
     end
-    local win_h = #help_lines
+    local win_h = #lines
     local win_w = max_w + 2
     local row = math.max(0, (vim.o.lines - win_h) / 2)
     local col = math.max(0, (vim.o.columns - win_w) / 2)
     local help_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(help_buf, 0, -1, false, help_lines)
+    vim.api.nvim_buf_set_lines(help_buf, 0, -1, false, lines)
     vim.bo[help_buf].modifiable = false
     local help_win = vim.api.nvim_open_win(help_buf, true, {
       relative = 'editor',
@@ -856,7 +859,12 @@ function M.ask(prompt, opts)
 
     local function dispatch_prompt()
       require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
-      append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
+      local entry_index = append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
+      state.pending_checkpoint_turn = {
+        session_id = session_id,
+        prompt = text,
+        entry_index = entry_index,
+      }
       -- Mark busy immediately so the spinner shows before the first delta arrives.
       state.chat_busy = true
       refresh_statuslines()
@@ -872,6 +880,7 @@ function M.ask(prompt, opts)
           pcall(os.remove, p)
         end
         if request_err then
+          state.pending_checkpoint_turn = nil
           state.chat_busy = false
           refresh_statuslines()
           append_entry('error', 'Failed to send prompt: ' .. request_err)
@@ -879,13 +888,10 @@ function M.ask(prompt, opts)
       end)
     end
 
-    require('copilot_agent.checkpoints').create(session_id, text, function(checkpoint_err)
-      if checkpoint_err then
-        notify('Checkpoint unavailable: ' .. checkpoint_err, vim.log.levels.WARN)
-      end
-      dispatch_prompt()
-    end)
+    dispatch_prompt()
   end)
 end
+
+M._help_lines = help_lines
 
 return M

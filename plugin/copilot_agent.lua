@@ -38,6 +38,10 @@ vim.api.nvim_create_user_command('CopilotAgentSwitchSession', function()
   copilot_agent.switch_session()
 end, { desc = 'Switch to a different Copilot session' })
 
+vim.api.nvim_create_user_command('CopilotAgentDeleteSession', function()
+  copilot_agent.delete_session()
+end, { desc = 'Delete a persisted Copilot session from a picker' })
+
 vim.api.nvim_create_user_command('CopilotAgentStart', function()
   copilot_agent.start_service()
 end, { desc = 'Start the Copilot Go service' })

@@ -52,7 +52,7 @@ local defaults = {
     file_picker = 'auto',
     -- Offer a vimdiff review when the agent modifies a git-tracked file.
     -- true  = prompt 'Open diff / Skip' after each file update (default)
-    -- false = just notify and auto-reload the buffer
+    -- false = just notify and auto-reload changed open buffers
     diff_review = true,
     -- External diff command for the permission "Show diff" viewer.
     -- Set to a list like { 'delta' }, { 'diff-so-fancy' }, or { 'delta', '--side-by-side' }.
@@ -106,6 +106,7 @@ local state = {
   reasoning_effort = nil, -- current reasoning effort level (nil = model default)
   permission_mode = 'interactive', -- 'interactive' | 'approve-all' | 'autopilot'
   session_name = nil, -- auto-generated name from SDK (updated after each turn)
+  session_working_directory = nil, -- working directory bound to the active session
   pending_attachments = {}, -- list of {type, path, display} waiting to be sent
   chat_busy = false, -- true while the agent is processing a turn
   -- Thinking spinner
@@ -115,7 +116,11 @@ local state = {
   -- Incremental streaming render
   render_pending = false, -- true when a debounced render is scheduled
   stream_line_start = nil, -- 0-based buf line where current streaming entry content begins
+  entry_row_index = {}, -- maps rendered chat row -> transcript entry index
+  pending_checkpoint_turn = nil, -- active turn waiting for a completed-turn checkpoint label
   history_loading = false, -- true while replaying SSE history; suppresses render until done
+  history_checkpoint_ids = nil, -- replay mapping keyed by assistant message id for completed turns
+  history_pending_user_entries = {}, -- replayed user entries waiting for their completed-turn checkpoint label
   pending_user_input = nil, -- last unanswered ask_user request (for retry on dismiss)
   -- Live agent activity (updated from SSE events, shown in statusline)
   current_model = nil, -- model ID from SDK events (overrides config default in display)

@@ -288,6 +288,8 @@ describe('user commands', function()
     'CopilotAgentChatToggle',
     'CopilotAgentChatFocus',
     'CopilotAgentNewSession',
+    'CopilotAgentSwitchSession',
+    'CopilotAgentDeleteSession',
     'CopilotAgentStart',
     'CopilotAgentAsk',
     'CopilotAgentModel',
@@ -476,12 +478,13 @@ describe('statusline config counts', function()
     agent.state.agent_count = 1
     agent.state.skill_count = 3
     agent.state.mcp_count = 4
- 
+
     local small = '󱃕 I: 2 󱜙 A: 1 󱨚 S: 3  M: 4'
     local medium = '󱃕 Ins: 2 󱜙 Ag: 1 󱨚 Sk: 3  Mc: 4'
     local large = '󱃕 Instruction: 2 󱜙 Agent: 1 󱨚 Skill: 3  MCP: 4'
-    local highlighted = '󱃕 Instruction: %#CopilotAgentStatuslineCount#2%* 󱜙 Agent: %#CopilotAgentStatuslineCount#1%* 󱨚 Skill: %#CopilotAgentStatuslineCount#3%*  MCP: %#CopilotAgentStatuslineCount#4%*'
- 
+    local highlighted =
+      '󱃕 Instruction: %#CopilotAgentStatuslineCount#2%* 󱜙 Agent: %#CopilotAgentStatuslineCount#1%* 󱨚 Skill: %#CopilotAgentStatuslineCount#3%*  MCP: %#CopilotAgentStatuslineCount#4%*'
+
     assert_eq(small, require('copilot_agent.statusline').statusline_config(80))
     assert_eq(medium, require('copilot_agent.statusline').statusline_config(120))
     assert_eq(large, require('copilot_agent.statusline').statusline_config(200))
@@ -503,6 +506,7 @@ describe('workspace file reload', function()
   local original_notify
   local notifications
   local temp_file
+  local temp_file_two
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
@@ -516,8 +520,10 @@ describe('workspace file reload', function()
       notifications[#notifications + 1] = { message = message, level = level }
     end
     local cwd = require('copilot_agent.service').working_directory()
-    temp_file = cwd .. '/tmp-copilot-agent-reload-spec.lua'
+    temp_file = cwd .. '/tmp-copilot-agent-reload-spec.txt'
+    temp_file_two = cwd .. '/tmp-copilot-agent-reload-spec-2.txt'
     vim.fn.writefile({ 'local value = 1', 'return value' }, temp_file)
+    vim.fn.writefile({ 'local other = 1', 'return other' }, temp_file_two)
     agent.state.config.chat.diff_review = false
   end)
 
@@ -530,6 +536,9 @@ describe('workspace file reload', function()
     end
     if temp_file and temp_file ~= '' then
       vim.fn.delete(temp_file)
+    end
+    if temp_file_two and temp_file_two ~= '' then
+      vim.fn.delete(temp_file_two)
     end
     pcall(vim.cmd, 'tabonly | only')
   end)
@@ -579,6 +588,37 @@ describe('workspace file reload', function()
     assert_true(#notifications > 0)
     assert_true(notifications[#notifications].message:find('reload skipped', 1, true) ~= nil)
     assert_true(notifications[#notifications].message:find('unsaved changes', 1, true) ~= nil)
+    vim.bo[bufnr].modified = false
+  end)
+
+  it('checks all loaded file buffers on focus changes and reloads hidden ones', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr_one = vim.api.nvim_get_current_buf()
+    vim.cmd('vsplit ' .. vim.fn.fnameescape(temp_file_two))
+    local bufnr_two = vim.api.nvim_get_current_buf()
+    vim.cmd('buffer ' .. bufnr_one)
+
+    vim.fn.writefile({ 'local other = 2', 'print(other)', 'return other' }, temp_file_two)
+    vim.api.nvim_exec_autocmds('FocusGained', {})
+    vim.wait(100)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr_two, 0, -1, false)
+    assert_eq('local other = 2', lines[1])
+    assert_eq('print(other)', lines[2])
+  end)
+
+  it('does not reload externally changed buffers with unsaved edits during focus checks', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file_two))
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'local other = 99', 'return other' })
+    vim.bo[bufnr].modified = true
+
+    vim.fn.writefile({ 'local other = 3', 'return other' }, temp_file_two)
+    vim.api.nvim_exec_autocmds('FocusGained', {})
+    vim.wait(100)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq('local other = 99', lines[1])
     vim.bo[bufnr].modified = false
   end)
 end)
@@ -945,11 +985,7 @@ describe('event stream recovery', function()
       end
     end
 
-    events._handle_event_stream_exit(
-      'session-123',
-      18,
-      'curl: (18) transfer closed with outstanding read data remaining'
-    )
+    events._handle_event_stream_exit('session-123', 18, 'curl: (18) transfer closed with outstanding read data remaining')
 
     assert_eq(1, ensured)
     assert_eq('session-123', resumed_session_id)
@@ -988,6 +1024,57 @@ describe('agent command', function()
     assert_true(slash.execute('/agent Code Review Engineer'))
     assert_eq('Code Review Engineer', agent.state.config.session.agent)
     assert_eq('/agent Code Review Engineer', captured_prompt)
+  end)
+end)
+
+describe('rewind command', function()
+  local agent
+  local slash
+  local checkpoints
+  local original_rewind
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    agent.state.session_id = 'session-123'
+    slash = require('copilot_agent.slash')
+    checkpoints = require('copilot_agent.checkpoints')
+    original_rewind = checkpoints.rewind
+  end)
+
+  after_each(function()
+    checkpoints.rewind = original_rewind
+  end)
+
+  it('rewinds directly to a checkpoint label argument', function()
+    local captured
+
+    checkpoints.rewind = function(session_id, checkpoint_id, callback)
+      captured = {
+        session_id = session_id,
+        checkpoint_id = checkpoint_id,
+      }
+      callback(nil)
+    end
+
+    assert_true(slash.execute('/rewind v042'))
+    assert_eq('session-123', captured.session_id)
+    assert_eq('v042', captured.checkpoint_id)
+  end)
+
+  it('accepts uppercase checkpoint labels for direct rewind', function()
+    local captured
+
+    checkpoints.rewind = function(_, checkpoint_id, callback)
+      captured = checkpoint_id
+      callback(nil)
+    end
+
+    assert_true(slash.execute('/rewind V059'))
+    assert_eq('V059', captured)
   end)
 end)
 
@@ -1113,11 +1200,7 @@ describe('session picker labels', function()
     local expected_id = expected_local_session_id('nvim', 1717245296)
     local expected_id_2 = expected_local_session_id('nvim', 1717245297)
     local cwd = require('copilot_agent.service').working_directory()
-    local expected_prompt = 'Select session for project: '
-      .. vim.fn.fnamemodify(cwd, ':t')
-      .. ' ('
-      .. vim.fn.fnamemodify(cwd, ':~')
-      .. ')'
+    local expected_prompt = 'Select session for project: ' .. vim.fn.fnamemodify(cwd, ':t') .. ' (' .. vim.fn.fnamemodify(cwd, ':~') .. ')'
 
     http.request = function(method, path, _, callback)
       assert_eq('GET', method)
@@ -1156,6 +1239,267 @@ describe('session picker labels', function()
     assert_eq('abcdefghijklmnopqrstuvwxyz012345 [' .. expected_id .. ']', captured.items[1])
     assert_eq('second live session summary [' .. expected_id_2 .. ']', captured.items[2])
     assert_eq('Create new session', captured.items[3])
+  end)
+end)
+
+describe('session deletion', function()
+  local agent
+  local session
+  local checkpoints
+  local http
+  local original_request
+  local original_ui_select
+  local original_soft_delete_session
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    session = require('copilot_agent.session')
+    checkpoints = require('copilot_agent.checkpoints')
+    http = require('copilot_agent.http')
+    original_request = http.request
+    original_ui_select = vim.ui.select
+    original_soft_delete_session = checkpoints.soft_delete_session
+  end)
+
+  after_each(function()
+    http.request = original_request
+    vim.ui.select = original_ui_select
+    checkpoints.soft_delete_session = original_soft_delete_session
+  end)
+
+  it('shows exact session ids in the delete-session picker and deletes a non-active session', function()
+    local requests = {}
+    local captured_picker
+    local soft_deleted
+
+    agent.state.session_id = 'active-session'
+    agent.state.session_name = 'Current session'
+
+    http.request = function(method, path, _, callback)
+      requests[#requests + 1] = { method = method, path = path }
+      if method == 'GET' then
+        callback({
+          persisted = {
+            {
+              sessionId = 'delete-me-raw-id',
+              summary = 'Delete me',
+              workingDirectory = '/tmp/delete-me',
+              modifiedTime = '2026-05-01T00:00:00Z',
+            },
+            {
+              sessionId = 'active-session',
+              summary = 'Current session',
+              workingDirectory = '/tmp/current',
+              modifiedTime = '2026-04-01T00:00:00Z',
+            },
+          },
+        }, nil)
+        return
+      end
+      assert_eq('DELETE', method)
+      assert_eq('/sessions/delete-me-raw-id?delete=true', path)
+      callback({}, nil)
+    end
+
+    checkpoints.soft_delete_session = function(session_id, opts, callback)
+      soft_deleted = {
+        session_id = session_id,
+        opts = opts,
+      }
+      callback(nil, true)
+    end
+
+    vim.ui.select = function(items, opts, on_choice)
+      captured_picker = {
+        items = items,
+        prompt = opts.prompt,
+      }
+      on_choice(items[1], 1)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.delete_session()
+
+    assert_eq('Delete session', captured_picker.prompt)
+    assert_true(captured_picker.items[1]:find('[delete-me-raw-id]', 1, true) ~= nil)
+    assert_eq('active-session', agent.state.session_id)
+    assert_eq(2, #requests)
+    assert_eq('delete-me-raw-id', soft_deleted.session_id)
+    assert_eq('Delete me', soft_deleted.opts.session_name)
+    assert_eq('/tmp/delete-me', soft_deleted.opts.working_directory)
+  end)
+
+  it('soft-deletes checkpoint metadata when deleting the active session', function()
+    local soft_deleted
+    local delete_path
+
+    agent.state.session_id = 'active-session-id'
+    agent.state.session_name = 'Active session'
+    agent.state.session_working_directory = '/tmp/active-session-workspace'
+
+    http.request = function(method, path, _, callback)
+      assert_eq('DELETE', method)
+      delete_path = path
+      callback({}, nil)
+    end
+
+    checkpoints.soft_delete_session = function(session_id, opts, callback)
+      soft_deleted = {
+        session_id = session_id,
+        opts = opts,
+      }
+      callback(nil, true)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.stop(true)
+
+    assert_eq('/sessions/active-session-id?delete=true', delete_path)
+    assert_eq(nil, agent.state.session_id)
+    assert_eq('active-session-id', soft_deleted.session_id)
+    assert_eq('Active session', soft_deleted.opts.session_name)
+    assert_eq('/tmp/active-session-workspace', soft_deleted.opts.working_directory)
+  end)
+end)
+
+describe('checkpoint retention', function()
+  local checkpoints
+  local agent
+  local original_stdpath
+  local temp_state
+  local temp_workspace
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    original_stdpath = vim.fn.stdpath
+    temp_state = vim.fn.tempname()
+    temp_workspace = vim.fn.tempname()
+    vim.fn.mkdir(temp_state, 'p')
+    vim.fn.mkdir(temp_workspace, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'state' then
+        return temp_state
+      end
+      return original_stdpath(kind)
+    end
+    agent = require('copilot_agent')
+    agent.setup({
+      auto_create_session = false,
+      notify = false,
+      session = {
+        working_directory = temp_workspace,
+      },
+    })
+    checkpoints = require('copilot_agent.checkpoints')
+  end)
+
+  after_each(function()
+    vim.fn.stdpath = original_stdpath
+    if temp_workspace and temp_workspace ~= '' then
+      vim.fn.delete(temp_workspace, 'rf')
+    end
+    if temp_state and temp_state ~= '' then
+      vim.fn.delete(temp_state, 'rf')
+    end
+  end)
+
+  it('marks deleted checkpoint repos and prunes them after the retention window', function()
+    local session_id = 'retained-session'
+    local ok, err = checkpoints._save_index(session_id, {
+      session_id = session_id,
+      checkpoints = {},
+    })
+    assert_true(ok ~= nil, err)
+
+    local soft_delete_err
+    checkpoints.soft_delete_session(session_id, {
+      session_name = 'Deleted session',
+      working_directory = '/tmp/project',
+    }, function(callback_err)
+      soft_delete_err = callback_err
+    end)
+
+    assert_eq(nil, soft_delete_err)
+
+    local index = checkpoints._load_index(session_id)
+    assert_eq('Deleted session', index.deleted_session_name)
+    assert_eq('/tmp/project', index.deleted_working_directory)
+    assert_true(type(index.deleted_at) == 'string' and index.deleted_at ~= '')
+    assert_true(type(index.purge_after_unix) == 'number')
+
+    index.purge_after_unix = os.time() - 1
+    index.purge_after = os.date('!%Y-%m-%dT%H:%M:%SZ', index.purge_after_unix)
+    local saved, save_err = checkpoints._save_index(session_id, index)
+    assert_true(saved ~= nil, save_err)
+
+    local removed, errors = checkpoints.prune_deleted()
+    assert_eq(1, removed)
+    assert_eq(0, #errors)
+    assert_eq(nil, vim.uv.fs_stat(checkpoints._session_dir(session_id)))
+  end)
+
+  it('repairs git identity for existing checkpoint repos before creating a checkpoint', function()
+    local session_id = 'legacy-session'
+    local repo = checkpoints._session_dir(session_id) .. '/repo'
+    local init_result = vim.system({ 'git', 'init', '--quiet', repo }, { text = true }):wait()
+    assert_eq(0, init_result.code)
+
+    local callback_done = false
+    local callback_err
+    local checkpoint_id
+    local commit_hash
+    checkpoints.create(session_id, 'legacy prompt', function(err, id, commit)
+      callback_err = err
+      checkpoint_id = id
+      commit_hash = commit
+      callback_done = true
+    end)
+
+    vim.wait(5000, function()
+      return callback_done
+    end)
+
+    assert_eq(nil, callback_err)
+    assert_eq('v001', checkpoint_id)
+    assert_true(type(commit_hash) == 'string' and commit_hash ~= '')
+
+    local name_result = vim.system({ 'git', '-C', repo, 'config', 'user.name' }, { text = true }):wait()
+    local email_result = vim.system({ 'git', '-C', repo, 'config', 'user.email' }, { text = true }):wait()
+    assert_eq(0, name_result.code)
+    assert_eq(0, email_result.code)
+    assert_eq('copilot-agent.nvim', vim.trim(name_result.stdout or ''))
+    assert_eq('copilot-agent.nvim@local', vim.trim(email_result.stdout or ''))
+  end)
+
+  it('uses the active session workspace instead of the current editor working directory', function()
+    local session_id = 'workspace-locked-session'
+    local callback_done = false
+    local callback_err
+    local checkpoint_id
+
+    agent.state.session_id = session_id
+    agent.state.session_working_directory = temp_workspace
+    agent.state.config.session.working_directory = temp_workspace .. '-different'
+
+    checkpoints.create(session_id, 'workspace locked prompt', function(err, id)
+      callback_err = err
+      checkpoint_id = id
+      callback_done = true
+    end)
+
+    vim.wait(5000, function()
+      return callback_done
+    end)
+
+    assert_eq(nil, callback_err)
+    assert_eq('v001', checkpoint_id)
   end)
 end)
 
@@ -1235,6 +1579,19 @@ describe('chat session activation', function()
   end)
 end)
 
+describe('chat help', function()
+  it('includes session deletion and checkpoint retention guidance', function()
+    package.loaded['copilot_agent.chat'] = nil
+    local chat = require('copilot_agent.chat')
+    local lines = chat._help_lines()
+    local text = table.concat(lines, '\n')
+
+    assert_true(text:find(':CopilotAgentDeleteSession', 1, true) ~= nil)
+    assert_true(text:find('checkpoints kept 7 days', 1, true) ~= nil)
+    assert_true(text:find('Transcript separators show the completed-turn Checkpoint ID (v001...)', 1, true) ~= nil)
+  end)
+end)
+
 describe('chat input behavior', function()
   local agent
   local input
@@ -1310,6 +1667,83 @@ describe('chat input behavior', function()
     assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
   end)
 
+  it('does not show the checkpoint id in the input separator', function()
+    agent.state.session_id = 'nvim-1717245296789000000'
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.input_bufnr, -1, 0, -1, { details = true })
+    local separator_text = nil
+    for _, mark in ipairs(extmarks) do
+      local details = mark[4] or {}
+      local virt_lines = details.virt_lines
+      if type(virt_lines) == 'table' and virt_lines[1] and virt_lines[1][1] and virt_lines[1][1][1] then
+        separator_text = virt_lines[1][1][1]
+        break
+      end
+    end
+
+    assert_true(type(separator_text) == 'string' and separator_text ~= '')
+    assert_true(separator_text:find('Conversation ID', 1, true) == nil)
+    assert_true(separator_text:find('Checkpoint ID', 1, true) == nil)
+    assert_true(separator_text:find(expected_local_session_id('nvim', 1717245296), 1, true) == nil)
+  end)
+
+  it('shows the checkpoint id in virtual transcript separators between turns', function()
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'nvim-1717245296789000000'
+    agent.state.entries = {
+      { kind = 'user', content = 'first prompt', checkpoint_id = 'v001' },
+      { kind = 'assistant', content = 'first reply' },
+      { kind = 'user', content = 'second prompt', checkpoint_id = 'v002' },
+      { kind = 'assistant', content = 'second reply' },
+    }
+
+    agent.open_chat()
+    render.render_chat()
+
+    local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, -1, 0, -1, { details = true })
+    local separators = {}
+    for _, mark in ipairs(extmarks) do
+      local details = mark[4] or {}
+      local virt_lines = details.virt_lines
+      if details.virt_lines_above and type(virt_lines) == 'table' and virt_lines[1] and virt_lines[1][1] then
+        local text = {}
+        for _, chunk in ipairs(virt_lines[1]) do
+          if type(chunk[1]) == 'string' then
+            text[#text + 1] = chunk[1]
+          end
+        end
+        local joined = table.concat(text)
+        if joined:find('Checkpoint ID', 1, true) ~= nil then
+          separators[#separators + 1] = joined
+        end
+      end
+    end
+
+    assert_true(vim.tbl_contains(
+      vim.tbl_map(function(text)
+        return text:find('Checkpoint ID: [v001]', 1, true) ~= nil
+      end, separators),
+      true
+    ))
+    assert_true(vim.tbl_contains(
+      vim.tbl_map(function(text)
+        return text:find('Checkpoint ID: [v002]', 1, true) ~= nil
+      end, separators),
+      true
+    ))
+    for _, text in ipairs(separators) do
+      assert_true(text:find('---', 1, true) == nil)
+    end
+    for _, line in ipairs(lines) do
+      assert_true(line:find('Conversation ID', 1, true) == nil)
+      assert_true(line:find('Checkpoint ID', 1, true) == nil)
+    end
+  end)
+
   it('reanchors the input window below the active chat window', function()
     agent.open_chat()
     input.open_input_window()
@@ -1360,7 +1794,9 @@ describe('chat input behavior', function()
           live = {
             { sessionId = 'live-456', summary = 'Live repo session', live = true },
           },
-        }, nil, 200
+        },
+          nil,
+          200
       end
       return nil, 'unexpected path: ' .. tostring(path), 404
     end
@@ -1389,6 +1825,7 @@ describe('chat input behavior', function()
     local instruction_words = completion_words('/instructions ')
 
     assert_true(vim.tbl_contains(agent_words, '/agent Code Review Engineer'))
+    assert_true(vim.tbl_contains(agent_words, '/agent Document Update Agent'))
     assert_true(vim.tbl_contains(agent_words, '/agent Go Quality Engineer'))
     assert_true(vim.tbl_contains(agent_words, '/agent Selene Lua Quality Engineer'))
     assert_true(vim.tbl_contains(inline_agent_words, '/agent Code Review Engineer'))
@@ -1445,12 +1882,195 @@ describe('chat input behavior', function()
     vim.fn.mode = original_mode
 
     assert_eq(2, #completions)
-    assert_true(vim.tbl_contains(vim.tbl_map(function(item)
-      return item.word
-    end, completions[1].items), '/agent'))
+    assert_true(vim.tbl_contains(
+      vim.tbl_map(function(item)
+        return item.word
+      end, completions[1].items),
+      '/agent'
+    ))
     assert_eq(#prefix + 1, completions[2].col)
-    assert_true(vim.tbl_contains(vim.tbl_map(function(item)
-      return item.word
-    end, completions[2].items), '/agent Code Review Engineer'))
+    assert_true(vim.tbl_contains(
+      vim.tbl_map(function(item)
+        return item.word
+      end, completions[2].items),
+      '/agent Code Review Engineer'
+    ))
+  end)
+end)
+
+describe('checkpoint id replay', function()
+  local agent
+  local events
+  local http
+  local checkpoints
+  local original_request
+  local original_list
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.http'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    agent.state.session_id = 'session-123'
+    http = require('copilot_agent.http')
+    checkpoints = require('copilot_agent.checkpoints')
+    original_request = http.request
+    original_list = checkpoints.list
+  end)
+
+  after_each(function()
+    http.request = original_request
+    checkpoints.list = original_list
+  end)
+
+  it('reattaches checkpoint ids when session history is reloaded', function()
+    local callback_err
+    local callback_count
+
+    checkpoints.list = function(session_id)
+      assert_eq('session-123', session_id)
+      return {
+        { id = 'v001', assistant_message_id = 'assistant-1', prompt = 'first prompt' },
+        { id = 'v002', assistant_message_id = 'assistant-2', prompt = 'second prompt' },
+      }
+    end
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions/session-123/messages', path)
+      callback({
+        events = {
+          { type = 'user.message', data = { content = 'first prompt' } },
+          { type = 'assistant.message', data = { messageId = 'assistant-1', content = 'first reply' } },
+          { type = 'user.message', data = { content = 'second prompt' } },
+          { type = 'assistant.message', data = { messageId = 'assistant-2', content = 'second reply' } },
+        },
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.events'] = nil
+    events = require('copilot_agent.events')
+    events.reload_session_history('session-123', function(err, count)
+      callback_err = err
+      callback_count = count
+    end)
+
+    assert_eq(nil, callback_err)
+    assert_eq(4, callback_count)
+    assert_eq('v001', agent.state.entries[1].checkpoint_id)
+    assert_eq('v002', agent.state.entries[3].checkpoint_id)
+    assert_eq(nil, agent.state.history_checkpoint_ids)
+  end)
+
+  it('does not randomly assign checkpoint ids when replay metadata is missing assistant message mapping', function()
+    checkpoints.list = function()
+      return {
+        { id = 'v001' },
+        { id = 'v002' },
+      }
+    end
+    http.request = function(_, _, _, callback)
+      callback({
+        events = {
+          { type = 'user.message', data = { content = 'first prompt' } },
+          { type = 'assistant.message', data = { messageId = 'assistant-1', content = 'first reply' } },
+          { type = 'user.message', data = { content = 'second prompt' } },
+          { type = 'assistant.message', data = { messageId = 'assistant-2', content = 'second reply' } },
+        },
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.events'] = nil
+    events = require('copilot_agent.events')
+    events.reload_session_history('session-123', function() end)
+
+    assert_eq(nil, agent.state.entries[1].checkpoint_id)
+    assert_eq(nil, agent.state.entries[3].checkpoint_id)
+  end)
+end)
+
+describe('checkpoint id assignment', function()
+  local agent
+  local events
+  local checkpoints
+  local original_create
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    agent.state.session_id = 'session-123'
+    events = require('copilot_agent.events')
+    checkpoints = require('copilot_agent.checkpoints')
+    original_create = checkpoints.create
+  end)
+
+  after_each(function()
+    checkpoints.create = original_create
+  end)
+
+  it('assigns the checkpoint id after assistant.turn_end for the active turn', function()
+    local captured
+    agent.state.entries = {
+      { kind = 'user', content = 'prompt without id yet' },
+      { kind = 'assistant', content = 'final answer' },
+    }
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'prompt without id yet',
+      entry_index = 1,
+    }
+
+    checkpoints.create = function(session_id, prompt, callback, opts)
+      captured = {
+        session_id = session_id,
+        prompt = prompt,
+        opts = opts,
+      }
+      agent.state.entries[opts.entry_index].checkpoint_id = 'v001'
+      callback(nil, 'v001', 'deadbeef')
+    end
+
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    assert_eq('session-123', captured.session_id)
+    assert_eq('prompt without id yet', captured.prompt)
+    assert_eq(1, captured.opts.entry_index)
+    assert_eq('v001', agent.state.entries[1].checkpoint_id)
+    assert_eq(nil, agent.state.pending_checkpoint_turn)
+  end)
+
+  it('records the assistant message id with the completed turn checkpoint', function()
+    local captured
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'prompt with streamed reply',
+      entry_index = 1,
+    }
+    agent.state.entries = {
+      { kind = 'user', content = 'prompt with streamed reply' },
+      { kind = 'assistant', content = '' },
+    }
+
+    checkpoints.create = function(_, _, callback, opts)
+      captured = opts
+      callback(nil, 'v001', 'deadbeef')
+    end
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = { messageId = 'assistant-42', content = 'reply' },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    assert_eq('assistant-42', captured.assistant_message_id)
   end)
 end)

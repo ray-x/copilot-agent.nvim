@@ -1,15 +1,16 @@
 # copilot-agent.nvim
 
-GitHub Copilot's agentic runtime, natively in Neovim. A lightweight Go bridge to the [official SDK](https://github.com/github/copilot-sdk) with autonomous tool execution, four chat modes, granular permissions, persistent sessions, and LSP code actions.
+GitHub Copilot's agentic runtime, natively in Neovim. A lightweight Go bridge to the [official SDK](https://github.com/github/copilot-sdk) with native tool execution, four chat modes, session-aware permissions, persistent sessions, repository-local agent/skill discovery, and LSP code actions.
 
 ## Cool features
 
-- Full agentic tool execution (file read/write, terminal, web search, fetch web pages, run shell scripts...)
-- Real agentic loop with per-tool-call approval and autopilot mode
-- Granular permission management (interactive, approve-all, reject-all, autopilot)
-- Sub-agent streaming event
-- Custom agents and skill directories. Fully compatible with vscode copilot chat setup
-- LSP code actions
+- Full Copilot SDK tool loop (read/write files, run terminal commands, search/fetch the web, and more)
+- Real agentic loop with interactive approvals, approve-reads, approve-all, reject-all, and autopilot
+- Per-request approval UI with allow-directory, allow-tool, allow-all, and diff-review flows
+- Sub-agent streaming events and background task tracking
+- Repository-local `.github/agents` and `.github/skills` support, aligned with Copilot config discovery in VS Code
+- LSP code actions (Explain code, Fix code, Add tests, Add docs)
+- Diff view with neovim diff mode or `delta` depends on your config
 
 ---
 
@@ -247,7 +248,7 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         system_notify_timeout = 3000,    -- ms before auto-clearing transient notices
         render_markdown = true,          -- set false to disable render-markdown.nvim (faster on long responses)
         diff_cmd = { 'delta' },          -- external diff viewer; false = builtin float
-        diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file
+        diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; changed open buffers auto-reload
       },
       notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
       file_log_level = "WARN",  -- DEBUG | INFO | WARN | ERROR for stdpath("log") .. "/copilot_agent.log"
@@ -299,41 +300,7 @@ Reuse the same stable port when reopening the same project later. If you open mu
 
 ## Running the Service Manually
 
-```bash
-cd server/
-
-# Development — OS assigns a free port; actual address printed to stderr
-go run .
-
-# Pin to a specific port (useful for curl testing)
-go run . \
-  -addr 127.0.0.1:8088 \
-  -cwd /path/to/workspace \
-  -cli-path /path/to/@github/copilot/index.js \
-  -lsp=true      # default: true — LSP server on stdio
-
-# Build a binary
-go build -o copilot-agent .
-./copilot-agent          # dynamic port
-./copilot-agent -addr 127.0.0.1:8088   # fixed port
-```
-
-**Flags:**
-
-| Flag          | Default       | Description                                           |
-| ------------- | ------------- | ----------------------------------------------------- |
-| `-addr`       | (free port)   | HTTP listen address; empty or `:0` → OS picks         |
-| `-port-range` | —             | Try ports lo–hi (e.g. `18000-19000`); first free wins |
-| `-cwd`        | current dir   | Default working directory for sessions                |
-| `-model`      | (sdk default) | Default model for new sessions                        |
-| `-cli-path`   | auto-detected | Path to Copilot CLI binary/JS entrypoint              |
-| `-cli-url`    | —             | URL of an already-running Copilot CLI server          |
-| `-log-level`  | —             | Copilot CLI log level                                 |
-| `-lsp`        | `true`        | Start LSP server on stdio                             |
-
-The service always prints `COPILOT_AGENT_ADDR=127.0.0.1:<PORT>` to stderr once the
-listener is bound. When `auto_start = true`, the plugin reads this line and
-configures its HTTP client automatically — no manual `base_url` needed.
+See [server/README.md](server/README.md#running-the-service-manually) for manual startup, build flags, and service runtime details.
 
 ---
 
@@ -348,10 +315,11 @@ configures its HTTP client automatically — no manual `base_url` needed.
 | `:CopilotAgentAsk [prompt]`      | Send a prompt; no argument opens `vim.ui.input()`          |
 | `:CopilotAgentNewSession`        | Disconnect current session and start a fresh one           |
 | `:CopilotAgentSwitchSession`     | Pick from all persisted sessions and switch                |
+| `:CopilotAgentDeleteSession`     | Pick a session by summary + exact ID and delete it         |
 | `:CopilotAgentModel [id]`        | Pick or set a model; tab-completes from service model list |
 | `:CopilotAgentStart`             | Manually start the Go service                              |
 | `:CopilotAgentStop`              | Disconnect the active session                              |
-| `:CopilotAgentStop!`             | Disconnect and delete persisted session state              |
+| `:CopilotAgentStop!`             | Delete the active session; checkpoint cleanup waits 7 days |
 | `:CopilotAgentCancel`            | Cancel the current agent turn                              |
 | `:CopilotAgentDiff`              | Pick a changed file and open vimdiff against HEAD          |
 | `:CopilotAgentStatus`            | Show service URL, session id, stream status                |
@@ -377,13 +345,55 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-a>`           | Attach resource — opens picker menu (see below)                                              |
 | `<M-v>`           | Paste image from clipboard as attachment                                                     |
 | `<C-x>`           | Toggle session tools (enable/disable individual tools)                                       |
-| `<Tab>`           | Trigger completion (`@file` or `/slash-command`)                                             |
+| `<Tab>`           | Trigger completion (`@file` or `/command`)                                                   |
 | `@<path>`         | Attach a file by path (autocomplete from working directory)                                  |
-| `/<cmd>`          | Slash command (autocomplete from 50+ supported commands)                                     |
+| `/<cmd>`          | Run a built-in slash command (autocomplete with `<Tab>`)                                     |
 | `<C-p>` / `<M-p>` | Previous prompt from history                                                                 |
 | `<C-n>` / `<M-n>` | Next prompt from history                                                                     |
 | `<C-c>` (output)  | Cancel current turn                                                                          |
-| `?` (normal)      | Show help float                                                                              |
+| `?` (normal)      | Show help float with keybindings, session commands, and recovery tips                        |
+
+### Slash Commands
+
+The input buffer supports built-in slash commands handled by the plugin before the text is sent as a normal Copilot prompt. Type `/` and press `<Tab>` to browse and complete the available commands. Some of the commands are still experimental.
+
+Supported slash commands:
+
+| Command                | Arguments                  | What it does                                                                        |
+| ---------------------- | -------------------------- | ----------------------------------------------------------------------------------- |
+| `/add-dir`             | `[path]`                   | Add a directory to the session's allowed-directory list; prompts if omitted         |
+| `/agent`               | `[name\|default\|clear]`   | Pick a discovered custom agent, or reset back to the default agent                  |
+| `/allow-all`           | —                          | Switch permission mode to `approve-all`                                             |
+| `/ask`                 | `[question]`               | Ask a side question in a temporary read-only session and show the answer separately |
+| `/clear`               | —                          | Clear the current conversation and start a fresh session                            |
+| `/compact`             | —                          | Compact session history and refresh context usage                                   |
+| `/context`             | —                          | Show current context-window token usage                                             |
+| `/cwd`                 | `[path]`                   | Show or change the working directory used for future session actions                |
+| `/diff`                | `[cached]`                 | Show a git diff summary for the current project; `cached` uses staged changes       |
+| `/env`                 | —                          | Show the current environment, service, session, model, and mode snapshot            |
+| `/fleet`               | `[prompt]`                 | Start fleet mode for the active session                                             |
+| `/init`                | `[args]`                   | Run the project initialization helper                                               |
+| `/instructions`        | `[name]`                   | Open a discovered instructions file from the repository                             |
+| `/list-dir`            | —                          | List allowed directories for the current session                                    |
+| `/list-dirs`           | —                          | Alias for `/list-dir`                                                               |
+| `/lsp`                 | `[status\|start\|install]` | Show LSP status, start the LSP client, or install/update the binary                 |
+| `/mcp`                 | `[name]`                   | Open a discovered MCP config file                                                   |
+| `/model`               | `[id]`                     | Pick or switch the active model                                                     |
+| `/new`                 | —                          | Start a fresh session                                                               |
+| `/plan`                | `[draft text]`             | Switch the input buffer to plan mode and optionally prefill the prompt              |
+| `/rename`              | `[name]`                   | Rename the active session                                                           |
+| `/research`            | `[topic]`                  | Send a research-oriented prompt that can use GitHub and web sources                 |
+| `/reset-allowed-tools` | —                          | Clear remembered tool approvals for the current session                             |
+| `/resume`              | `[session-id]`             | Resume or switch to another saved session; prompts if omitted                       |
+| `/review`              | `[focus]`                  | Ask Copilot to review the current changes, optionally with extra focus text         |
+| `/rewind`              | `[checkpoint]`             | Rewind the session to a checkpoint such as `v003`                                   |
+| `/search`              | `[text]`                   | Search the current transcript and jump to a matching entry                          |
+| `/session`             | `[session-id\|new\|clear]` | Switch sessions, or use `new` / `clear` as shortcuts                                |
+| `/share`               | `[markdown\|html] [path]`  | Export the current transcript as Markdown or HTML                                   |
+| `/skills`              | `[name]`                   | Open a discovered skill from the repository                                         |
+| `/tasks`               | `[filter]`                 | Show background task and sub-agent activity                                         |
+| `/undo`                | —                          | Restore the latest checkpoint for the current session                               |
+| `/usage`               | —                          | Show session usage, discovery counts, and context-window stats                      |
 
 ### Attaching Files and Images
 
@@ -534,9 +544,13 @@ require("lualine").setup {
 
 ## Session Persistence
 
-Session resume is scoped per project by `working_directory`: `pick_or_create_session` filters persisted sessions by working directory, so opening a different project starts a fresh session. The auto-started service itself is still global by default, which is why the startup picker now shows the current project name and path explicitly. Use `:CopilotAgentNewSession` to force a new one in the same directory, or `:CopilotAgentSwitchSession` to pick from all persisted sessions across projects.
+Session resume is scoped per project by `working_directory`: `pick_or_create_session` filters persisted sessions by working directory, so opening a different project starts a fresh session. The auto-started service itself is still global by default, which is why the startup picker now shows the current project name and path explicitly. Use `:CopilotAgentNewSession` to force a new one in the same directory, `:CopilotAgentSwitchSession` to pick from all persisted sessions across projects, or `:CopilotAgentDeleteSession` to remove one from a newest-first picker that includes the exact session ID and marks the active session with `●`.
 
 Sessions are auto-named by the SDK after the first conversation turn. You can rename a session by typing `/rename My Session Name` in the input buffer.
+
+When a session is deleted, its checkpoint git worktree is soft-deleted instead of being removed immediately. This applies both to `:CopilotAgentDeleteSession` and `:CopilotAgentStop!`. The checkpoint metadata records the deletion time and the worktree is pruned automatically after 7 days on the next plugin startup or checkpoint/session lifecycle operation.
+
+The chat/output statusline shows the active session summary together with its short session ID, and transcript separators between turns render the completed-turn checkpoint label (`v001`, `v002`, ...) as a virtual rule so you can copy it for rewind/recovery workflows without opening the input buffer.
 
 **Session selection behaviour:**
 
@@ -557,44 +571,7 @@ session = { auto_resume = 'auto' }
 
 ## HTTP API Reference
 
-| Method   | Path                                | Description                                            |
-| -------- | ----------------------------------- | ------------------------------------------------------ |
-| `GET`    | `/healthz`                          | Health check                                           |
-| `GET`    | `/sessions`                         | List all sessions (live + persisted)                   |
-| `POST`   | `/sessions`                         | Create or resume a session                             |
-| `GET`    | `/sessions/{id}`                    | Get live session metadata                              |
-| `DELETE` | `/sessions/{id}`                    | Disconnect; `?delete=true` removes persisted state     |
-| `GET`    | `/sessions/{id}/messages`           | Fetch stored session events                            |
-| `POST`   | `/sessions/{id}/messages`           | Send a prompt with optional attachments                |
-| `GET`    | `/sessions/{id}/events`             | SSE stream of session + host events                    |
-| `POST`   | `/sessions/{id}/user-input/{reqID}` | Answer a pending `ask_user` request                    |
-| `POST`   | `/sessions/{id}/permission/{reqID}` | Answer a pending permission request (interactive mode) |
-| `POST`   | `/sessions/{id}/permission-mode`    | Update permission mode on a live session               |
-| `POST`   | `/sessions/{id}/model`              | Switch model for a live session                        |
-| `POST`   | `/sessions/{id}/tools`              | Update excluded tools list                             |
-| `GET`    | `/models`                           | List available models                                  |
-
-### Permission modes for `POST /sessions`
-
-```json
-{ "permissionMode": "interactive" }   // prompt Neovim UI per tool use
-{ "permissionMode": "approve-all" }   // auto-approve everything
-{ "permissionMode": "autopilot" }     // approve-all + auto-answer user inputs
-{ "permissionMode": "reject-all" }    // reject all tool uses
-```
-
-### SSE Event Types
-
-| Event                          | Description                                                                       |
-| ------------------------------ | --------------------------------------------------------------------------------- |
-| `session.event`                | Raw SDK events (`assistant.message_delta`, `assistant.turn_end`, etc.)            |
-| `host.user_input_requested`    | Agent needs user input — reply via `POST .../user-input/{id}`                     |
-| `host.permission_requested`    | Tool use needs approval (interactive mode) — reply via `POST .../permission/{id}` |
-| `host.permission_decision`     | Logged approval/rejection outcome                                                 |
-| `host.permission_mode_changed` | Permission mode updated on live session                                           |
-| `host.model_changed`           | Model switched on live session                                                    |
-| `host.session_disconnected`    | Session was closed                                                                |
-| `: keepalive`                  | SSE keepalive comment (ignore)                                                    |
+See [server/README.md](server/README.md#http-api-reference) for the full endpoint list, session permission modes, and SSE event reference.
 
 ---
 
@@ -612,6 +589,7 @@ session = { auto_resume = 'auto' }
 - **Selene Lua Quality Engineer** — runs Selene against the Lua sources
 - **Code Review Engineer** — reviews Lua and Go changes for correctness, code quality, performance, and security
 - **Git Commit Agent** — inspects git status, runs repo-appropriate pre-commit checks, and prepares commit messages from the staged diff
+- **Document Update Agent** — reviews user-facing docs against recent plugin changes and updates commands, keymaps, changelog notes, and gotchas
 
 Customize the commit agent's default checks and feedback rules in `.github/commit-agent.md`.
 

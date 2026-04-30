@@ -12,6 +12,7 @@ local service = require('copilot_agent.service')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
+local checkpoints = require('copilot_agent.checkpoints')
 local window = require('copilot_agent.window')
 
 local state = cfg.state
@@ -43,6 +44,38 @@ local queued_prompt_requests = {}
 local queued_prompt_request_ids = {}
 local prompt_handoff_delay_ms = 20
 local intentionally_stopped_event_jobs = {}
+
+local function preload_history_checkpoint_ids(session_id)
+  local ids = {}
+  for _, checkpoint in ipairs(checkpoints.list(session_id)) do
+    if type(checkpoint.assistant_message_id) == 'string' and checkpoint.assistant_message_id ~= '' and type(checkpoint.id) == 'string' and checkpoint.id ~= '' then
+      ids[checkpoint.assistant_message_id] = {
+        id = checkpoint.id,
+        prompt = checkpoint.prompt,
+      }
+    end
+  end
+  state.history_checkpoint_ids = ids
+end
+
+local function assign_history_checkpoint_id(assistant_message_id)
+  if type(assistant_message_id) ~= 'string' or assistant_message_id == '' then
+    return nil
+  end
+  local mapping = state.history_checkpoint_ids and state.history_checkpoint_ids[assistant_message_id] or nil
+  if type(mapping) ~= 'table' or type(mapping.id) ~= 'string' or mapping.id == '' then
+    return
+  end
+  for idx, pending in ipairs(state.history_pending_user_entries) do
+    local entry = state.entries[pending.entry_index]
+    local prompt_matches = type(mapping.prompt) ~= 'string' or mapping.prompt == '' or pending.content == mapping.prompt
+    if entry and entry.kind == 'user' and prompt_matches then
+      entry.checkpoint_id = mapping.id
+      table.remove(state.history_pending_user_entries, idx)
+      return
+    end
+  end
+end
 
 -- Show a diff in a floating window.
 -- Tries the configured external diff command (e.g. delta) in a terminal buffer;
@@ -648,6 +681,8 @@ local function handle_host_event(event_name, payload)
     refresh_statuslines()
   elseif event_name == 'host.history_done' then
     state.history_loading = false
+    state.history_checkpoint_ids = nil
+    state.history_pending_user_entries = {}
     render_chat()
     scroll_to_bottom()
   end
@@ -800,6 +835,29 @@ local function reload_buffer_from_disk(bufnr, abs_path)
   return summary, nil
 end
 
+local function check_open_buffers_for_external_changes(opts)
+  opts = opts or {}
+  local uv = vim.uv or vim.loop
+  local target_path = type(opts.path) == 'string' and vim.fn.fnamemodify(opts.path, ':p') or nil
+  local target_prefix = type(opts.prefix) == 'string' and vim.fn.fnamemodify(opts.prefix, ':p') or nil
+
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_is_loaded(bufnr) then
+      if vim.api.nvim_get_option_value('buftype', { buf = bufnr }) == '' and not vim.bo[bufnr].modified then
+        local name = vim.api.nvim_buf_get_name(bufnr)
+        if name ~= '' then
+          local path = vim.fn.fnamemodify(name, ':p')
+          local matches_path = not target_path or path == target_path
+          local matches_prefix = not target_prefix or vim.startswith(path, target_prefix)
+          if matches_path and matches_prefix and uv.fs_stat(path) then
+            vim.cmd('silent! checktime ' .. bufnr)
+          end
+        end
+      end
+    end
+  end
+end
+
 local function handle_session_event(payload)
   local event_type = payload and payload.type or nil
   local data = payload and payload.data or {}
@@ -812,6 +870,10 @@ local function handle_session_event(payload)
     state.chat_busy = true
     if not was_busy then
       refresh_statuslines()
+    end
+    local pending_turn = state.pending_checkpoint_turn
+    if not state.history_loading and pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
+      pending_turn.assistant_message_id = data.messageId
     end
     local key = data.messageId or ('assistant-' .. tostring(#state.entries + 1))
     local entry = ensure_assistant_entry(data.messageId)
@@ -851,7 +913,11 @@ local function handle_session_event(payload)
     if state.history_loading then
       local content = type(data.content) == 'string' and data.content or ''
       if content ~= '' then
-        append_entry('user', content)
+        local entry_index = append_entry('user', content)
+        state.history_pending_user_entries[#state.history_pending_user_entries + 1] = {
+          entry_index = entry_index,
+          content = content,
+        }
       end
     end
     return
@@ -859,9 +925,18 @@ local function handle_session_event(payload)
 
   if event_type == 'assistant.message' then
     local entry = ensure_assistant_entry(data.messageId)
+    local first_message_for_entry = (entry.content or '') == ''
     if type(data.content) == 'string' and not is_thinking_content(data.content) then
       stop_thinking_spinner()
       entry.content = data.content
+    end
+    if state.history_loading and first_message_for_entry then
+      assign_history_checkpoint_id(data.messageId)
+    elseif not state.history_loading then
+      local pending_turn = state.pending_checkpoint_turn
+      if pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
+        pending_turn.assistant_message_id = data.messageId
+      end
     end
     state.stream_line_start = nil
     schedule_render()
@@ -869,6 +944,21 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.turn_end' then
+    if not state.history_loading then
+      local pending_turn = state.pending_checkpoint_turn
+      if pending_turn and pending_turn.session_id == state.session_id then
+        state.pending_checkpoint_turn = nil
+        checkpoints.create(state.session_id, pending_turn.prompt, function(checkpoint_err)
+          if checkpoint_err then
+            notify('Checkpoint unavailable: ' .. checkpoint_err, vim.log.levels.WARN)
+          end
+          render_chat()
+        end, {
+          assistant_message_id = pending_turn.assistant_message_id,
+          entry_index = pending_turn.entry_index,
+        })
+      end
+    end
     stop_thinking_spinner()
     state.stream_line_start = nil
     state.chat_busy = false
@@ -961,6 +1051,7 @@ local function handle_session_event(payload)
       else
         notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
       end
+      check_open_buffers_for_external_changes()
     end)
     return
   end
@@ -1047,6 +1138,8 @@ function M.start_event_stream(session_id)
   state.sse_event = { event = 'message', data = {} }
   state.sse_partial = ''
   state.history_loading = true -- suppress rendering until host.history_done arrives
+  state.history_pending_user_entries = {}
+  preload_history_checkpoint_ids(session_id)
 
   local args = {
     state.config.curl_bin,
@@ -1123,6 +1216,7 @@ function M.start_event_stream(session_id)
       sse_batch_timer:close()
     end)
     state.history_loading = false
+    state.history_pending_user_entries = {}
     append_entry('error', 'failed to start event stream')
     return
   end
@@ -1139,9 +1233,13 @@ function M.reload_session_history(session_id, callback)
 
   clear_transcript()
   state.history_loading = true
+  state.history_pending_user_entries = {}
+  preload_history_checkpoint_ids(session_id)
   request('GET', string.format('/sessions/%s/messages', session_id), nil, function(response, err)
     if err then
       state.history_loading = false
+      state.history_checkpoint_ids = nil
+      state.history_pending_user_entries = {}
       callback(err)
       return
     end
@@ -1151,6 +1249,8 @@ function M.reload_session_history(session_id, callback)
     end
 
     state.history_loading = false
+    state.history_checkpoint_ids = nil
+    state.history_pending_user_entries = {}
     render_chat()
     scroll_to_bottom()
     callback(nil, #((response and response.events) or {}))
@@ -1160,6 +1260,7 @@ end
 M.show_user_input_picker = show_user_input_picker
 M.handle_user_input = handle_user_input
 M.handle_host_event = handle_host_event
+M.check_open_buffers_for_external_changes = check_open_buffers_for_external_changes
 M.offer_diff_review = offer_diff_review
 
 --- List all uncommitted changed files and open vimdiff for the selected one.

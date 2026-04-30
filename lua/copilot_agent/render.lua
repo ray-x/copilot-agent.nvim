@@ -23,6 +23,36 @@ local SPINNER_INTERVAL_MS = 500
 local is_thinking_content = utils.is_thinking_content
 local split_lines = utils.split_lines
 
+local function separator_rule_width()
+  local win = state.chat_winid
+  if win and vim.api.nvim_win_is_valid(win) then
+    return math.max(24, vim.api.nvim_win_get_width(win) - 2)
+  end
+  return 72
+end
+
+local function checkpoint_separator_chunks(checkpoint_id)
+  if type(checkpoint_id) ~= 'string' or checkpoint_id == '' then
+    checkpoint_id = '<unknown>'
+  end
+  local label = ' Checkpoint ID: [' .. checkpoint_id .. '] '
+  local width = math.max(separator_rule_width(), vim.fn.strdisplaywidth(label) + 8)
+  local padding = width - vim.fn.strdisplaywidth(label)
+  local left = math.floor(padding / 2)
+  local right = padding - left
+  return {
+    { string.rep('─', left), 'CopilotAgentRule' },
+    { label, 'CopilotAgentCheckpoint' },
+    { string.rep('─', right), 'CopilotAgentRule' },
+  }
+end
+
+local function plain_separator_chunks()
+  return {
+    { string.rep('─', separator_rule_width()), 'CopilotAgentRule' },
+  }
+end
+
 -- ── Thinking spinner ──────────────────────────────────────────────────────────
 
 function M.stop_thinking_spinner()
@@ -256,7 +286,7 @@ end
 -- entry_lines: format one entry into a list of display lines.
 -- align: when true (default), apply align_tables. Pass false during streaming
 --        to skip the O(n) table scan on every incremental update.
-function M.entry_lines(entry, idx, align)
+function M.entry_lines(entry, _, align)
   if align == nil then
     align = true
   end
@@ -286,10 +316,6 @@ function M.entry_lines(entry, idx, align)
       end
     end
   else
-    if idx > 1 then
-      out[#out + 1] = '---'
-      out[#out + 1] = ''
-    end
     out[#out + 1] = 'User:'
     for _, l in ipairs(split_lines(entry.content)) do
       out[#out + 1] = '  ' .. l
@@ -348,23 +374,29 @@ end
 highlight_lines = function(bufnr, from_row, to_row)
   vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, from_row, to_row)
   local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, to_row, false)
-  local win = state.chat_winid
-  local rule_width = 72
-  if win and vim.api.nvim_win_is_valid(win) then
-    rule_width = vim.api.nvim_win_get_width(win) - 2
-  end
-  local rule_text = string.rep('─', rule_width)
   for i, line in ipairs(lines) do
     local row = from_row + i - 1
     if line == 'User:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentUser', row, 0, -1)
+      local entry_idx = state.entry_row_index[row]
+      local entry = entry_idx and state.entries[entry_idx] or nil
+      if entry and entry.kind == 'user' then
+        local separator_chunks
+        if type(entry.checkpoint_id) == 'string' and entry.checkpoint_id ~= '' then
+          separator_chunks = checkpoint_separator_chunks(entry.checkpoint_id)
+        elseif entry_idx > 1 then
+          separator_chunks = plain_separator_chunks()
+        end
+        if separator_chunks then
+          vim.api.nvim_buf_set_extmark(bufnr, CHAT_HL_NS, row, 0, {
+            virt_lines = { separator_chunks },
+            virt_lines_above = true,
+            virt_lines_leftcol = true,
+          })
+        end
+      end
     elseif line == 'Assistant:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
-    elseif line == '---' then
-      vim.api.nvim_buf_set_extmark(bufnr, CHAT_HL_NS, row, 0, {
-        virt_text = { { rule_text, 'CopilotAgentRule' } },
-        virt_text_pos = 'overlay',
-      })
     elseif line:match('^%s*Done%.$') then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
     end
@@ -384,13 +416,13 @@ function M.render_chat()
   end
 
   local at_bottom = M.chat_at_bottom()
+  state.entry_row_index = {}
 
   local lines = {
     state.config.chat.title,
     'service: ' .. normalize_base_url(state.config.base_url),
     'session: ' .. (state.session_id or '<none>'),
     'commands: :CopilotAgentNewSession  :CopilotAgentAsk  :CopilotAgentStop',
-    string.rep('-', 72),
   }
 
   if #state.entries == 0 then
@@ -398,11 +430,15 @@ function M.render_chat()
     lines[#lines + 1] = 'Press i or <Enter> to open the input buffer.'
     lines[#lines + 1] = 'Run :CopilotAgentAsk to send a prompt from the command line.'
   else
+    state.entry_row_index = {}
     for idx, entry in ipairs(state.entries) do
       local elines = M.entry_lines(entry, idx)
       if #elines > 0 then
         if entry.kind == 'assistant' and not is_thinking_content(entry.content) and M.should_merge_assistant(idx) then
           elines[1] = ''
+        end
+        if entry.kind == 'user' then
+          state.entry_row_index[#lines] = idx
         end
         for _, l in ipairs(elines) do
           lines[#lines + 1] = l
@@ -421,6 +457,7 @@ function M.render_chat()
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
   vim.bo[bufnr].modified = false
+  vim.api.nvim_buf_clear_namespace(bufnr, CHAT_HL_NS, 0, -1)
   highlight_lines(bufnr, 0, #lines)
   -- Refresh chat statusline via lazy require to avoid circular deps.
   local sl = require('copilot_agent.statusline')
@@ -503,12 +540,16 @@ end
 
 -- ── Transcript helpers ────────────────────────────────────────────────────────
 
-function M.append_entry(kind, content, attachments)
+function M.append_entry(kind, content, attachments, opts)
+  opts = opts or {}
   local entry = {
     kind = kind,
     content = content or '',
     attachments = attachments,
   }
+  if type(opts.checkpoint_id) == 'string' and opts.checkpoint_id ~= '' then
+    entry.checkpoint_id = opts.checkpoint_id
+  end
   table.insert(state.entries, entry)
   local idx = #state.entries
   state.stream_line_start = nil
@@ -523,6 +564,9 @@ function M.append_entry(kind, content, attachments)
       end
       local at_bottom = M.chat_at_bottom()
       local lc = vim.api.nvim_buf_line_count(bufnr)
+      if kind == 'user' then
+        state.entry_row_index[lc] = idx
+      end
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
       vim.api.nvim_buf_set_lines(bufnr, lc, -1, false, new_lines)
@@ -560,10 +604,14 @@ function M.clear_transcript()
   state.entries = {}
   state.assistant_entries = {}
   state.stream_line_start = nil
+  state.entry_row_index = {}
+  state.pending_checkpoint_turn = nil
   state.active_tool = nil
   state.current_intent = nil
   state.context_tokens = nil
   state.context_limit = nil
+  state.history_checkpoint_ids = nil
+  state.history_pending_user_entries = {}
   M.schedule_render()
 end
 

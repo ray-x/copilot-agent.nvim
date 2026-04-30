@@ -21,7 +21,6 @@ local working_directory = service.working_directory
 local refresh_statuslines = sl.refresh_statuslines
 
 local split_lines = utils.split_lines
-local format_session_id = utils.format_session_id
 
 local set_agent_mode = chat.set_agent_mode
 local setup_action_keymaps = chat.setup_action_keymaps
@@ -33,49 +32,9 @@ local session_label_max_len = 32
 local is_list = vim.islist or vim.tbl_islist
 local separator_ns = vim.api.nvim_create_namespace('copilot_agent_input_separator')
 
-local function truncate_text(text, max_width)
-  text = text or ''
-  max_width = tonumber(max_width) or 0
-  if max_width <= 0 or vim.fn.strdisplaywidth(text) <= max_width then
-    return text
-  end
-
-  local out = ''
-  for i = 1, vim.fn.strchars(text) do
-    local next_char = vim.fn.strcharpart(text, i - 1, 1)
-    local candidate = out .. next_char
-    if vim.fn.strdisplaywidth(candidate .. '…') > max_width then
-      break
-    end
-    out = candidate
-  end
-  return out ~= '' and (out .. '…') or text:sub(1, math.max(1, max_width))
-end
-
 local function conversation_separator_text(width)
   width = math.max(tonumber(width) or 0, 12)
-  local session_id = state.session_id
-  if type(session_id) ~= 'string' or session_id == '' then
-    return string.rep('-', width)
-  end
-
-  local label = ' Conversation ID: ' .. truncate_text(format_session_id(session_id), math.max(8, width - 10)) .. ' '
-  local label_width = vim.fn.strdisplaywidth(label)
-  if label_width >= width then
-    return truncate_text(label, width)
-  end
-
-  local dash_total = width - label_width
-  local left = math.max(3, math.floor(dash_total / 2))
-  local right = math.max(3, dash_total - left)
-  local text = string.rep('-', left) .. label .. string.rep('-', right)
-  local text_width = vim.fn.strdisplaywidth(text)
-  if text_width < width then
-    text = text .. string.rep('-', width - text_width)
-  elseif text_width > width then
-    text = truncate_text(text, width)
-  end
-  return text
+  return string.rep('-', width)
 end
 
 local function refresh_separator()

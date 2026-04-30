@@ -12,6 +12,7 @@ local render = require('copilot_agent.render')
 local events = require('copilot_agent.events')
 local model = require('copilot_agent.model')
 local approvals = require('copilot_agent.approvals')
+local checkpoints = require('copilot_agent.checkpoints')
 local session_names = require('copilot_agent.session_names')
 local utils = require('copilot_agent.utils')
 
@@ -151,6 +152,25 @@ local function merge_sessions(response)
   return items
 end
 
+local function fetch_sorted_sessions(context, callback)
+  request('GET', '/sessions', nil, function(response, err)
+    if err then
+      callback(nil, err, response)
+      return
+    end
+
+    local sessions = merge_sessions(response)
+    log_session_catalog(context, sessions)
+    log(string.format('%s persisted=%d live=%d merged=%d', context, #((response and response.persisted) or {}), #((response and response.live) or {}), #sessions), vim.log.levels.INFO)
+    table.sort(sessions, function(a, b)
+      local ta = session_sort_key(a)
+      local tb = session_sort_key(b)
+      return ta > tb
+    end)
+    callback(sessions, nil, response)
+  end)
+end
+
 -- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
 function M.discard_pending_attachments()
   for _, a in ipairs(state.pending_attachments) do
@@ -175,6 +195,18 @@ local function focus_input_for_active_chat()
   end)
 end
 
+local function active_session_working_directory()
+  return state.session_working_directory or working_directory()
+end
+
+local function delete_session_request(session_id, delete_state, callback)
+  request('DELETE', string.format('/sessions/%s%s', session_id, delete_state and '?delete=true' or ''), nil, function(_, err)
+    if callback then
+      callback(err)
+    end
+  end, { auto_start = false })
+end
+
 function M.disconnect_session(session_id, delete_state, callback)
   stop_event_stream()
   approvals.reset()
@@ -185,11 +217,7 @@ function M.disconnect_session(session_id, delete_state, callback)
     return
   end
 
-  request('DELETE', string.format('/sessions/%s%s', session_id, delete_state and '?delete=true' or ''), nil, function(_, err)
-    if callback then
-      callback(err)
-    end
-  end, { auto_start = false })
+  delete_session_request(session_id, delete_state, callback)
 end
 
 local function on_session_ready(session_id, err)
@@ -247,6 +275,7 @@ function M.resume_session(session_id, callback, opts)
       return
     end
     state.session_id = resumed_session_id
+    state.session_working_directory = (response and response.workingDirectory) or requested_wd
     if not resumed_session_id then
       local message = 'Server did not return a sessionId'
       append_entry('error', message)
@@ -488,6 +517,7 @@ create_session = function(callback, opts)
     end
 
     state.session_id = response and response.sessionId or nil
+    state.session_working_directory = (response and response.workingDirectory) or requested_wd
     if not state.session_id then
       local message = 'Server did not return a sessionId'
       append_entry('error', message)
@@ -568,6 +598,7 @@ function M.new_session()
   local previous_session_id = state.session_id
   state.session_id = nil
   state.session_name = nil
+  state.session_working_directory = nil
   M.discard_pending_attachments()
   clear_transcript()
   -- Ensure chat window via lazy require to avoid circular dependency.
@@ -589,8 +620,8 @@ end
 
 function M.clear_and_new_session()
   local previous_session_id = state.session_id
-  state.session_id = nil
-  state.session_name = nil
+  local previous_session_name = state.session_name
+  local previous_working_directory = state.session_working_directory
   M.discard_pending_attachments()
   clear_transcript()
   require('copilot_agent').open_chat()
@@ -610,7 +641,11 @@ function M.clear_and_new_session()
     return
   end
 
-  M.disconnect_session(previous_session_id, true, function(err)
+  M.delete_session_by_id(previous_session_id, {
+    sessionId = previous_session_id,
+    summary = previous_session_name,
+    workingDirectory = previous_working_directory or working_directory(),
+  }, function(err)
     if err then
       append_entry('error', 'Failed to clear previous session: ' .. err)
       return
@@ -633,6 +668,7 @@ function M.switch_to_session_id(target_session_id)
   local previous_session_id = state.session_id
   state.session_id = nil
   state.session_name = nil
+  state.session_working_directory = nil
   state.creating_session = true
   M.discard_pending_attachments()
   clear_transcript()
@@ -650,26 +686,15 @@ end
 
 --- Show a picker of all persisted sessions and switch to the selected one.
 function M.switch_session()
-  request('GET', '/sessions', nil, function(response, err)
+  fetch_sorted_sessions('switch_session', function(sessions, err)
     if err then
       notify('Failed to list sessions: ' .. err, vim.log.levels.ERROR)
       return
     end
-
-    local sessions = merge_sessions(response)
-    log_session_catalog('switch_session', sessions)
-    log(string.format('switch_session persisted=%d live=%d merged=%d', #((response and response.persisted) or {}), #((response and response.live) or {}), #sessions), vim.log.levels.INFO)
     if #sessions == 0 then
       notify('No sessions found. Use :CopilotAgentNewSession to create one.', vim.log.levels.INFO)
       return
     end
-
-    -- Sort newest-first.
-    table.sort(sessions, function(a, b)
-      local ta = session_sort_key(a)
-      local tb = session_sort_key(b)
-      return ta > tb
-    end)
 
     local choices = {}
     for _, s in ipairs(sessions) do
@@ -709,6 +734,129 @@ function M.switch_session()
   end)
 end
 
+local function delete_session_label(session)
+  local parts = {}
+  local summary = formatted_session_summary(session_names.resolve(session.summary, session.sessionId))
+  if summary ~= '' then
+    parts[#parts + 1] = summary
+  end
+  parts[#parts + 1] = '[' .. (session.sessionId or '') .. ']'
+
+  local session_cwd = session_cwd_of(session)
+  if session_cwd then
+    parts[#parts + 1] = vim.fn.fnamemodify(session_cwd, ':~')
+  end
+
+  local label = table.concat(parts, '  ')
+  if state.session_id and session.sessionId == state.session_id then
+    label = label .. ' ●'
+  end
+  return label
+end
+
+local function soft_delete_checkpoint_repo(session_id, opts, callback)
+  checkpoints.soft_delete_session(session_id, opts, function(checkpoint_err)
+    if checkpoint_err then
+      local message = 'Deleted session ' .. format_session_id(session_id) .. ', but failed to retain its checkpoint repo: ' .. checkpoint_err
+      append_entry('error', message)
+      notify(message, vim.log.levels.WARN)
+    end
+    if callback then
+      callback(checkpoint_err)
+    end
+  end)
+end
+
+function M.delete_session_by_id(target_session_id, session_record, callback)
+  callback = callback or function() end
+  target_session_id = vim.trim(target_session_id or '')
+  if target_session_id == '' then
+    callback('Session ID is required')
+    return
+  end
+
+  local active_session = state.session_id and target_session_id == state.session_id
+  local current_session_name = active_session and state.session_name or nil
+  local current_working_directory = active_session and active_session_working_directory() or nil
+  local checkpoint_opts = {
+    session_name = current_session_name or session_names.resolve(session_record and session_record.summary, target_session_id),
+    working_directory = current_working_directory or session_cwd_of(session_record),
+  }
+  local formatted_id = format_session_id(target_session_id)
+
+  local function finish_delete()
+    append_entry('system', 'Deleted session ' .. formatted_id)
+    notify('Deleted session ' .. formatted_id, vim.log.levels.INFO)
+    soft_delete_checkpoint_repo(target_session_id, checkpoint_opts, function(checkpoint_err)
+      callback(nil, checkpoint_err)
+    end)
+  end
+
+  if active_session then
+    state.session_id = nil
+    state.session_name = nil
+    state.session_working_directory = nil
+    M.discard_pending_attachments()
+    clear_transcript()
+    M.disconnect_session(target_session_id, true, function(err)
+      if err then
+        callback(err)
+        return
+      end
+      finish_delete()
+    end)
+    return
+  end
+
+  delete_session_request(target_session_id, true, function(err)
+    if err then
+      callback(err)
+      return
+    end
+    finish_delete()
+  end)
+end
+
+function M.delete_session()
+  fetch_sorted_sessions('delete_session', function(sessions, err)
+    if err then
+      notify('Failed to list sessions: ' .. err, vim.log.levels.ERROR)
+      return
+    end
+    if #sessions == 0 then
+      notify('No sessions found to delete.', vim.log.levels.INFO)
+      return
+    end
+
+    local choices = {}
+    for _, session in ipairs(sessions) do
+      table.insert(choices, {
+        id = session.sessionId,
+        label = delete_session_label(session),
+        session = session,
+      })
+    end
+    local display = vim.tbl_map(function(choice)
+      return choice.label
+    end, choices)
+
+    vim.ui.select(display, { prompt = 'Delete session' }, function(_, idx)
+      if not idx then
+        return
+      end
+
+      local picked = choices[idx]
+      M.delete_session_by_id(picked.id, picked.session, function(delete_err)
+        if delete_err then
+          local message = 'Failed to delete session ' .. format_session_id(picked.id) .. ': ' .. delete_err
+          append_entry('error', message)
+          notify(message, vim.log.levels.ERROR)
+        end
+      end)
+    end)
+  end)
+end
+
 --- Disconnect the active session.
 function M.stop(delete_state)
   if not state.session_id then
@@ -716,8 +864,24 @@ function M.stop(delete_state)
     return
   end
 
+  if delete_state then
+    local session_id = state.session_id
+    local session_summary = state.session_name
+    M.delete_session_by_id(session_id, {
+      sessionId = session_id,
+      summary = session_summary,
+      workingDirectory = active_session_working_directory(),
+    }, function(err)
+      if err then
+        append_entry('error', 'Failed to delete session: ' .. err)
+      end
+    end)
+    return
+  end
+
   local session_id = state.session_id
   state.session_id = nil
+  state.session_working_directory = nil
   M.discard_pending_attachments()
   clear_transcript()
   M.disconnect_session(session_id, delete_state, function(err)

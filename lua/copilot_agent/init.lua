@@ -53,13 +53,32 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, 'CopilotAgentUser', { link = 'Title', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentAssistant', { link = 'Function', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentDone', { link = 'DiagnosticOk', default = true })
-  vim.api.nvim_set_hl(0, 'CopilotAgentRule', { link = 'WinSeparator', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentRule', { link = 'Comment', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentCheckpoint', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentStatuslineCount', { link = 'Number', default = true })
   local ui_group = vim.api.nvim_create_augroup('CopilotAgentUI', { clear = true })
   vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
     group = ui_group,
     callback = function()
       require('copilot_agent.statusline').refresh_statuslines()
+    end,
+  })
+  vim.api.nvim_create_autocmd('FileChangedShell', {
+    group = ui_group,
+    callback = function(args)
+      if not args.buf or not vim.api.nvim_buf_is_valid(args.buf) then
+        return
+      end
+      if vim.api.nvim_get_option_value('buftype', { buf = args.buf }) ~= '' or vim.bo[args.buf].modified then
+        return
+      end
+      vim.v.fcs_choice = 'reload'
+    end,
+  })
+  vim.api.nvim_create_autocmd('FocusGained', {
+    group = ui_group,
+    callback = function()
+      events.check_open_buffers_for_external_changes()
     end,
   })
   -- Clean up clipboard temp files if Neovim exits before they were sent.
@@ -69,6 +88,9 @@ function M.setup(opts)
       session.discard_pending_attachments()
     end,
   })
+  vim.schedule(function()
+    require('copilot_agent.checkpoints').prune_deleted()
+  end)
   -- Eagerly start the Go service in the background so it is ready by
   -- the time the user opens the chat window. Session creation is deferred
   -- until the user actually opens the chat to avoid prompting for session
@@ -99,6 +121,10 @@ end
 
 function M.switch_session()
   session.switch_session()
+end
+
+function M.delete_session()
+  session.delete_session()
 end
 
 function M.stop(delete_state)

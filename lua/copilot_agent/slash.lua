@@ -599,7 +599,7 @@ local function env_command()
   return true
 end
 
-local function agent_command(args)
+local function agent_command(args, opts)
   local items = discovery.agent_items()
   if vim.tbl_isempty(items) then
     notify('No custom agents found in .github/agents', vim.log.levels.INFO)
@@ -609,13 +609,19 @@ local function agent_command(args)
   local function apply_agent(item)
     state.config.session.agent = item and item.name or nil
     if item then
-      append_entry('system', 'Agent for next session: ' .. item.name)
       if state.session_id then
-        append_entry('system', 'Use /new to start a session with the selected agent')
+        dispatch_prompt('/agent ' .. item.name, opts)
+        return
       end
-    else
-      append_entry('system', 'Reset to the default agent for future sessions')
+      append_entry('system', 'Agent for next conversation: ' .. item.name)
+      return
     end
+
+    if state.session_id then
+      append_entry('system', 'Reset to the default agent for future conversations (active session unchanged)')
+      return
+    end
+    append_entry('system', 'Reset to the default agent for future conversations')
   end
 
   args = vim.trim(args or '')
@@ -636,7 +642,7 @@ local function agent_command(args)
   local choices = { { name = 'Default agent', path = '' } }
   vim.list_extend(choices, items)
   vim.ui.select(choices, {
-    prompt = 'Select agent for future sessions',
+    prompt = state.session_id and 'Select agent for this conversation' or 'Select agent for next conversation',
     format_item = function(item)
       if item.path == '' then
         return item.name

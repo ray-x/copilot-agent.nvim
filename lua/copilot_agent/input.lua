@@ -162,12 +162,31 @@ end
 
 local function command_completion_context(before)
   for _, command in ipairs({ 'agent', 'skills', 'model', 'resume', 'session', 'mcp', 'instructions' }) do
-    local start_pos, _, _, query = before:find(string.format('(/%s%%s+)(.*)$', command))
+    local token = '/' .. command
+    local lower_before = before:lower()
+    local start_pos, end_pos
+    local search_from = 1
+    while true do
+      local found_start, found_end = lower_before:find(token, search_from, true)
+      if not found_start then
+        break
+      end
+      local prev_char = found_start == 1 and '' or before:sub(found_start - 1, found_start - 1)
+      local next_char = found_end == #before and '' or before:sub(found_end + 1, found_end + 1)
+      if (found_start == 1 or prev_char:match('%s')) and (next_char == '' or next_char:match('%s')) then
+        start_pos = found_start
+        end_pos = found_end
+      end
+      search_from = found_start + 1
+    end
     if start_pos then
+      local raw_query = before:sub((end_pos or start_pos) + 1)
       return {
         kind = command,
         start = start_pos,
-        query = query or '',
+        ['end'] = end_pos,
+        query = vim.trim(raw_query),
+        at_token_end = (end_pos or start_pos) == #before,
       }
     end
   end
@@ -711,18 +730,87 @@ local function create_input_buffer()
   require('copilot_agent').input_omnifunc = input_omnifunc
   M._input_omnifunc = input_omnifunc
 
-  vim.keymap.set('i', '<Tab>', '<C-x><C-u>', { buffer = bufnr, silent = true, desc = 'Trigger completion' })
+  -- Trigger completion using vim.fn.complete() which works reliably in prompt buffers.
+  local function trigger_completion()
+    local line = vim.api.nvim_get_current_line()
+    local col = vim.api.nvim_win_get_cursor(0)[2]
+    local before = line:sub(1, col)
+    local command_context = command_completion_context(before)
 
-  -- Auto-trigger completion when @ or / is typed.
-  vim.api.nvim_create_autocmd('TextChangedI', {
+    local start_col, items
+    if command_context then
+      start_col = command_context.start
+      items = input_omnifunc(0, line:sub(start_col, col))
+    else
+      local pos = before:find('[@/][^%s]*$')
+      if pos then
+        start_col = pos
+        items = input_omnifunc(0, before:sub(pos))
+      end
+    end
+
+    if items and #items > 0 then
+      vim.fn.complete(start_col, items)
+    end
+  end
+
+  local last_auto_completion_key
+  local auto_completion_scheduled = false
+
+  local function auto_completion_key(before)
+    local pos = before:find('[@/]$')
+    if pos then
+      local trigger = before:sub(pos, pos)
+      local prev_char = pos == 1 and '' or before:sub(pos - 1, pos - 1)
+      if trigger == '@' or pos == 1 or prev_char:match('%s') then
+        return trigger .. ':' .. pos
+      end
+    end
+
+    local command_context = command_completion_context(before)
+    if command_context and command_context.at_token_end then
+      return command_context.kind .. ':' .. command_context.start
+    end
+
+    return nil
+  end
+
+  local function maybe_auto_trigger_completion()
+    local before = vim.api.nvim_get_current_line():sub(1, vim.api.nvim_win_get_cursor(0)[2])
+    local key = auto_completion_key(before)
+    if not key then
+      last_auto_completion_key = nil
+      return
+    end
+    if key == last_auto_completion_key or auto_completion_scheduled then
+      return
+    end
+
+    last_auto_completion_key = key
+    auto_completion_scheduled = true
+    vim.schedule(function()
+      auto_completion_scheduled = false
+      if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      local mode = vim.fn.mode()
+      if mode:sub(1, 1) ~= 'i' then
+        return
+      end
+      trigger_completion()
+    end)
+  end
+
+  vim.keymap.set('i', '<Tab>', trigger_completion, { buffer = bufnr, silent = true, desc = 'Trigger completion' })
+
+  -- Auto-trigger completion once when a slash/file token becomes completable.
+  -- CompleteChanged is needed because, once the generic "/" popup is open,
+  -- subsequent typing is driven by Neovim's completion state rather than
+  -- TextChangedI alone.
+  vim.api.nvim_create_autocmd({ 'TextChangedI', 'CompleteChanged' }, {
     buffer = bufnr,
     callback = function()
-      local cur_line = vim.api.nvim_get_current_line()
-      local cur_col = vim.api.nvim_win_get_cursor(0)[2]
-      local ch = cur_line:sub(cur_col, cur_col)
-      if ch == '@' or ch == '/' then
-        vim.fn.feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n')
-      end
+      maybe_auto_trigger_completion()
     end,
   })
 

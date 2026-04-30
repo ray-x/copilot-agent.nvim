@@ -819,6 +819,38 @@ describe('event stream recovery', function()
   end)
 end)
 
+describe('agent command', function()
+  local agent
+  local slash
+  local original_ask
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    slash = require('copilot_agent.slash')
+    original_ask = agent.ask
+  end)
+
+  after_each(function()
+    agent.ask = original_ask
+  end)
+
+  it('switches the active conversation agent immediately', function()
+    local captured_prompt
+
+    agent.state.session_id = 'session-123'
+    agent.ask = function(prompt)
+      captured_prompt = prompt
+    end
+
+    assert_true(slash.execute('/agent Code Review Engineer'))
+    assert_eq('Code Review Engineer', agent.state.config.session.agent)
+    assert_eq('/agent Code Review Engineer', captured_prompt)
+  end)
+end)
+
 describe('session resume guards', function()
   local agent
   local http
@@ -1199,15 +1231,16 @@ describe('chat input behavior', function()
     local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
     vim.api.nvim_set_current_win(agent.state.input_winid)
 
-    local function completion_words(command_text)
+    local function completion_words(command_text, cursor_col)
       vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. command_text })
-      vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. command_text) })
+      vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, cursor_col or #(prefix .. command_text) })
       return vim.tbl_map(function(item)
         return item.word
       end, input._input_omnifunc(0, ''))
     end
 
     local agent_words = completion_words('/agent ')
+    local inline_agent_words = completion_words('use /agent to do code review', #(prefix .. 'use /agent'))
     local skill_words = completion_words('/skills ')
     local model_words = completion_words('/model ')
     local resume_words = completion_words('/resume ')
@@ -1218,6 +1251,7 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(agent_words, '/agent Code Review Engineer'))
     assert_true(vim.tbl_contains(agent_words, '/agent Go Quality Engineer'))
     assert_true(vim.tbl_contains(agent_words, '/agent Selene Lua Quality Engineer'))
+    assert_true(vim.tbl_contains(inline_agent_words, '/agent Code Review Engineer'))
     assert_true(vim.tbl_contains(skill_words, '/skills nvim-integration-tests'))
     assert_true(vim.tbl_contains(skill_words, '/skills selene-check'))
     assert_true(vim.tbl_contains(model_words, '/model gpt-5.4'))
@@ -1230,5 +1264,53 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(mcp_words, '/mcp docs'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp browser'))
     assert_true(vim.tbl_contains(instruction_words, '/instructions .github/copilot-instructions.md'))
+  end)
+
+  it('replaces the generic slash completion with agent completion when typing /agent', function()
+    local original_complete = vim.fn.complete
+    local original_mode = vim.fn.mode
+    local completions = {}
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.cmd('startinsert!')
+    vim.fn.mode = function()
+      return 'i'
+    end
+    vim.fn.complete = function(col, items)
+      table.insert(completions, { col = col, items = items })
+    end
+
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. '/' })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. '/') })
+    vim.api.nvim_exec_autocmds('TextChangedI', { buffer = agent.state.input_bufnr })
+    vim.wait(50, function()
+      return #completions > 0
+    end)
+
+    -- Typing "/agent" should replace the generic slash completion while the
+    -- popup is already open, which is observed via CompleteChanged.
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. '/agent' })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. '/agent') })
+    vim.api.nvim_exec_autocmds('CompleteChanged', { buffer = agent.state.input_bufnr })
+    vim.wait(50, function()
+      return #completions > 1
+    end)
+    vim.api.nvim_exec_autocmds('CompleteChanged', { buffer = agent.state.input_bufnr })
+
+    vim.fn.complete = original_complete
+    vim.fn.mode = original_mode
+
+    assert_eq(2, #completions)
+    assert_true(vim.tbl_contains(vim.tbl_map(function(item)
+      return item.word
+    end, completions[1].items), '/agent'))
+    assert_eq(#prefix + 1, completions[2].col)
+    assert_true(vim.tbl_contains(vim.tbl_map(function(item)
+      return item.word
+    end, completions[2].items), '/agent Code Review Engineer'))
   end)
 end)

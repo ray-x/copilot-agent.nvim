@@ -262,7 +262,6 @@ function M.refresh_input_statusline()
         M.statusline_intent(),
         M.statusline_context(),
         M.statusline_config_highlighted(width),
-        M.statusline_session(width),
         M.statusline_attachments()
       ),
       '  '

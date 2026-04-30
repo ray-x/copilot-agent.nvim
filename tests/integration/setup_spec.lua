@@ -356,13 +356,13 @@ describe('statusline API', function()
     statusline.refresh_chat_statusline()
     statusline.refresh_input_statusline()
     assert_true(vim.wo[chat_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) ~= nil)
-    assert_true(vim.wo[input_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) ~= nil)
+    assert_true(vim.wo[input_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) == nil)
 
     agent.state.session_name = 'abcdefghijklmnopqrstuvwxyz0123456789'
     statusline.refresh_chat_statusline()
     statusline.refresh_input_statusline()
     assert_true(vim.wo[chat_winid].statusline:find('session: [abcdefghijklmnopqrstuvwxyz012345 ' .. expected_id .. ']', 1, true) ~= nil)
-    assert_true(vim.wo[input_winid].statusline:find('session: [abcdefghijklmnopqrstuvwxyz012345 ' .. expected_id .. ']', 1, true) ~= nil)
+    assert_true(vim.wo[input_winid].statusline:find('session: [abcdefghijklmnopqrstuvwxyz012345 ' .. expected_id .. ']', 1, true) == nil)
     assert_true(vim.wo[chat_winid].statusline:find('session: abcdefghijklmnopqrstuvwxyz0123456789', 1, true) == nil)
 
     widths[chat_winid] = 120

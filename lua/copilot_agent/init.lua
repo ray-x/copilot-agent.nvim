@@ -54,6 +54,13 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, 'CopilotAgentDone', { link = 'DiagnosticOk', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentRule', { link = 'WinSeparator', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentStatuslineCount', { link = 'Number', default = true })
+  local ui_group = vim.api.nvim_create_augroup('CopilotAgentUI', { clear = true })
+  vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
+    group = ui_group,
+    callback = function()
+      require('copilot_agent.statusline').refresh_statuslines()
+    end,
+  })
   -- Clean up clipboard temp files if Neovim exits before they were sent.
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = vim.api.nvim_create_augroup('CopilotAgentCleanup', { clear = true }),

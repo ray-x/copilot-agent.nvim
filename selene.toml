@@ -1,8 +1,9 @@
 std = "vim"
 
 [rules]
-global_usage = "allow"
+# global_usage = "allow"
 multiple_statements = "allow"
 incorrect_standard_library_use = "allow"
-unused_variable = "allow"
-deprecated = "allow"
+# unused_variable = "allow"
+# deprecated = "allow"
+mixd_table = "allow"

@@ -6,7 +6,6 @@ local cfg = require('copilot_agent.config')
 local service = require('copilot_agent.service')
 
 local state = cfg.state
-local notify = cfg.notify
 
 local M = {}
 
@@ -119,7 +118,7 @@ local function git(session_id, workspace, args, callback)
   run_system(cmd, { cwd = workspace }, callback)
 end
 
-local function ensure_repo(session_id, workspace, callback)
+local function ensure_repo(session_id, callback)
   if vim.fn.isdirectory(git_dir(session_id)) == 1 then
     callback(true)
     return
@@ -182,7 +181,7 @@ function M.create(session_id, prompt, callback)
 
   local workspace = service.working_directory()
   local snapshot = transcript_snapshot(prompt)
-  ensure_repo(session_id, workspace, function(_, repo_err)
+  ensure_repo(session_id, function(_, repo_err)
     if repo_err then
       callback(repo_err)
       return

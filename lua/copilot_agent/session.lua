@@ -54,6 +54,19 @@ local function formatted_session_label(summary, session_id)
   return formatted_id
 end
 
+local function project_picker_label(path)
+  if type(path) ~= 'string' or path == '' then
+    return 'current project'
+  end
+
+  local display = vim.fn.fnamemodify(path, ':~')
+  local name = vim.fn.fnamemodify(path, ':t')
+  if name == '' or name == '.' or name == display then
+    return display
+  end
+  return string.format('%s (%s)', name, display)
+end
+
 local function session_id_of(session)
   return session and session.sessionId or nil
 end
@@ -327,7 +340,7 @@ function M.pick_or_create_session(callback)
       return c.label
     end, choices)
 
-    vim.ui.select(display, { prompt = 'Resume a session or start new?' }, function(_, idx)
+    vim.ui.select(display, { prompt = 'Select session for project: ' .. project_picker_label(wd) }, function(_, idx)
       if not idx then
         -- <Esc> dismissed the picker — default to the most recent session.
         local default = choices[1]
@@ -362,7 +375,7 @@ function M.pick_or_create_session(callback)
           local all_display = vim.tbl_map(function(c)
             return c.label
           end, all_choices)
-          vim.ui.select(all_display, { prompt = 'All sessions' }, function(_, idx2)
+          vim.ui.select(all_display, { prompt = 'All sessions (current project: ' .. project_picker_label(wd) .. ')' }, function(_, idx2)
             if not idx2 then
               local def = all_choices[1]
               if def and def.id then

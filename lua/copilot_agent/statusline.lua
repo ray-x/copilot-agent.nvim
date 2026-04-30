@@ -13,6 +13,8 @@ local truncate_session_summary = utils.truncate_session_summary
 local M = {}
 local _statusline_count_hl = '%#CopilotAgentStatuslineCount#'
 local _statusline_reset_hl = '%*'
+local _statusline_small_width = 100
+local _statusline_medium_width = 140
 
 local _mode_icon = {
   ask = '💬',
@@ -101,14 +103,71 @@ function M.statusline_attachments()
   return n > 0 and ('📎' .. n) or ''
 end
 
-function M.statusline_session()
+local function statusline_size(width)
+  width = tonumber(width) or 0
+  if width > 0 and width < _statusline_small_width then
+    return 'small'
+  end
+  if width > 0 and width < _statusline_medium_width then
+    return 'medium'
+  end
+  return 'large'
+end
+
+local function config_labels(width)
+  local size = statusline_size(width)
+  if size == 'small' then
+    return {
+      instructions = 'I',
+      agents = 'A',
+      skills = 'S',
+      mcp = 'M',
+    }
+  end
+  if size == 'medium' then
+    return {
+      instructions = 'Ins',
+      agents = 'Ag',
+      skills = 'Sk',
+      mcp = 'Mc',
+    }
+  end
+  return {
+    instructions = 'Instruction',
+    agents = 'Agent',
+    skills = 'Skill',
+    mcp = 'MCP',
+  }
+end
+
+local function statusline_session_id(session_id)
+  if
+    type(session_id) == 'string'
+    and #session_id == 36
+    and session_id:sub(9, 9) == '-'
+    and session_id:sub(14, 14) == '-'
+    and session_id:sub(19, 19) == '-'
+    and session_id:sub(24, 24) == '-'
+    and session_id:gsub('%-', ''):match('^[0-9a-fA-F]+$')
+  then
+    return '#' .. session_id:sub(1, 8)
+  end
+  return '#' .. format_session_id(session_id):gsub('T', ' ', 1)
+end
+
+function M.statusline_session(width)
   if not state.session_id or state.session_id == '' then
     return ''
   end
 
-  local formatted_id = '#' .. format_session_id(state.session_id):gsub('T', ' ', 1)
+  local formatted_id = statusline_session_id(state.session_id)
+  local size = statusline_size(width)
+  if size == 'small' then
+    return 'session: [' .. formatted_id .. ']'
+  end
+  local name_max_len = size == 'medium' and 16 or 32
   if state.session_name and state.session_name ~= '' then
-    return 'session: [' .. truncate_session_summary(state.session_name, 32) .. ' ' .. formatted_id .. ']'
+    return 'session: [' .. truncate_session_summary(state.session_name, name_max_len) .. ' ' .. formatted_id .. ']'
   end
 
   return 'session: [' .. formatted_id .. ']'
@@ -122,26 +181,27 @@ local function statusline_count_segment(icon, label, value, highlight_number)
   return string.format('%s %s: %s', icon, label, rendered)
 end
 
-local function statusline_config_segments(highlight_numbers)
+local function statusline_config_segments(highlight_numbers, width)
   local instructions = tonumber(state.instruction_count) or 0
   local agents = tonumber(state.agent_count) or 0
   local skills = tonumber(state.skill_count) or 0
   local mcp = tonumber(state.mcp_count) or 0
+  local labels = config_labels(width)
 
   return {
-    statusline_count_segment('󱃕', 'instructions', instructions, highlight_numbers),
-    statusline_count_segment('󱜙', 'agents', agents, highlight_numbers),
-    statusline_count_segment('󱨚', 'skills', skills, highlight_numbers),
-    statusline_count_segment('', 'mcp', mcp, highlight_numbers),
+    statusline_count_segment('󱃕', labels.instructions, instructions, highlight_numbers),
+    statusline_count_segment('󱜙', labels.agents, agents, highlight_numbers),
+    statusline_count_segment('󱨚', labels.skills, skills, highlight_numbers),
+    statusline_count_segment('', labels.mcp, mcp, highlight_numbers),
   }
 end
 
-function M.statusline_config()
-  return table.concat(statusline_config_segments(false), ' ')
+function M.statusline_config(width)
+  return table.concat(statusline_config_segments(false, width), ' ')
 end
 
-function M.statusline_config_highlighted()
-  return table.concat(statusline_config_segments(true), ' ')
+function M.statusline_config_highlighted(width)
+  return table.concat(statusline_config_segments(true, width), ' ')
 end
 
 local _perm_icons = {
@@ -169,6 +229,7 @@ local function build_parts(...)
 end
 
 function M.statusline_component()
+  local width = vim.api.nvim_win_get_width(0)
   return table.concat(
     build_parts(
       M.statusline_mode(),
@@ -178,7 +239,7 @@ function M.statusline_component()
       M.statusline_tool(),
       M.statusline_intent(),
       M.statusline_context(),
-      M.statusline_config(),
+      M.statusline_config(width),
       M.statusline_attachments()
     ),
     ' '
@@ -189,6 +250,7 @@ function M.refresh_input_statusline()
   if not state.input_winid or not vim.api.nvim_win_is_valid(state.input_winid) then
     return
   end
+  local width = vim.api.nvim_win_get_width(state.input_winid)
   local line = ' '
     .. table.concat(
       build_parts(
@@ -199,20 +261,25 @@ function M.refresh_input_statusline()
         M.statusline_tool(),
         M.statusline_intent(),
         M.statusline_context(),
-        M.statusline_config_highlighted(),
-        M.statusline_session(),
+        M.statusline_config_highlighted(width),
+        M.statusline_session(width),
         M.statusline_attachments()
       ),
       '  '
     )
     .. '  (? for help)'
   vim.wo[state.input_winid].statusline = line
+  local ok, input = pcall(require, 'copilot_agent.input')
+  if ok and type(input.refresh_separator) == 'function' then
+    input.refresh_separator()
+  end
 end
 
 function M.refresh_chat_statusline()
   if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then
     return
   end
+  local width = vim.api.nvim_win_get_width(state.chat_winid)
   local line = ' '
     .. table.concat(
       build_parts(
@@ -223,8 +290,8 @@ function M.refresh_chat_statusline()
         M.statusline_tool(),
         M.statusline_intent(),
         M.statusline_context(),
-        M.statusline_config_highlighted(),
-        M.statusline_session()
+        M.statusline_config_highlighted(width),
+        M.statusline_session(width)
       ),
       '  '
     )

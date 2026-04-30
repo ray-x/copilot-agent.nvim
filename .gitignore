@@ -3,6 +3,7 @@ server/copilot-agent
 server/copilot-agent.exe
 
 .vscode/*
+.opencode/*
 
 # Go test cache / coverage
 *.test

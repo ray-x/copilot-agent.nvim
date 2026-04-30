@@ -3,11 +3,9 @@
 -- license that can be found in the LICENSE file.
 
 local uv = vim.uv or vim.loop
-local cfg = require('copilot_agent.config')
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
 
-local notify = cfg.notify
 local append_entry = render.append_entry
 local working_directory = service.working_directory
 

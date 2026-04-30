@@ -38,6 +38,130 @@ local scroll_to_bottom = render.scroll_to_bottom
 local is_thinking_content = utils.is_thinking_content
 
 local M = {}
+local active_prompt_id = nil
+local queued_prompt_requests = {}
+local queued_prompt_request_ids = {}
+local prompt_handoff_delay_ms = 20
+
+local function sanitize_permission_text(text)
+  if type(text) ~= 'string' then
+    return nil
+  end
+  text = text:gsub('[\r\n]+', ' '):gsub('\t', ' ')
+  text = vim.trim(text)
+  if text == '' then
+    return nil
+  end
+  return text
+end
+
+local function build_permission_prompt(permission)
+  permission = permission or {}
+  local kind = permission.kind or 'unknown'
+  local parts = {}
+
+  if kind == 'shell' then
+    local cmd = sanitize_permission_text(permission.fullCommandText or permission.intention) or '(shell command)'
+    parts[#parts + 1] = 'Run shell command'
+    parts[#parts + 1] = cmd
+  elseif kind == 'write' then
+    parts[#parts + 1] = 'Write file'
+    parts[#parts + 1] = sanitize_permission_text(permission.fileName or permission.path) or '(unknown file)'
+  elseif kind == 'read' then
+    parts[#parts + 1] = 'Read'
+    parts[#parts + 1] = sanitize_permission_text(permission.path or permission.fileName) or '(unknown path)'
+  elseif kind == 'mcp' or kind == 'custom-tool' then
+    local tool = sanitize_permission_text(permission.toolTitle or permission.toolName) or 'unknown tool'
+    local server = sanitize_permission_text(permission.serverName) or ''
+    parts[#parts + 1] = tool
+    if server ~= '' then
+      parts[#parts + 1] = '(' .. server .. ')'
+    end
+    local description = sanitize_permission_text(permission.toolDescription)
+    if description then
+      parts[#parts + 1] = '— ' .. description
+    end
+  elseif kind == 'url' then
+    parts[#parts + 1] = 'Fetch URL'
+    parts[#parts + 1] = sanitize_permission_text(permission.url) or '(unknown URL)'
+  elseif kind == 'memory' then
+    parts[#parts + 1] = 'Memory ' .. tostring(permission.action or 'access')
+    local fact = sanitize_permission_text(permission.fact)
+    if fact then
+      parts[#parts + 1] = fact
+    end
+  elseif kind == 'hook' then
+    parts[#parts + 1] = 'Hook'
+    local hook_message = sanitize_permission_text(permission.hookMessage)
+    if hook_message then
+      parts[#parts + 1] = hook_message
+    end
+  else
+    parts[#parts + 1] = sanitize_permission_text(permission.toolTitle or permission.toolName or kind) or kind
+  end
+
+  local intention = sanitize_permission_text(permission.intention)
+  if intention and kind ~= 'shell' and kind ~= 'read' and kind ~= 'write' then
+    parts[#parts + 1] = '— ' .. intention
+  end
+
+  return 'Allow: ' .. table.concat(parts, ' ')
+end
+
+local function prompt_request_id(payload)
+  local req = payload and payload.data and payload.data.request or {}
+  local req_id = req and req.id or nil
+  if type(req_id) ~= 'string' or req_id == '' then
+    return nil
+  end
+  return req_id
+end
+
+local function reset_prompt_state()
+  active_prompt_id = nil
+  queued_prompt_requests = {}
+  queued_prompt_request_ids = {}
+end
+
+local function enqueue_prompt(kind, payload)
+  local req_id = prompt_request_id(payload)
+  if not req_id then
+    return false
+  end
+  if active_prompt_id == req_id or queued_prompt_request_ids[req_id] then
+    return false
+  end
+  queued_prompt_request_ids[req_id] = true
+  queued_prompt_requests[#queued_prompt_requests + 1] = {
+    kind = kind,
+    payload = payload,
+  }
+  return true
+end
+
+local function pop_prompt()
+  while #queued_prompt_requests > 0 do
+    local entry = table.remove(queued_prompt_requests, 1)
+    local req_id = prompt_request_id(entry.payload)
+    if req_id then
+      queued_prompt_request_ids[req_id] = nil
+      return entry
+    end
+  end
+  return nil
+end
+
+local function finish_prompt(req_id)
+  if active_prompt_id == req_id then
+    active_prompt_id = nil
+  end
+end
+
+local function defer_prompt(callback)
+  vim.defer_fn(function()
+    callback()
+  end, prompt_handoff_delay_ms)
+end
 
 local function answer_permission(session_id, request_id, approved, callback)
   request('POST', '/sessions/' .. session_id .. '/permission/' .. request_id, { approved = approved }, callback or function(_, err)
@@ -69,15 +193,30 @@ local function sync_config_counts(data)
   state.mcp_count = tonumber(data.mcpCount) or 0
 end
 
-local function show_user_input_picker(payload)
+local show_next_prompt
+
+local function present_user_input_picker(payload)
   local request_payload = payload and payload.data and payload.data.request or nil
   if type(request_payload) ~= 'table' or type(request_payload.id) ~= 'string' then
     return
   end
 
+  local req_id = request_payload.id
   local session_id = payload.data.sessionId or state.session_id
+  if type(session_id) ~= 'string' or session_id == '' then
+    finish_prompt(req_id)
+    defer_prompt(show_next_prompt)
+    return
+  end
+
+  active_prompt_id = req_id
   local choices = type(request_payload.choices) == 'table' and request_payload.choices or {}
   local allow_freeform = request_payload.allowFreeform ~= false
+
+  local function complete()
+    finish_prompt(req_id)
+    defer_prompt(show_next_prompt)
+  end
 
   local function answer(value, was_freeform)
     if value == nil or value == '' then
@@ -93,12 +232,14 @@ local function show_user_input_picker(payload)
         append_entry('error', 'Failed to answer user input: ' .. err)
       end
     end)
+    complete()
   end
 
   local function ask_freeform()
     vim.ui.input({ prompt = request_payload.question .. ' ' }, function(input)
       if input == nil or input == '' then
         notify('Input dismissed — use :CopilotAgentRetryInput to try again', vim.log.levels.WARN)
+        complete()
         return
       end
       answer(input, true)
@@ -113,6 +254,7 @@ local function show_user_input_picker(payload)
     vim.ui.select(items, { prompt = request_payload.question }, function(choice)
       if choice == nil then
         notify('Selection dismissed — use :CopilotAgentRetryInput to try again', vim.log.levels.WARN)
+        complete()
         return
       end
       if choice == 'Custom...' then
@@ -126,7 +268,18 @@ local function show_user_input_picker(payload)
 
   if allow_freeform then
     ask_freeform()
+    return
   end
+
+  complete()
+end
+
+local function show_user_input_picker(payload)
+  if not enqueue_prompt('user_input', payload) then
+    return
+  end
+
+  vim.schedule(show_next_prompt)
 end
 
 local function handle_user_input(payload)
@@ -140,6 +293,208 @@ local function handle_user_input(payload)
 
   append_entry('system', 'Input requested: ' .. request_payload.question)
   show_user_input_picker(payload)
+end
+
+local function present_permission_picker(payload)
+  local data = payload and payload.data or {}
+  local req = data.request or {}
+  local req_id = req.id
+  local sid = state.session_id
+  local event_session_id = data.sessionId
+  if not sid or sid == '' then
+    finish_prompt(req_id)
+    defer_prompt(show_next_prompt)
+    return
+  end
+  if type(event_session_id) == 'string' and sid ~= event_session_id then
+    finish_prompt(req_id)
+    defer_prompt(show_next_prompt)
+    return
+  end
+
+  local perm = req.request or {}
+  local kind = perm.kind or 'unknown'
+  local prompt_str = build_permission_prompt(perm)
+
+  -- Build choices: Allow, Deny, Allow all for session.
+  -- For read/write with a file path, also offer "Allow this directory".
+  local choices = { 'Allow', 'Deny', 'Allow all for this session' }
+  local dir_path = nil
+  local tool_label = approvals.tool_label(perm)
+  local allow_tool_choice = nil
+  local has_diff = kind == 'write' and perm.diff and perm.diff ~= ''
+  if kind == 'read' or kind == 'write' then
+    local file = perm.path or perm.fileName
+    if file and file ~= '' then
+      dir_path = vim.fn.fnamemodify(file, ':h')
+      if dir_path and dir_path ~= '' and dir_path ~= '.' then
+        table.insert(choices, 3, 'Allow this directory (' .. vim.fn.fnamemodify(dir_path, ':~') .. ')')
+      end
+    end
+  elseif tool_label then
+    allow_tool_choice = 'Allow ' .. tool_label .. ' for the rest of this session'
+    table.insert(choices, 2, allow_tool_choice)
+  end
+  if has_diff then
+    table.insert(choices, 2, 'Show diff')
+  end
+
+  active_prompt_id = req_id
+
+  -- Show the diff in a floating window.
+  -- Tries the configured external diff command (e.g. delta) in a terminal buffer;
+  -- falls back to a plain diff buffer if the command is unavailable.
+  local function show_diff_float(diff_text, after_close)
+    local lines = vim.split(diff_text, '\n', { plain = true })
+    local width = math.min(math.floor(vim.o.columns * 0.8), 120)
+    local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.7))
+    local win_opts = {
+      relative = 'editor',
+      width = width,
+      height = height,
+      row = math.floor((vim.o.lines - height) / 2),
+      col = math.floor((vim.o.columns - width) / 2),
+      style = 'minimal',
+      border = 'rounded',
+      title = ' Proposed changes ',
+      title_pos = 'center',
+    }
+
+    local function setup_close_keys(buf, win)
+      local function close()
+        if vim.api.nvim_win_is_valid(win) then
+          vim.api.nvim_win_close(win, true)
+        end
+        if after_close then
+          after_close()
+        end
+      end
+      vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+      vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
+    end
+
+    -- Try external diff command (e.g. delta).
+    -- Append --side-by-side automatically when the window is wide enough.
+    local diff_cmd = state.config.chat.diff_cmd
+    if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 then
+      diff_cmd = vim.list_extend({}, diff_cmd) -- shallow copy
+      if diff_cmd[1] == 'delta' and width >= 100 then
+        table.insert(diff_cmd, '--side-by-side')
+      end
+    end
+    if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 and vim.fn.executable(diff_cmd[1]) == 1 then
+      local buf = vim.api.nvim_create_buf(false, true)
+      local win = vim.api.nvim_open_win(buf, true, win_opts)
+      window.disable_folds(win)
+      vim.fn.jobstart(diff_cmd, {
+        term = true,
+        on_exit = function()
+          vim.schedule(function()
+            if vim.api.nvim_buf_is_valid(buf) then
+              setup_close_keys(buf, win)
+            end
+          end)
+        end,
+      })
+      -- Feed the diff text to the terminal's stdin.
+      local chan = vim.bo[buf].channel
+      if chan and chan > 0 then
+        pcall(vim.fn.chansend, chan, diff_text)
+        pcall(vim.fn.chanclose, chan, 'stdin')
+      end
+      return
+    end
+
+    -- Fallback: plain diff buffer.
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].buftype = 'nofile'
+    vim.bo[buf].bufhidden = 'wipe'
+    vim.bo[buf].swapfile = false
+    vim.bo[buf].filetype = 'diff'
+    vim.bo[buf].modifiable = false
+    local win = vim.api.nvim_open_win(buf, true, win_opts)
+    window.disable_folds(win)
+    setup_close_keys(buf, win)
+  end
+
+  -- Permission picker (extracted so "Show diff" can re-invoke it).
+  local function show_permission_picker()
+    vim.ui.select(choices, { prompt = prompt_str }, function(choice)
+      if not state.session_id or state.session_id ~= sid then
+        finish_prompt(req_id)
+        defer_prompt(show_next_prompt)
+        return
+      end
+      if not choice then
+        finish_prompt(req_id)
+        defer_prompt(show_next_prompt)
+        return
+      end
+
+      if choice == 'Show diff' then
+        show_diff_float(perm.diff, function()
+          vim.schedule(show_permission_picker)
+        end)
+        return
+      end
+
+      if choice == 'Allow all for this session' then
+        -- Approve this request, then switch to approve-all mode.
+        answer_permission(sid, req_id, true)
+        state.permission_mode = 'approve-all'
+        request('POST', '/sessions/' .. sid .. '/permission-mode', { mode = 'approve-all' }, function(_, err)
+          if err then
+            notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
+          else
+            notify('Permission mode set to approve-all for this session', vim.log.levels.INFO)
+            refresh_statuslines()
+          end
+        end)
+      elseif allow_tool_choice and choice == allow_tool_choice then
+        local ok, allow_err = approvals.allow_tool(perm)
+        if not ok then
+          notify('Failed to allow tool: ' .. tostring(allow_err), vim.log.levels.WARN)
+          return
+        end
+        answer_permission(sid, req_id, true)
+        notify('Allowed ' .. tool_label .. ' for this session', vim.log.levels.INFO)
+      elseif choice:match('^Allow this directory') then
+        answer_permission(sid, req_id, true)
+        if dir_path then
+          local normalized = approvals.add_directory(dir_path)
+          if normalized then
+            notify('Added directory: ' .. vim.fn.fnamemodify(normalized, ':~'), vim.log.levels.INFO)
+          end
+        end
+      else
+        local approved = (choice == 'Allow')
+        answer_permission(sid, req_id, approved)
+      end
+
+      finish_prompt(req_id)
+      defer_prompt(show_next_prompt)
+    end)
+  end
+
+  vim.schedule(show_permission_picker)
+end
+
+show_next_prompt = function()
+  if active_prompt_id then
+    return
+  end
+
+  local next_prompt = pop_prompt()
+  if not next_prompt then
+    return
+  end
+
+  if next_prompt.kind == 'permission' then
+    present_permission_picker(next_prompt.payload)
+  elseif next_prompt.kind == 'user_input' then
+    present_user_input_picker(next_prompt.payload)
+  end
 end
 
 local function handle_host_event(event_name, payload)
@@ -170,7 +525,10 @@ local function handle_host_event(event_name, payload)
     state.skill_count = 0
     state.mcp_count = 0
     state.session_name = nil
+    state.pending_user_input = nil
+    reset_prompt_state()
     refresh_statuslines()
+    append_entry('system', 'Session disconnected')
   elseif event_name == 'host.permission_requested' then
     -- In interactive mode, Go sends a request object with an ID; ask the user.
     local req = data.request or {}
@@ -180,221 +538,19 @@ local function handle_host_event(event_name, payload)
       local perm = req.request or {}
       local kind = perm.kind or 'unknown'
       local sid = state.session_id
-      local auto_allowed = false
-      if kind == 'read' or kind == 'write' then
-        auto_allowed = approvals.directory_allowed(perm.path or perm.fileName)
-      else
-        auto_allowed = approvals.tool_allowed(perm)
+      local event_session_id = data.sessionId
+      if type(event_session_id) == 'string' and sid and event_session_id ~= sid then
+        return
       end
+      local auto_allowed = (kind == 'read' or kind == 'write') and approvals.directory_allowed(perm.path or perm.fileName) or approvals.tool_allowed(perm)
       if auto_allowed and sid then
         answer_permission(sid, req_id, true)
         return
       end
-      local parts = {}
-
-      -- Build a descriptive prompt based on the permission kind.
-      if kind == 'shell' then
-        local cmd = perm.fullCommandText or perm.intention or '(shell command)'
-        table.insert(parts, 'Run shell command')
-        table.insert(parts, cmd)
-      elseif kind == 'write' then
-        local file = perm.fileName or perm.path or '(unknown file)'
-        table.insert(parts, 'Write file')
-        table.insert(parts, file)
-      elseif kind == 'read' then
-        local file = perm.path or perm.fileName or '(unknown path)'
-        table.insert(parts, 'Read')
-        table.insert(parts, file)
-      elseif kind == 'mcp' or kind == 'custom-tool' then
-        local tool = perm.toolTitle or perm.toolName or 'unknown tool'
-        local server = perm.serverName or ''
-        table.insert(parts, tool)
-        if server ~= '' then
-          table.insert(parts, '(' .. server .. ')')
-        end
-        if perm.toolDescription and perm.toolDescription ~= '' then
-          table.insert(parts, '— ' .. perm.toolDescription)
-        end
-      elseif kind == 'url' then
-        local url = perm.url or '(unknown URL)'
-        table.insert(parts, 'Fetch URL')
-        table.insert(parts, url)
-      elseif kind == 'memory' then
-        local action = perm.action or 'access'
-        table.insert(parts, 'Memory ' .. tostring(action))
-        if perm.fact then
-          table.insert(parts, perm.fact)
-        end
-      elseif kind == 'hook' then
-        table.insert(parts, 'Hook')
-        if perm.hookMessage then
-          table.insert(parts, perm.hookMessage)
-        end
-      else
-        local tool = perm.toolTitle or perm.toolName or kind
-        table.insert(parts, tool)
+      if not enqueue_prompt('permission', payload) then
+        return
       end
-
-      -- Append intention if present and not already shown.
-      if perm.intention and kind ~= 'shell' then
-        table.insert(parts, '— ' .. perm.intention)
-      end
-
-      local prompt_str = 'Allow: ' .. table.concat(parts, ' ')
-
-      -- Build choices: Allow, Deny, Allow all for session.
-      -- For read/write with a file path, also offer "Allow this directory".
-      local choices = { 'Allow', 'Deny', 'Allow all for this session' }
-      local dir_path = nil
-      local tool_label = approvals.tool_label(perm)
-      local allow_tool_choice = nil
-      local has_diff = kind == 'write' and perm.diff and perm.diff ~= ''
-      if kind == 'read' or kind == 'write' then
-        local file = perm.path or perm.fileName
-        if file and file ~= '' then
-          dir_path = vim.fn.fnamemodify(file, ':h')
-          if dir_path and dir_path ~= '' and dir_path ~= '.' then
-            table.insert(choices, 3, 'Allow this directory (' .. vim.fn.fnamemodify(dir_path, ':~') .. ')')
-          end
-        end
-      elseif tool_label then
-        allow_tool_choice = 'Allow ' .. tool_label .. ' for the rest of this session'
-        table.insert(choices, 2, allow_tool_choice)
-      end
-      if has_diff then
-        table.insert(choices, 2, 'Show diff')
-      end
-
-      -- Show the diff in a floating window.
-      -- Tries the configured external diff command (e.g. delta) in a terminal buffer;
-      -- falls back to a plain diff buffer if the command is unavailable.
-      local function show_diff_float(diff_text, after_close)
-        local lines = vim.split(diff_text, '\n', { plain = true })
-        local width = math.min(math.floor(vim.o.columns * 0.8), 120)
-        local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.7))
-        local win_opts = {
-          relative = 'editor',
-          width = width,
-          height = height,
-          row = math.floor((vim.o.lines - height) / 2),
-          col = math.floor((vim.o.columns - width) / 2),
-          style = 'minimal',
-          border = 'rounded',
-          title = ' Proposed changes ',
-          title_pos = 'center',
-        }
-
-        local function setup_close_keys(buf, win)
-          local function close()
-            if vim.api.nvim_win_is_valid(win) then
-              vim.api.nvim_win_close(win, true)
-            end
-            if after_close then
-              after_close()
-            end
-          end
-          vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
-          vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
-        end
-
-        -- Try external diff command (e.g. delta).
-        -- Append --side-by-side automatically when the window is wide enough.
-        local diff_cmd = state.config.chat.diff_cmd
-        if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 then
-          diff_cmd = vim.list_extend({}, diff_cmd) -- shallow copy
-          if diff_cmd[1] == 'delta' and width >= 100 then
-            table.insert(diff_cmd, '--side-by-side')
-          end
-        end
-        if diff_cmd and type(diff_cmd) == 'table' and #diff_cmd > 0 and vim.fn.executable(diff_cmd[1]) == 1 then
-          local buf = vim.api.nvim_create_buf(false, true)
-          local win = vim.api.nvim_open_win(buf, true, win_opts)
-          window.disable_folds(win)
-          vim.fn.jobstart(diff_cmd, {
-            term = true,
-            on_exit = function()
-              vim.schedule(function()
-                if vim.api.nvim_buf_is_valid(buf) then
-                  setup_close_keys(buf, win)
-                end
-              end)
-            end,
-          })
-          -- Feed the diff text to the terminal's stdin.
-          local chan = vim.bo[buf].channel
-          if chan and chan > 0 then
-            pcall(vim.fn.chansend, chan, diff_text)
-            pcall(vim.fn.chanclose, chan, 'stdin')
-          end
-          return
-        end
-
-        -- Fallback: plain diff buffer.
-        local buf = vim.api.nvim_create_buf(false, true)
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-        vim.bo[buf].buftype = 'nofile'
-        vim.bo[buf].bufhidden = 'wipe'
-        vim.bo[buf].swapfile = false
-        vim.bo[buf].filetype = 'diff'
-        vim.bo[buf].modifiable = false
-        local win = vim.api.nvim_open_win(buf, true, win_opts)
-        window.disable_folds(win)
-        setup_close_keys(buf, win)
-      end
-
-      -- Permission picker (extracted so "Show diff" can re-invoke it).
-      local function show_permission_picker()
-        vim.ui.select(choices, { prompt = prompt_str }, function(choice)
-          if not state.session_id then
-            return
-          end
-          if not choice then
-            return
-          end
-
-          if choice == 'Show diff' then
-            show_diff_float(perm.diff, function()
-              vim.schedule(show_permission_picker)
-            end)
-            return
-          end
-
-          if choice == 'Allow all for this session' then
-            -- Approve this request, then switch to approve-all mode.
-            answer_permission(sid, req_id, true)
-            state.permission_mode = 'approve-all'
-            request('POST', '/sessions/' .. sid .. '/permission-mode', { mode = 'approve-all' }, function(_, err)
-              if err then
-                notify('Failed to set permission mode: ' .. tostring(err), vim.log.levels.WARN)
-              else
-                notify('Permission mode set to approve-all for this session', vim.log.levels.INFO)
-                refresh_statuslines()
-              end
-            end)
-          elseif allow_tool_choice and choice == allow_tool_choice then
-            local ok, allow_err = approvals.allow_tool(perm)
-            if not ok then
-              notify('Failed to allow tool: ' .. tostring(allow_err), vim.log.levels.WARN)
-              return
-            end
-            answer_permission(sid, req_id, true)
-            notify('Allowed ' .. tool_label .. ' for this session', vim.log.levels.INFO)
-          elseif choice:match('^Allow this directory') then
-            answer_permission(sid, req_id, true)
-            if dir_path then
-              local normalized = approvals.add_directory(dir_path)
-              if normalized then
-                notify('Added directory: ' .. vim.fn.fnamemodify(normalized, ':~'), vim.log.levels.INFO)
-              end
-            end
-          else
-            local approved = (choice == 'Allow')
-            answer_permission(sid, req_id, approved)
-          end
-        end)
-      end
-
-      vim.schedule(show_permission_picker)
+      vim.schedule(show_next_prompt)
     end
     -- Auto-approved/rejected decisions are reflected in the statusline; no notify needed.
   elseif event_name == 'host.permission_decision' then
@@ -403,10 +559,6 @@ local function handle_host_event(event_name, payload)
   elseif event_name == 'host.permission_mode_changed' then
     state.permission_mode = data.mode or state.permission_mode
     refresh_statuslines()
-  elseif event_name == 'host.session_disconnected' then
-    state.session_name = nil
-    state.pending_user_input = nil
-    append_entry('system', 'Session disconnected')
   elseif event_name == 'host.history_done' then
     state.history_loading = false
     render_chat()
@@ -458,6 +610,107 @@ local function offer_diff_review(abs_path, rel_path)
     window.disable_folds(vim.api.nvim_get_current_win())
     vim.cmd('diffthis')
   end)
+end
+
+local function read_disk_lines(abs_path)
+  local ok, lines = pcall(vim.fn.readfile, abs_path)
+  if not ok or type(lines) ~= 'table' then
+    return nil, lines
+  end
+  return lines
+end
+
+local function file_change_summary(old_lines, new_lines)
+  old_lines = old_lines or {}
+  new_lines = new_lines or {}
+  local old_text = table.concat(old_lines, '\n')
+  local new_text = table.concat(new_lines, '\n')
+  if old_text == new_text then
+    return 'no content change'
+  end
+
+  if not vim.diff then
+    local delta = #new_lines - #old_lines
+    if delta > 0 then
+      return string.format('+%d lines', delta)
+    elseif delta < 0 then
+      return string.format('-%d lines', math.abs(delta))
+    end
+    return 'content updated'
+  end
+
+  local hunks = vim.diff(old_text, new_text, { result_type = 'indices' }) or {}
+  local added = 0
+  local removed = 0
+  local changed = 0
+  for _, hunk in ipairs(hunks) do
+    local old_count = tonumber(hunk[2]) or 0
+    local new_count = tonumber(hunk[4]) or 0
+    changed = changed + math.min(old_count, new_count)
+    if new_count > old_count then
+      added = added + (new_count - old_count)
+    elseif old_count > new_count then
+      removed = removed + (old_count - new_count)
+    end
+  end
+
+  local parts = {}
+  if added > 0 then
+    parts[#parts + 1] = '+' .. added
+  end
+  if removed > 0 then
+    parts[#parts + 1] = '-' .. removed
+  end
+  if changed > 0 then
+    parts[#parts + 1] = '~' .. changed
+  end
+  parts[#parts + 1] = string.format('%d %s', #hunks, #hunks == 1 and 'hunk' or 'hunks')
+  return table.concat(parts, ' ')
+end
+
+local function restore_window_views(bufnr, views)
+  for _, winid in ipairs(vim.fn.win_findbuf(bufnr)) do
+    if vim.api.nvim_win_is_valid(winid) and views[winid] then
+      pcall(vim.api.nvim_win_call, winid, function()
+        vim.fn.winrestview(views[winid])
+      end)
+    end
+  end
+end
+
+local function reload_buffer_from_disk(bufnr, abs_path)
+  local new_lines, read_err = read_disk_lines(abs_path)
+  if not new_lines then
+    return nil, read_err
+  end
+
+  local old_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local summary = file_change_summary(old_lines, new_lines)
+  local wins = vim.fn.win_findbuf(bufnr)
+  local views = {}
+  for _, winid in ipairs(wins) do
+    if vim.api.nvim_win_is_valid(winid) then
+      views[winid] = vim.api.nvim_win_call(winid, function()
+        return vim.fn.winsaveview()
+      end)
+    end
+  end
+
+  local modified = vim.bo[bufnr].modified
+  if modified then
+    return summary, 'buffer has unsaved changes'
+  end
+
+  local was_modifiable = vim.bo[bufnr].modifiable
+  local was_readonly = vim.bo[bufnr].readonly
+  vim.bo[bufnr].modifiable = true
+  vim.bo[bufnr].readonly = false
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, new_lines)
+  vim.bo[bufnr].modified = false
+  vim.bo[bufnr].modifiable = was_modifiable
+  vim.bo[bufnr].readonly = was_readonly
+  restore_window_views(bufnr, views)
+  return summary, nil
 end
 
 local function handle_session_event(payload)
@@ -608,11 +861,12 @@ local function handle_session_event(payload)
       if op == 'create' then
         notify('Agent created: ' .. rel_path, vim.log.levels.INFO)
       elseif op == 'update' and bufnr_match then
-        -- Reload the buffer from disk.
-        vim.api.nvim_buf_call(bufnr_match, function()
-          vim.cmd('silent! checktime')
-        end)
-        notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
+        local summary, reload_err = reload_buffer_from_disk(bufnr_match, abs_path)
+        if reload_err then
+          notify('Agent updated on disk: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. '); reload skipped: ' .. tostring(reload_err), vim.log.levels.WARN)
+        else
+          notify('Agent reloaded: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. ')', vim.log.levels.INFO)
+        end
         -- Offer diff review if the file is tracked by git.
         if state.config.chat.diff_review ~= false then
           offer_diff_review(abs_path, rel_path)

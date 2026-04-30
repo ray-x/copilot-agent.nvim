@@ -59,16 +59,18 @@ local function contains_query(task, query)
     return true
   end
 
-  local haystack = table.concat({
-    trim(task.id),
-    trim(task.kind),
-    trim(task.status),
-    trim(task.title),
-    trim(task.description),
-    trim(task.summary),
-    trim(task.agentType),
-    trim(task.agentName),
-  }, '\n'):lower()
+  local haystack = table
+    .concat({
+      trim(task.id),
+      trim(task.kind),
+      trim(task.status),
+      trim(task.title),
+      trim(task.description),
+      trim(task.summary),
+      trim(task.agentType),
+      trim(task.agentName),
+    }, '\n')
+    :lower()
 
   return haystack:find(query, 1, true) ~= nil
 end

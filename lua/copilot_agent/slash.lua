@@ -168,11 +168,11 @@ local function delete_side_session(session_id, callback)
   end, { auto_start = false })
 end
 
-local function extract_side_session_answer(events)
+local function extract_side_session_answer(session_events)
   local answer = nil
   local turn_started = false
   local turn_finished = false
-  for _, event in ipairs(events or {}) do
+  for _, event in ipairs(session_events or {}) do
     local event_type = event and event.type or nil
     local data = event and event.data or {}
     if event_type == 'assistant.turn_start' then

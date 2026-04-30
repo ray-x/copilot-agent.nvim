@@ -237,6 +237,7 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         -- otherwise falls back to { "go", "run", "." } (requires Go toolchain).
         command = nil,
         cwd = nil,                         -- defaults to <plugin_root>/server
+        detach = true,                     -- default: reuse one detached background service across Neovim instances
         port_range = nil,                  -- e.g. "18000-19000" for fixed range
         startup_timeout_ms = 15000,
         startup_poll_interval_ms = 250,
@@ -271,6 +272,28 @@ service = { auto_start = true, command = { "/path/to/copilot-agent", "--addr", "
 -- Port range (first free port in 18000–19000)
 service = { auto_start = true, command = { "/path/to/copilot-agent" }, port_range = "18000-19000" }
 ```
+
+#### Global service vs isolated instances
+
+By default, `auto_start = true` launches or reuses a **single detached background service** for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default.
+
+If you want **per-project isolation**, pin a project-specific address and disable detaching:
+
+```lua
+require("copilot_agent").setup({
+  base_url = "http://127.0.0.1:18121",
+  session = {
+    working_directory = function() return vim.fn.getcwd() end,
+  },
+  service = {
+    auto_start = true,
+    detach = false,
+    port_range = "18121-18121",
+  },
+})
+```
+
+Reuse the same stable port when reopening the same project later. If you open multiple isolated projects at the same time, each one needs its own port.
 
 ---
 
@@ -427,7 +450,7 @@ Cycled with `<C-t>` in the chat/input buffer. The mode is shown in the statuslin
 
 - **render-markdown.nvim** integrates automatically when installed. On very long responses it can cause visible lag. Disable with `chat = { render_markdown = false }` to use treesitter highlighting only (much faster).
 - **Streaming** is enabled by default (`session.streaming = true`). The chat buffer updates incrementally as tokens arrive.
-- **Session resume**: with 1 matching session it resumes silently; with multiple sessions `auto_resume = "prompt"` (default) shows a picker so you can choose which to continue.
+- **Session resume**: with 1 matching session it resumes silently; with multiple sessions `auto_resume = "prompt"` (default) shows a picker titled with the current project name and path so you can choose which session to continue.
 
 ### Permission Modes
 
@@ -511,7 +534,7 @@ require("lualine").setup {
 
 ## Session Persistence
 
-Sessions are scoped per project: `pick_or_create_session` filters persisted sessions by working directory, so opening a different project starts a fresh session. Use `:CopilotAgentNewSession` to force a new one in the same directory, or `:CopilotAgentSwitchSession` to pick from all persisted sessions across projects.
+Session resume is scoped per project by `working_directory`: `pick_or_create_session` filters persisted sessions by working directory, so opening a different project starts a fresh session. The auto-started service itself is still global by default, which is why the startup picker now shows the current project name and path explicitly. Use `:CopilotAgentNewSession` to force a new one in the same directory, or `:CopilotAgentSwitchSession` to pick from all persisted sessions across projects.
 
 Sessions are auto-named by the SDK after the first conversation turn. You can rename a session by typing `/rename My Session Name` in the input buffer.
 
@@ -587,6 +610,7 @@ session = { auto_resume = 'auto' }
 
 - **Go Quality Engineer** — runs the repository's existing Go quality checks
 - **Selene Lua Quality Engineer** — runs Selene against the Lua sources
+- **Code Review Engineer** — reviews Lua and Go changes for correctness, code quality, performance, and security
 - **Git Commit Agent** — inspects git status, runs repo-appropriate pre-commit checks, and prepares commit messages from the staged diff
 
 Customize the commit agent's default checks and feedback rules in `.github/commit-agent.md`.

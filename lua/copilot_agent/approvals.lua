@@ -19,7 +19,7 @@ local function normalize_path(path)
     return nil
   end
 
-  local normalized = path
+  local normalized
   if vim.fs and type(vim.fs.normalize) == 'function' then
     normalized = vim.fs.normalize(path)
   else

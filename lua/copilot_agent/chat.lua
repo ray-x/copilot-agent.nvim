@@ -843,6 +843,8 @@ function M.ask(prompt, opts)
     end
   end
 
+  require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
+
   local with_session = require('copilot_agent.session').with_session
   with_session(function(session_id, err)
     if err then

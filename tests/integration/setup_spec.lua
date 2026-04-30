@@ -260,10 +260,12 @@ describe('statusline API', function()
     assert_true(#v > 0)
   end)
 
-  it('chat and input statuslines show truncated session summaries with formatted ids', function()
+  it('chat and input statuslines show responsive session labels and formatted ids', function()
     local statusline = require('copilot_agent.statusline')
     local expected_id = '#' .. expected_local_session_id('nvim', 1717245296):gsub('T', ' ', 1)
     local chat_winid = vim.api.nvim_get_current_win()
+    local original_get_width = vim.api.nvim_win_get_width
+    local widths = {}
     vim.cmd('belowright new')
     local input_winid = vim.api.nvim_get_current_win()
 
@@ -271,6 +273,11 @@ describe('statusline API', function()
     agent.state.input_winid = input_winid
     agent.state.session_id = 'nvim-1717245296789000000'
     agent.state.session_name = nil
+    widths[chat_winid] = 200
+    widths[input_winid] = 200
+    vim.api.nvim_win_get_width = function(winid)
+      return widths[winid] or original_get_width(winid)
+    end
     statusline.refresh_chat_statusline()
     statusline.refresh_input_statusline()
     assert_true(vim.wo[chat_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) ~= nil)
@@ -282,6 +289,23 @@ describe('statusline API', function()
     assert_true(vim.wo[chat_winid].statusline:find('session: [abcdefghijklmnopqrstuvwxyz012345 ' .. expected_id .. ']', 1, true) ~= nil)
     assert_true(vim.wo[input_winid].statusline:find('session: [abcdefghijklmnopqrstuvwxyz012345 ' .. expected_id .. ']', 1, true) ~= nil)
     assert_true(vim.wo[chat_winid].statusline:find('session: abcdefghijklmnopqrstuvwxyz0123456789', 1, true) == nil)
+
+    widths[chat_winid] = 120
+    statusline.refresh_chat_statusline()
+    assert_true(vim.wo[chat_winid].statusline:find('session: [abcdefghijklmnop ' .. expected_id .. ']', 1, true) ~= nil)
+
+    widths[chat_winid] = 80
+    statusline.refresh_chat_statusline()
+    assert_true(vim.wo[chat_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) ~= nil)
+    assert_true(vim.wo[chat_winid].statusline:find('session: [abcdefghijklmnop', 1, true) == nil)
+
+    agent.state.session_id = '123e4567-e89b-12d3-a456-426614174000'
+    agent.state.session_name = 'uuid session name'
+    widths[chat_winid] = 200
+    statusline.refresh_chat_statusline()
+    assert_true(vim.wo[chat_winid].statusline:find('session: [uuid session name #123e4567]', 1, true) ~= nil)
+
+    vim.api.nvim_win_get_width = original_get_width
   end)
 end)
 
@@ -361,18 +385,288 @@ describe('statusline config counts', function()
     agent.setup({ auto_create_session = false })
   end)
 
-  it('includes discovered instruction, agent, skill, and MCP counts', function()
+  it('uses responsive labels for discovered instruction, agent, skill, and MCP counts', function()
+    local original_get_width = vim.api.nvim_win_get_width
     agent.state.instruction_count = 2
     agent.state.agent_count = 1
     agent.state.skill_count = 3
     agent.state.mcp_count = 4
+ 
+    local small = '󱃕 I: 2 󱜙 A: 1 󱨚 S: 3  M: 4'
+    local medium = '󱃕 Ins: 2 󱜙 Ag: 1 󱨚 Sk: 3  Mc: 4'
+    local large = '󱃕 Instruction: 2 󱜙 Agent: 1 󱨚 Skill: 3  MCP: 4'
+    local highlighted = '󱃕 Instruction: %#CopilotAgentStatuslineCount#2%* 󱜙 Agent: %#CopilotAgentStatuslineCount#1%* 󱨚 Skill: %#CopilotAgentStatuslineCount#3%*  MCP: %#CopilotAgentStatuslineCount#4%*'
+ 
+    assert_eq(small, require('copilot_agent.statusline').statusline_config(80))
+    assert_eq(medium, require('copilot_agent.statusline').statusline_config(120))
+    assert_eq(large, require('copilot_agent.statusline').statusline_config(200))
+    assert_eq(highlighted, require('copilot_agent.statusline').statusline_config_highlighted(200))
+    vim.api.nvim_win_get_width = function(winid)
+      if winid == 0 then
+        return 200
+      end
+      return original_get_width(winid)
+    end
+    assert_true(agent.statusline():find(large, 1, true) ~= nil)
+    vim.api.nvim_win_get_width = original_get_width
+  end)
+end)
 
-    local expected = '󱃕 instructions: 2 󱜙 agents: 1 󱨚 skills: 3  mcp: 4'
-    local highlighted = '󱃕 instructions: %#CopilotAgentStatuslineCount#2%* 󱜙 agents: %#CopilotAgentStatuslineCount#1%* 󱨚 skills: %#CopilotAgentStatuslineCount#3%*  mcp: %#CopilotAgentStatuslineCount#4%*'
+describe('workspace file reload', function()
+  local agent
+  local events
+  local original_notify
+  local notifications
+  local temp_file
 
-    assert_eq(expected, require('copilot_agent.statusline').statusline_config())
-    assert_eq(highlighted, require('copilot_agent.statusline').statusline_config_highlighted())
-    assert_true(agent.statusline():find(expected, 1, true) ~= nil)
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = true })
+    events = require('copilot_agent.events')
+    original_notify = vim.notify
+    notifications = {}
+    vim.notify = function(message, level)
+      notifications[#notifications + 1] = { message = message, level = level }
+    end
+    local cwd = require('copilot_agent.service').working_directory()
+    temp_file = cwd .. '/tmp-copilot-agent-reload-spec.lua'
+    vim.fn.writefile({ 'local value = 1', 'return value' }, temp_file)
+    agent.state.config.chat.diff_review = false
+  end)
+
+  after_each(function()
+    vim.notify = original_notify
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == temp_file then
+        pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+      end
+    end
+    if temp_file and temp_file ~= '' then
+      vim.fn.delete(temp_file)
+    end
+    pcall(vim.cmd, 'tabonly | only')
+  end)
+
+  it('reloads changed buffers immediately and reports a diff summary', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.fn.writefile({ 'local value = 2', 'print(value)', 'return value' }, temp_file)
+
+    events.handle_session_event({
+      type = 'session.workspace_file_changed',
+      data = {
+        operation = 'update',
+        path = vim.fn.fnamemodify(temp_file, ':t'),
+      },
+    })
+
+    vim.wait(100)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq('local value = 2', lines[1])
+    assert_eq('print(value)', lines[2])
+    assert_true(#notifications > 0)
+    assert_true(notifications[#notifications].message:find('Agent reloaded:', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find('+1', 1, true) ~= nil)
+  end)
+
+  it('skips reload for modified buffers and reports why', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'local value = 99', 'return value' })
+    vim.bo[bufnr].modified = true
+    vim.fn.writefile({ 'local value = 3', 'return value' }, temp_file)
+
+    events.handle_session_event({
+      type = 'session.workspace_file_changed',
+      data = {
+        operation = 'update',
+        path = vim.fn.fnamemodify(temp_file, ':t'),
+      },
+    })
+
+    vim.wait(100)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq('local value = 99', lines[1])
+    assert_true(#notifications > 0)
+    assert_true(notifications[#notifications].message:find('reload skipped', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find('unsaved changes', 1, true) ~= nil)
+    vim.bo[bufnr].modified = false
+  end)
+end)
+
+describe('permission request prompts', function()
+  local agent
+  local events
+  local original_ui_select
+  local original_ui_input
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false })
+    agent.state.session_id = 'session-123'
+    events = require('copilot_agent.events')
+    original_ui_select = vim.ui.select
+    original_ui_input = vim.ui.input
+  end)
+
+  after_each(function()
+    vim.ui.select = original_ui_select
+    vim.ui.input = original_ui_input
+  end)
+
+  it('uses a single-line read prompt without duplicating the file intention', function()
+    local captured
+    local path = '/Users/rayxu/github/ray-x/go.nvim/lua/go/commands.lua'
+
+    vim.ui.select = function(items, opts, _)
+      captured = { items = items, prompt = opts.prompt }
+    end
+
+    events.handle_host_event('host.permission_requested', {
+      data = {
+        sessionId = 'session-123',
+        mode = 'interactive',
+        request = {
+          id = 'perm-read-1',
+          request = {
+            kind = 'read',
+            path = path,
+            intention = 'Read file:\n' .. path,
+          },
+        },
+      },
+    })
+
+    vim.wait(100, function()
+      return captured ~= nil
+    end)
+
+    assert_eq('Allow: Read ' .. path, captured.prompt)
+    assert_true(captured.prompt:find('\n', 1, true) == nil)
+    assert_eq('Allow', captured.items[1])
+    assert_eq('Deny', captured.items[2])
+  end)
+
+  it('queues overlapping mixed permission requests instead of opening stacked pickers', function()
+    local calls = {}
+
+    vim.ui.select = function(items, opts, on_choice)
+      calls[#calls + 1] = {
+        items = items,
+        prompt = opts.prompt,
+        on_choice = on_choice,
+      }
+    end
+
+    events.handle_host_event('host.permission_requested', {
+      data = {
+        sessionId = 'session-123',
+        mode = 'interactive',
+        request = {
+          id = 'perm-read-1',
+          request = {
+            kind = 'read',
+            path = '/tmp/one.lua',
+            intention = 'Read file:\n/tmp/one.lua',
+          },
+        },
+      },
+    })
+
+    events.handle_host_event('host.permission_requested', {
+      data = {
+        sessionId = 'session-123',
+        mode = 'interactive',
+        request = {
+          id = 'perm-tool-1',
+          request = {
+            kind = 'custom-tool',
+            toolTitle = 'Search files',
+            serverName = 'workspace',
+          },
+        },
+      },
+    })
+
+    vim.wait(100)
+
+    assert_eq(1, #calls)
+    assert_eq('Allow: Read /tmp/one.lua', calls[1].prompt)
+
+    calls[1].on_choice(nil)
+
+    vim.wait(10)
+    assert_eq(1, #calls)
+
+    vim.wait(100, function()
+      return #calls == 2
+    end)
+    assert_eq('Allow: Search files (workspace)', calls[2].prompt)
+  end)
+
+  it('serializes user-input prompts behind an active permission prompt', function()
+    local permission_calls = {}
+    local input_calls = {}
+
+    vim.ui.select = function(items, opts, on_choice)
+      permission_calls[#permission_calls + 1] = {
+        items = items,
+        prompt = opts.prompt,
+        on_choice = on_choice,
+      }
+    end
+
+    vim.ui.input = function(opts, on_input)
+      input_calls[#input_calls + 1] = {
+        prompt = opts.prompt,
+        on_input = on_input,
+      }
+    end
+
+    events.handle_host_event('host.permission_requested', {
+      data = {
+        sessionId = 'session-123',
+        mode = 'interactive',
+        request = {
+          id = 'perm-read-1',
+          request = {
+            kind = 'read',
+            path = '/tmp/one.lua',
+            intention = 'Read file:\n/tmp/one.lua',
+          },
+        },
+      },
+    })
+
+    events.handle_host_event('host.user_input_requested', {
+      data = {
+        sessionId = 'session-123',
+        request = {
+          id = 'input-1',
+          question = 'Need a value?',
+          allowFreeform = true,
+        },
+      },
+    })
+
+    vim.wait(100)
+
+    assert_eq(1, #permission_calls)
+    assert_eq(0, #input_calls)
+
+    permission_calls[1].on_choice(nil)
+
+    vim.wait(100, function()
+      return #input_calls == 1
+    end)
+
+    assert_eq('Need a value? ', input_calls[1].prompt)
   end)
 end)
 
@@ -403,7 +697,7 @@ describe('session picker labels', function()
     local captured
     local expected_id = expected_local_session_id('nvim', 1717245296)
 
-    http.request = function(method, path, body, callback)
+    http.request = function(method, path, _, callback)
       assert_eq('GET', method)
       assert_eq('/sessions', path)
       callback({
@@ -419,7 +713,7 @@ describe('session picker labels', function()
       }, nil)
     end
 
-    vim.ui.select = function(items, opts, on_choice)
+    vim.ui.select = function(items, opts, _)
       captured = {
         items = items,
         prompt = opts.prompt,
@@ -440,8 +734,14 @@ describe('session picker labels', function()
     local captured
     local expected_id = expected_local_session_id('nvim', 1717245296)
     local expected_id_2 = expected_local_session_id('nvim', 1717245297)
+    local cwd = require('copilot_agent.service').working_directory()
+    local expected_prompt = 'Select session for project: '
+      .. vim.fn.fnamemodify(cwd, ':t')
+      .. ' ('
+      .. vim.fn.fnamemodify(cwd, ':~')
+      .. ')'
 
-    http.request = function(method, path, body, callback)
+    http.request = function(method, path, _, callback)
       assert_eq('GET', method)
       assert_eq('/sessions', path)
       callback({
@@ -463,7 +763,7 @@ describe('session picker labels', function()
       }, nil)
     end
 
-    vim.ui.select = function(items, opts, on_choice)
+    vim.ui.select = function(items, opts, _)
       captured = {
         items = items,
         prompt = opts.prompt,
@@ -474,7 +774,7 @@ describe('session picker labels', function()
     local session = require('copilot_agent.session')
     session.pick_or_create_session(function() end)
 
-    assert_eq('Resume a session or start new?', captured.prompt)
+    assert_eq(expected_prompt, captured.prompt)
     assert_eq('abcdefghijklmnopqrstuvwxyz012345 [' .. expected_id .. ']', captured.items[1])
     assert_eq('second live session summary [' .. expected_id_2 .. ']', captured.items[2])
     assert_eq('Create new session', captured.items[3])
@@ -709,6 +1009,7 @@ describe('chat input behavior', function()
     local mcp_words = completion_words('/mcp ')
     local instruction_words = completion_words('/instructions ')
 
+    assert_true(vim.tbl_contains(agent_words, '/agent Code Review Engineer'))
     assert_true(vim.tbl_contains(agent_words, '/agent Go Quality Engineer'))
     assert_true(vim.tbl_contains(agent_words, '/agent Selene Lua Quality Engineer'))
     assert_true(vim.tbl_contains(skill_words, '/skills nvim-integration-tests'))

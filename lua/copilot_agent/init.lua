@@ -69,7 +69,11 @@ function M.setup(opts)
       if not args.buf or not vim.api.nvim_buf_is_valid(args.buf) then
         return
       end
-      if vim.api.nvim_get_option_value('buftype', { buf = args.buf }) ~= '' or vim.bo[args.buf].modified then
+      if vim.api.nvim_get_option_value('buftype', { buf = args.buf }) ~= '' then
+        return
+      end
+      if vim.v.fcs_reason == 'conflict' or vim.bo[args.buf].modified then
+        vim.v.fcs_choice = events.confirm_external_buffer_reload() and 'reload' or ''
         return
       end
       vim.v.fcs_choice = 'reload'
@@ -81,6 +85,19 @@ function M.setup(opts)
       events.check_open_buffers_for_external_changes()
     end,
   })
+  vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufWritePost', 'FileChangedShellPost' }, {
+    group = ui_group,
+    callback = function(args)
+      events.remember_buffer_disk_state(args.buf)
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    group = ui_group,
+    callback = function(args)
+      events.forget_buffer_disk_state(args.buf)
+    end,
+  })
+  events.remember_open_buffer_disk_state()
   -- Clean up clipboard temp files if Neovim exits before they were sent.
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = vim.api.nvim_create_augroup('CopilotAgentCleanup', { clear = true }),

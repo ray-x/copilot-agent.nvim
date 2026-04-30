@@ -534,6 +534,7 @@ describe('workspace file reload', function()
   local agent
   local events
   local original_notify
+  local original_confirm
   local notifications
   local temp_file
   local temp_file_two
@@ -545,6 +546,7 @@ describe('workspace file reload', function()
     agent.setup({ auto_create_session = false, notify = true })
     events = require('copilot_agent.events')
     original_notify = vim.notify
+    original_confirm = vim.fn.confirm
     notifications = {}
     vim.notify = function(message, level)
       notifications[#notifications + 1] = { message = message, level = level }
@@ -559,6 +561,7 @@ describe('workspace file reload', function()
 
   after_each(function()
     vim.notify = original_notify
+    vim.fn.confirm = original_confirm
     for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
       if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == temp_file then
         pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
@@ -598,12 +601,17 @@ describe('workspace file reload', function()
     assert_true(notifications[#notifications].message:find('+1', 1, true) ~= nil)
   end)
 
-  it('skips reload for modified buffers and reports why', function()
+  it('prompts before reloading a modified buffer updated by the plugin', function()
     vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
     local bufnr = vim.api.nvim_get_current_buf()
+    local confirm_message
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'local value = 99', 'return value' })
     vim.bo[bufnr].modified = true
     vim.fn.writefile({ 'local value = 3', 'return value' }, temp_file)
+    vim.fn.confirm = function(message, _, _)
+      confirm_message = message
+      return 2
+    end
 
     events.handle_session_event({
       type = 'session.workspace_file_changed',
@@ -617,9 +625,7 @@ describe('workspace file reload', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert_eq('local value = 99', lines[1])
-    assert_true(#notifications > 0)
-    assert_true(notifications[#notifications].message:find('reload skipped', 1, true) ~= nil)
-    assert_true(notifications[#notifications].message:find('unsaved changes', 1, true) ~= nil)
+    assert_eq('The open buffer has been updated externally. Do you want to reload it? (yes/no)', confirm_message)
     vim.bo[bufnr].modified = false
   end)
 
@@ -699,18 +705,24 @@ describe('workspace file reload', function()
     assert_eq('print(other)', lines_two[2])
   end)
 
-  it('does not reload externally changed buffers with unsaved edits during focus checks', function()
+  it('prompts before reloading externally changed buffers with unsaved edits during focus checks', function()
     vim.cmd('edit ' .. vim.fn.fnameescape(temp_file_two))
     local bufnr = vim.api.nvim_get_current_buf()
+    local confirm_message
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'local other = 99', 'return other' })
     vim.bo[bufnr].modified = true
 
     vim.fn.writefile({ 'local other = 3', 'return other' }, temp_file_two)
+    vim.fn.confirm = function(message, _, _)
+      confirm_message = message
+      return 2
+    end
     vim.api.nvim_exec_autocmds('FocusGained', {})
     vim.wait(100)
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert_eq('local other = 99', lines[1])
+    assert_eq('The open buffer has been updated externally. Do you want to reload it? (yes/no)', confirm_message)
     vim.bo[bufnr].modified = false
   end)
 end)

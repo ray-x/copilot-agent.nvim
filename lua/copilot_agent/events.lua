@@ -848,7 +848,78 @@ local function restore_window_views(bufnr, views)
   end
 end
 
-local function reload_buffer_from_disk(bufnr, abs_path)
+local external_reload_prompt = 'The open buffer has been updated externally. Do you want to reload it? (yes/no)'
+local buffer_disk_state = {}
+
+local function confirm_external_buffer_reload()
+  return vim.fn.confirm(external_reload_prompt, '&yes\n&no', 2) == 1
+end
+
+local function file_stat_signature(abs_path)
+  local uv = vim.uv or vim.loop
+  local stat = uv.fs_stat(abs_path)
+  if not stat then
+    return nil
+  end
+  local mtime = stat.mtime or {}
+  return table.concat({
+    tostring(tonumber(mtime.sec) or 0),
+    tostring(tonumber(mtime.nsec) or 0),
+    tostring(tonumber(stat.size) or 0),
+    tostring(tonumber(stat.mode) or 0),
+  }, ':')
+end
+
+local function buffer_abs_path(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+  local name = vim.api.nvim_buf_get_name(bufnr)
+  if name == '' then
+    return nil
+  end
+  return vim.fn.fnamemodify(name, ':p')
+end
+
+local function remember_buffer_disk_state(bufnr, abs_path)
+  abs_path = abs_path or buffer_abs_path(bufnr)
+  if not abs_path then
+    buffer_disk_state[bufnr] = nil
+    return nil
+  end
+  buffer_disk_state[bufnr] = file_stat_signature(abs_path)
+  return buffer_disk_state[bufnr]
+end
+
+local function forget_buffer_disk_state(bufnr)
+  buffer_disk_state[bufnr] = nil
+end
+
+local function remember_open_buffer_disk_state()
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_is_loaded(bufnr) then
+      if vim.api.nvim_get_option_value('buftype', { buf = bufnr }) == '' then
+        remember_buffer_disk_state(bufnr)
+      end
+    end
+  end
+end
+
+local function modified_buffer_changed_on_disk(bufnr, abs_path)
+  local current = file_stat_signature(abs_path)
+  if not current then
+    return false
+  end
+  local known = buffer_disk_state[bufnr]
+  if known == nil then
+    buffer_disk_state[bufnr] = current
+    return false
+  end
+  return known ~= current
+end
+
+local function reload_buffer_from_disk(bufnr, abs_path, opts)
+  opts = opts or {}
   local new_lines, read_err = read_disk_lines(abs_path)
   if not new_lines then
     return nil, read_err
@@ -867,7 +938,7 @@ local function reload_buffer_from_disk(bufnr, abs_path)
   end
 
   local modified = vim.bo[bufnr].modified
-  if modified then
+  if modified and opts.force ~= true then
     return summary, 'buffer has unsaved changes'
   end
 
@@ -880,6 +951,7 @@ local function reload_buffer_from_disk(bufnr, abs_path)
   vim.bo[bufnr].modifiable = was_modifiable
   vim.bo[bufnr].readonly = was_readonly
   restore_window_views(bufnr, views)
+  remember_buffer_disk_state(bufnr, abs_path)
   return summary, nil
 end
 
@@ -888,17 +960,26 @@ local function check_open_buffers_for_external_changes(opts)
   local uv = vim.uv or vim.loop
   local target_path = type(opts.path) == 'string' and vim.fn.fnamemodify(opts.path, ':p') or nil
   local target_prefix = type(opts.prefix) == 'string' and vim.fn.fnamemodify(opts.prefix, ':p') or nil
+  local skip_path = type(opts.skip_path) == 'string' and vim.fn.fnamemodify(opts.skip_path, ':p') or nil
 
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_is_loaded(bufnr) then
-      if vim.api.nvim_get_option_value('buftype', { buf = bufnr }) == '' and not vim.bo[bufnr].modified then
+      if vim.api.nvim_get_option_value('buftype', { buf = bufnr }) == '' then
         local name = vim.api.nvim_buf_get_name(bufnr)
         if name ~= '' then
           local path = vim.fn.fnamemodify(name, ':p')
           local matches_path = not target_path or path == target_path
           local matches_prefix = not target_prefix or vim.startswith(path, target_prefix)
-          if matches_path and matches_prefix and uv.fs_stat(path) then
-            vim.cmd('silent! checktime ' .. bufnr)
+          local is_skipped = skip_path and path == skip_path
+          if matches_path and matches_prefix and not is_skipped and uv.fs_stat(path) then
+            if vim.bo[bufnr].modified then
+              if modified_buffer_changed_on_disk(bufnr, path) and confirm_external_buffer_reload() then
+                reload_buffer_from_disk(bufnr, path, { force = true })
+              end
+            else
+              vim.cmd('silent! checktime ' .. bufnr)
+              remember_buffer_disk_state(bufnr, path)
+            end
           end
         end
       end
@@ -1166,19 +1247,28 @@ local function handle_session_event(payload)
         notify('Agent created: ' .. rel_path, vim.log.levels.INFO)
       elseif op == 'update' and bufnr_match then
         local summary, reload_err = reload_buffer_from_disk(bufnr_match, abs_path)
+        if reload_err == 'buffer has unsaved changes' then
+          if confirm_external_buffer_reload() then
+            summary, reload_err = reload_buffer_from_disk(bufnr_match, abs_path, { force = true })
+          else
+            reload_err = 'user declined reload'
+          end
+        end
         if reload_err then
-          notify('Agent updated on disk: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. '); reload skipped: ' .. tostring(reload_err), vim.log.levels.WARN)
+          if reload_err ~= 'user declined reload' then
+            notify('Agent updated on disk: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. '); reload skipped: ' .. tostring(reload_err), vim.log.levels.WARN)
+          end
         else
           notify('Agent reloaded: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. ')', vim.log.levels.INFO)
         end
         -- Offer diff review if the file is tracked by git.
-        if state.config.chat.diff_review ~= false then
+        if state.config.chat.diff_review ~= false and not reload_err then
           offer_diff_review(abs_path, rel_path)
         end
       else
         notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
       end
-      check_open_buffers_for_external_changes()
+      check_open_buffers_for_external_changes({ skip_path = abs_path })
       state.pending_workspace_updates = math.max((tonumber(state.pending_workspace_updates) or 1) - 1, 0)
       refresh_statuslines()
     end)
@@ -1392,6 +1482,10 @@ M.show_user_input_picker = show_user_input_picker
 M.handle_user_input = handle_user_input
 M.handle_host_event = handle_host_event
 M.check_open_buffers_for_external_changes = check_open_buffers_for_external_changes
+M.confirm_external_buffer_reload = confirm_external_buffer_reload
+M.remember_buffer_disk_state = remember_buffer_disk_state
+M.remember_open_buffer_disk_state = remember_open_buffer_disk_state
+M.forget_buffer_disk_state = forget_buffer_disk_state
 M.offer_diff_review = offer_diff_review
 
 --- List all uncommitted changed files and open vimdiff for the selected one.

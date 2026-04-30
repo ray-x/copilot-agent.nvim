@@ -248,7 +248,7 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         system_notify_timeout = 3000,    -- ms before auto-clearing transient notices
         render_markdown = true,          -- set false to disable render-markdown.nvim (faster on long responses)
         diff_cmd = { 'delta' },          -- external diff viewer; false = builtin float
-        diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; all open clean file buffers auto-reload on file events, task completion, and focus regain
+        diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; clean buffers auto-reload, conflicting modified buffers prompt before reload
       },
       notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
       file_log_level = "WARN",  -- DEBUG | INFO | WARN | ERROR for stdpath("log") .. "/copilot_agent.log"

@@ -918,6 +918,19 @@ local function modified_buffer_changed_on_disk(bufnr, abs_path)
   return known ~= current
 end
 
+local function clean_buffer_changed_on_disk(bufnr, abs_path)
+  local current = file_stat_signature(abs_path)
+  if not current then
+    return false
+  end
+  local known = buffer_disk_state[bufnr]
+  if known == nil then
+    buffer_disk_state[bufnr] = current
+    return false
+  end
+  return known ~= current
+end
+
 local function reload_buffer_from_disk(bufnr, abs_path, opts)
   opts = opts or {}
   local new_lines, read_err = read_disk_lines(abs_path)
@@ -939,6 +952,22 @@ local function reload_buffer_from_disk(bufnr, abs_path, opts)
 
   local modified = vim.bo[bufnr].modified
   if modified and opts.force ~= true then
+    return summary, 'buffer has unsaved changes'
+  end
+
+  if #wins > 0 then
+    local ok, reload_err = pcall(vim.api.nvim_win_call, wins[1], function()
+      vim.cmd('silent keepalt keepjumps edit')
+    end)
+    if not ok then
+      return summary, reload_err
+    end
+    restore_window_views(bufnr, views)
+    remember_buffer_disk_state(bufnr, abs_path)
+    return summary, nil
+  end
+
+  if modified then
     return summary, 'buffer has unsaved changes'
   end
 
@@ -974,11 +1003,15 @@ local function check_open_buffers_for_external_changes(opts)
           if matches_path and matches_prefix and not is_skipped and uv.fs_stat(path) then
             if vim.bo[bufnr].modified then
               if modified_buffer_changed_on_disk(bufnr, path) and confirm_external_buffer_reload() then
-                reload_buffer_from_disk(bufnr, path, { force = true })
+                local summary, reload_err = reload_buffer_from_disk(bufnr, path, { force = true })
+                if reload_err then
+                  notify('External reload needs attention: ' .. vim.fn.fnamemodify(path, ':t') .. ' (' .. tostring(summary or 'content updated') .. '); ' .. tostring(reload_err), vim.log.levels.WARN)
+                end
               end
             else
-              vim.cmd('silent! checktime ' .. bufnr)
-              remember_buffer_disk_state(bufnr, path)
+              if clean_buffer_changed_on_disk(bufnr, path) then
+                reload_buffer_from_disk(bufnr, path)
+              end
             end
           end
         end

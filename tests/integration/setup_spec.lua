@@ -645,6 +645,87 @@ describe('workspace file reload', function()
     assert_eq('print(other)', lines[2])
   end)
 
+  it('reloads clean visible buffers during sweeps with edit instead of checktime', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr = vim.api.nvim_get_current_buf()
+    local original_cmd = vim.cmd
+    local checktime_called = false
+    local edit_called = false
+
+    local ok, err = pcall(function()
+      vim.cmd = function(command)
+        if type(command) == 'string' and command:match('^silent! checktime%s+') then
+          checktime_called = true
+          return
+        end
+        if type(command) == 'string' and command:match('^silent keepalt keepjumps edit$') then
+          edit_called = true
+        end
+        return original_cmd(command)
+      end
+
+      vim.fn.writefile({ 'local value = 7', 'print(value)', 'return value' }, temp_file)
+      events.check_open_buffers_for_external_changes()
+      vim.wait(100)
+
+      local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      assert_eq('local value = 7', lines[1])
+      assert_eq('print(value)', lines[2])
+      assert_false(checktime_called)
+      assert_true(edit_called)
+    end)
+
+    vim.cmd = original_cmd
+    if not ok then
+      error(err)
+    end
+  end)
+
+  it('does not force overwrite a modified visible buffer during sweeps', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local bufnr = vim.api.nvim_get_current_buf()
+    local original_cmd = vim.cmd
+    local confirm_message
+    local edit_called = false
+    local edit_bang_called = false
+
+    local ok, err = pcall(function()
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'local value = 99', 'return value' })
+      vim.bo[bufnr].modified = true
+      vim.fn.writefile({ 'local value = 8', 'print(value)', 'return value' }, temp_file)
+      vim.fn.confirm = function(message, _, _)
+        confirm_message = message
+        return 1
+      end
+      vim.cmd = function(command)
+        if type(command) == 'string' and command:match('^silent keepalt keepjumps edit!$') then
+          edit_bang_called = true
+        end
+        if type(command) == 'string' and command:match('^silent keepalt keepjumps edit$') then
+          edit_called = true
+          error('E37: No write since last change')
+        end
+        return original_cmd(command)
+      end
+
+      events.check_open_buffers_for_external_changes()
+      vim.wait(100)
+
+      local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      assert_eq('local value = 99', lines[1])
+      assert_eq('The open buffer has been updated externally. Do you want to reload it? (yes/no)', confirm_message)
+      assert_true(edit_called)
+      assert_false(edit_bang_called)
+      assert_true(notifications[#notifications].message:find('External reload needs attention:', 1, true) ~= nil)
+    end)
+
+    vim.cmd = original_cmd
+    vim.bo[bufnr].modified = false
+    if not ok then
+      error(err)
+    end
+  end)
+
   it('checks open file buffers when the turn completes', function()
     vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
     local bufnr = vim.api.nvim_get_current_buf()
@@ -1376,6 +1457,7 @@ describe('session resume guards', function()
   local session
   local original_request
   local original_start_event_stream
+  local original_ui_select
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
@@ -1388,11 +1470,13 @@ describe('session resume guards', function()
     events = require('copilot_agent.events')
     original_request = http.request
     original_start_event_stream = events.start_event_stream
+    original_ui_select = vim.ui.select
   end)
 
   after_each(function()
     http.request = original_request
     events.start_event_stream = original_start_event_stream
+    vim.ui.select = original_ui_select
   end)
 
   it('ignores stale recovery resumes after the active session changes', function()
@@ -1423,6 +1507,167 @@ describe('session resume guards', function()
     assert_eq('session-b', agent.state.session_id)
     assert_eq(nil, started_session_id)
     assert_eq('resume cancelled: active session changed', callback_error)
+  end)
+
+  it('prompts before auto-resuming a live session and cancels when takeover is declined', function()
+    local callback_error
+    local prompt
+    local items
+    local resumed = false
+
+    http.request = function(method, path, _, callback)
+      if method == 'GET' then
+        assert_eq('/sessions', path)
+        callback({
+          persisted = {},
+          live = {
+            {
+              sessionId = 'live-session',
+              summary = 'Live session summary',
+              workingDirectory = require('copilot_agent.service').working_directory(),
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+
+      resumed = true
+      callback({}, nil)
+    end
+
+    vim.ui.select = function(choice_items, opts, on_choice)
+      items = choice_items
+      prompt = opts.prompt
+      on_choice(choice_items[1], 1)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.pick_or_create_session(function(_, err)
+      callback_error = err
+    end)
+
+    assert_eq('Session Live session summary [live-session] is already attached in another Neovim instance. Kick the older instance out?', prompt)
+    assert_eq('Keep older instance attached', items[1])
+    assert_eq('Kick older instance out', items[2])
+    assert_false(resumed)
+    assert_eq('Kept older instance attached; did not connect to session live-session', callback_error)
+  end)
+
+  it('keeps the current session attached when switching to a live session is declined', function()
+    local delete_called = false
+    local resume_called = false
+    local prompt
+
+    agent.state.session_id = 'current-session'
+    agent.state.session_name = 'Current session'
+
+    http.request = function(method, path, _, callback)
+      if method == 'GET' then
+        assert_eq('/sessions', path)
+        callback({
+          persisted = {
+            {
+              sessionId = 'current-session',
+              summary = 'Current session',
+              workingDirectory = '/tmp/current',
+            },
+            {
+              sessionId = 'live-target',
+              summary = 'Target session',
+              workingDirectory = '/tmp/target',
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+      if method == 'DELETE' then
+        delete_called = true
+      elseif method == 'POST' then
+        resume_called = true
+      end
+      callback({}, nil)
+    end
+
+    vim.ui.select = function(_, opts, on_choice)
+      prompt = opts.prompt
+      on_choice('Keep older instance attached', 1)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.switch_to_session_id('live-target')
+
+    assert_eq('Session Target session [live-target] is already attached in another Neovim instance. Kick the older instance out?', prompt)
+    assert_false(delete_called)
+    assert_false(resume_called)
+    assert_eq('current-session', agent.state.session_id)
+  end)
+
+  it('switches after confirming takeover of a live session', function()
+    local requests = {}
+
+    agent.state.session_id = 'current-session'
+    agent.state.session_name = 'Current session'
+    events.start_event_stream = function() end
+
+    http.request = function(method, path, body, callback)
+      requests[#requests + 1] = {
+        method = method,
+        path = path,
+        body = body,
+      }
+
+      if method == 'GET' then
+        callback({
+          persisted = {
+            {
+              sessionId = 'current-session',
+              summary = 'Current session',
+              workingDirectory = '/tmp/current',
+            },
+            {
+              sessionId = 'live-target',
+              summary = 'Target session',
+              workingDirectory = '/tmp/target',
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+
+      if method == 'DELETE' then
+        callback({}, nil)
+        return
+      end
+
+      assert_eq('POST', method)
+      assert_eq('/sessions', path)
+      assert_eq('live-target', body.sessionId)
+      callback({
+        sessionId = 'live-target',
+        summary = 'Target session',
+        workingDirectory = '/tmp/target',
+      }, nil)
+    end
+
+    vim.ui.select = function(_, _, on_choice)
+      on_choice('Kick older instance out', 2)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.switch_to_session_id('live-target')
+
+    assert_eq('GET', requests[1].method)
+    assert_eq('DELETE', requests[2].method)
+    assert_eq('/sessions/current-session', requests[2].path)
+    assert_eq('POST', requests[3].method)
+    assert_eq('/sessions', requests[3].path)
+    assert_eq('live-target', agent.state.session_id)
   end)
 end)
 

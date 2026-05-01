@@ -232,6 +232,61 @@ local function on_session_ready(session_id, err)
   end
 end
 
+local function cancel_attach_attempt(message, callback, opts)
+  opts = opts or {}
+  state.creating_session = false
+  append_entry('system', message)
+  if opts.resolve_pending then
+    on_session_ready(nil, message)
+  end
+  if callback then
+    callback(nil, message)
+  end
+end
+
+local function confirm_takeover_if_live(session, callback)
+  if not (session and session.live == true) then
+    callback(true)
+    return
+  end
+
+  local session_label = formatted_session_label(session.summary, session.sessionId)
+  vim.ui.select({
+    'Keep older instance attached',
+    'Kick older instance out',
+  }, {
+    prompt = 'Session ' .. session_label .. ' is already attached in another Neovim instance. Kick the older instance out?',
+  }, function(choice)
+    if choice == 'Kick older instance out' then
+      log('resume takeover confirmed for ' .. format_session_id(session.sessionId), vim.log.levels.INFO)
+      callback(true)
+      return
+    end
+
+    local message = 'Kept older instance attached; did not connect to session ' .. format_session_id(session.sessionId)
+    log('resume takeover declined for ' .. format_session_id(session.sessionId), vim.log.levels.INFO)
+    callback(false, message)
+  end)
+end
+
+local function resume_known_session(session, callback, opts)
+  opts = opts or {}
+  confirm_takeover_if_live(session, function(allowed, message)
+    if not allowed then
+      cancel_attach_attempt(message, callback, { resolve_pending = opts.resolve_pending })
+      return
+    end
+
+    if opts.append_message then
+      append_entry('system', opts.append_message)
+    end
+    if opts.log_message then
+      log(opts.log_message, vim.log.levels.INFO)
+    end
+    M.resume_session(session.sessionId, callback, opts.resume_opts)
+  end)
+end
+
 function M.resume_session(session_id, callback, opts)
   opts = opts or {}
   local requested_wd = working_directory()
@@ -348,9 +403,11 @@ function M.pick_or_create_session(callback)
     -- Auto-resume the single match silently — no need to prompt.
     if #matching == 1 then
       local s = matching[1]
-      append_entry('system', 'Resuming session ' .. formatted_session_label(s.summary, s.sessionId))
-      log('pick_or_create_session resuming single match ' .. formatted_session_label(s.summary, s.sessionId), vim.log.levels.INFO)
-      M.resume_session(s.sessionId, callback)
+      resume_known_session(s, callback, {
+        resolve_pending = true,
+        append_message = 'Resuming session ' .. formatted_session_label(s.summary, s.sessionId),
+        log_message = 'pick_or_create_session resuming single match ' .. formatted_session_label(s.summary, s.sessionId),
+      })
       return
     end
 
@@ -364,9 +421,11 @@ function M.pick_or_create_session(callback)
     -- auto_resume='auto': silently resume the most recent without prompting.
     if state.config.session.auto_resume == 'auto' then
       local s = matching[1]
-      append_entry('system', 'Resuming most recent session ' .. formatted_session_label(s.summary, s.sessionId))
-      log('pick_or_create_session auto-resume ' .. formatted_session_label(s.summary, s.sessionId), vim.log.levels.INFO)
-      M.resume_session(s.sessionId, callback)
+      resume_known_session(s, callback, {
+        resolve_pending = true,
+        append_message = 'Resuming most recent session ' .. formatted_session_label(s.summary, s.sessionId),
+        log_message = 'pick_or_create_session auto-resume ' .. formatted_session_label(s.summary, s.sessionId),
+      })
       return
     end
 
@@ -380,7 +439,7 @@ function M.pick_or_create_session(callback)
           label = label .. ' (' .. ts .. ')'
         end
       end
-      table.insert(choices, { label = label, id = s.sessionId })
+      table.insert(choices, { label = label, id = s.sessionId, session = s })
     end
     table.insert(choices, { label = 'Create new session', id = nil })
     -- Offer access to sessions from other directories.
@@ -398,9 +457,11 @@ function M.pick_or_create_session(callback)
         -- <Esc> dismissed the picker — default to the most recent session.
         local default = choices[1]
         if default.id then
-          append_entry('system', 'Resumed most recent session ' .. format_session_id(default.id) .. ' (picker cancelled)')
-          log('pick_or_create_session picker cancelled; resuming ' .. format_session_id(default.id), vim.log.levels.INFO)
-          M.resume_session(default.id, callback)
+          resume_known_session(default.session, callback, {
+            resolve_pending = true,
+            append_message = 'Resumed most recent session ' .. format_session_id(default.id) .. ' (picker cancelled)',
+            log_message = 'pick_or_create_session picker cancelled; resuming ' .. format_session_id(default.id),
+          })
         else
           create_session(callback)
         end
@@ -422,7 +483,7 @@ function M.pick_or_create_session(callback)
             if cwd ~= '' then
               label = label .. '  ' .. vim.fn.fnamemodify(cwd, ':~')
             end
-            table.insert(all_choices, { label = label, id = s.sessionId })
+            table.insert(all_choices, { label = label, id = s.sessionId, session = s })
           end
           table.insert(all_choices, { label = 'Create new session', id = nil })
           local all_display = vim.tbl_map(function(c)
@@ -432,7 +493,9 @@ function M.pick_or_create_session(callback)
             if not idx2 then
               local def = all_choices[1]
               if def and def.id then
-                M.resume_session(def.id, callback)
+                resume_known_session(def.session, callback, {
+                  resolve_pending = true,
+                })
               else
                 create_session(callback)
               end
@@ -440,18 +503,22 @@ function M.pick_or_create_session(callback)
             end
             local p = all_choices[idx2]
             if p.id then
-              append_entry('system', 'Resuming session ' .. format_session_id(p.id))
-              log('pick_or_create_session resumed from all-sessions picker ' .. format_session_id(p.id), vim.log.levels.INFO)
-              M.resume_session(p.id, callback)
+              resume_known_session(p.session, callback, {
+                resolve_pending = true,
+                append_message = 'Resuming session ' .. format_session_id(p.id),
+                log_message = 'pick_or_create_session resumed from all-sessions picker ' .. format_session_id(p.id),
+              })
             else
               create_session(callback)
             end
           end)
         end, 100)
       elseif picked.id then
-        append_entry('system', 'Resuming session ' .. format_session_id(picked.id))
-        log('pick_or_create_session resumed from matching picker ' .. format_session_id(picked.id), vim.log.levels.INFO)
-        M.resume_session(picked.id, callback)
+        resume_known_session(picked.session, callback, {
+          resolve_pending = true,
+          append_message = 'Resuming session ' .. format_session_id(picked.id),
+          log_message = 'pick_or_create_session resumed from matching picker ' .. format_session_id(picked.id),
+        })
       else
         create_session(callback)
       end
@@ -654,7 +721,7 @@ function M.clear_and_new_session()
   end)
 end
 
-function M.switch_to_session_id(target_session_id)
+function M.switch_to_session_id(target_session_id, target_session)
   target_session_id = vim.trim(target_session_id or '')
   if target_session_id == '' then
     notify('Session ID is required', vim.log.levels.WARN)
@@ -665,22 +732,58 @@ function M.switch_to_session_id(target_session_id)
     return
   end
 
-  local previous_session_id = state.session_id
-  state.session_id = nil
-  state.session_name = nil
-  state.session_working_directory = nil
-  state.creating_session = true
-  M.discard_pending_attachments()
-  clear_transcript()
-  require('copilot_agent')._ensure_chat_window()
-  M.disconnect_session(previous_session_id, false, function(disconnect_err)
-    if disconnect_err then
-      append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
-      log('switch_to_session_id disconnect failed: ' .. tostring(disconnect_err), vim.log.levels.ERROR)
+  local function perform_switch()
+    local previous_session_id = state.session_id
+    state.session_id = nil
+    state.session_name = nil
+    state.session_working_directory = nil
+    state.creating_session = true
+    M.discard_pending_attachments()
+    clear_transcript()
+    require('copilot_agent')._ensure_chat_window()
+    M.disconnect_session(previous_session_id, false, function(disconnect_err)
+      if disconnect_err then
+        append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
+        log('switch_to_session_id disconnect failed: ' .. tostring(disconnect_err), vim.log.levels.ERROR)
+      end
+      append_entry('system', 'Switching to session ' .. format_session_id(target_session_id) .. '…')
+      log('switch_to_session_id switching to ' .. format_session_id(target_session_id), vim.log.levels.INFO)
+      M.resume_session(target_session_id)
+    end)
+  end
+
+  if target_session then
+    confirm_takeover_if_live(target_session, function(allowed, message)
+      if not allowed then
+        append_entry('system', message)
+        return
+      end
+      perform_switch()
+    end)
+    return
+  end
+
+  fetch_sorted_sessions('switch_to_session_id', function(sessions, err)
+    if err then
+      perform_switch()
+      return
     end
-    append_entry('system', 'Switching to session ' .. format_session_id(target_session_id) .. '…')
-    log('switch_to_session_id switching to ' .. format_session_id(target_session_id), vim.log.levels.INFO)
-    M.resume_session(target_session_id)
+
+    local found_session = nil
+    for _, session in ipairs(sessions) do
+      if session.sessionId == target_session_id then
+        found_session = session
+        break
+      end
+    end
+
+    confirm_takeover_if_live(found_session, function(allowed, message)
+      if not allowed then
+        append_entry('system', message)
+        return
+      end
+      perform_switch()
+    end)
   end)
 end
 
@@ -712,7 +815,7 @@ function M.switch_session()
       end
       -- Mark the currently active session.
       local active = (state.session_id and s.sessionId == state.session_id) and ' ●' or ''
-      table.insert(choices, { label = label .. cwd_label .. active, id = s.sessionId })
+      table.insert(choices, { label = label .. cwd_label .. active, id = s.sessionId, session = s })
     end
     table.insert(choices, { label = '+ New session', id = nil })
 
@@ -729,7 +832,7 @@ function M.switch_session()
         M.new_session()
         return
       end
-      M.switch_to_session_id(picked.id)
+      M.switch_to_session_id(picked.id, picked.session)
     end)
   end)
 end

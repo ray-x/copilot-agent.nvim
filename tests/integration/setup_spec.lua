@@ -1131,6 +1131,193 @@ describe('agent command', function()
   end)
 end)
 
+describe('ask command', function()
+  local agent
+  local slash
+  local http
+  local original_request
+  local original_open_win
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.http'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    slash = require('copilot_agent.slash')
+    http = require('copilot_agent.http')
+    original_request = http.request
+    original_open_win = vim.api.nvim_open_win
+  end)
+
+  after_each(function()
+    http.request = original_request
+    vim.api.nvim_open_win = original_open_win
+  end)
+
+  it('extracts side answers from Go-style message history payloads', function()
+    local answer, done, err = slash._extract_side_session_answer({
+      { Type = 'assistant.turn_start' },
+      { Type = 'assistant.message', Data = { Content = 'Five intro options' } },
+      { Type = 'assistant.turn_end' },
+    })
+
+    assert_eq('Five intro options', answer)
+    assert_true(done)
+    assert_eq(nil, err)
+  end)
+
+  it('keeps polling when turn completion arrives before the final side answer', function()
+    local answer, done, err = slash._extract_side_session_answer({
+      { Type = 'assistant.turn_start' },
+      { Type = 'assistant.turn_end' },
+    })
+
+    assert_eq(nil, answer)
+    assert_false(done)
+    assert_eq(nil, err)
+  end)
+
+  it('shows the side answer for /ask from message history', function()
+    local result_buf
+
+    vim.api.nvim_open_win = function(buf, enter, config)
+      result_buf = buf
+      return original_open_win(buf, enter, config)
+    end
+
+    http.request = function(method, path, body, callback)
+      if method == 'POST' and path == '/sessions' then
+        callback({ sessionId = 'side-1' }, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/mode' then
+        callback({}, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/messages' then
+        callback({}, nil)
+      elseif method == 'GET' and path == '/sessions/side-1/messages' then
+        callback({
+          events = {
+            { Type = 'assistant.turn_start' },
+            { Type = 'assistant.message', Data = { Content = '1. Intro one\n2. Intro two' } },
+            { Type = 'assistant.turn_end' },
+          },
+        }, nil)
+      elseif method == 'DELETE' and path == '/sessions/side-1?delete=true' then
+        callback({}, nil)
+      else
+        error('unexpected request: ' .. method .. ' ' .. path)
+      end
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+
+    assert_true(slash.execute('/ask based on README generate 2 intros'))
+    assert_true(result_buf ~= nil)
+
+    local lines = vim.api.nvim_buf_get_lines(result_buf, 0, -1, false)
+    assert_true(vim.tbl_contains(lines, '# /ask'))
+    assert_true(vim.tbl_contains(lines, '## Answer'))
+    assert_true(vim.tbl_contains(lines, '1. Intro one'))
+    assert_true(vim.tbl_contains(lines, '2. Intro two'))
+  end)
+
+  it('renders multiline /ask questions without crashing the result window', function()
+    local result_buf
+
+    vim.api.nvim_open_win = function(buf, enter, config)
+      result_buf = buf
+      return original_open_win(buf, enter, config)
+    end
+
+    http.request = function(method, path, body, callback)
+      if method == 'POST' and path == '/sessions' then
+        callback({ sessionId = 'side-1' }, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/mode' then
+        callback({}, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/messages' then
+        callback({}, nil)
+      elseif method == 'GET' and path == '/sessions/side-1/messages' then
+        callback({
+          events = {
+            { Type = 'assistant.turn_start' },
+            { Type = 'assistant.message', Data = { Content = 'answer line' } },
+            { Type = 'assistant.turn_end' },
+          },
+        }, nil)
+      elseif method == 'DELETE' and path == '/sessions/side-1?delete=true' then
+        callback({}, nil)
+      else
+        error('unexpected request: ' .. method .. ' ' .. path)
+      end
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+
+    assert_true(slash.execute('/ask first line\nsecond line'))
+    assert_true(result_buf ~= nil)
+
+    local lines = vim.api.nvim_buf_get_lines(result_buf, 0, -1, false)
+    assert_true(vim.tbl_contains(lines, 'first line'))
+    assert_true(vim.tbl_contains(lines, 'second line'))
+    assert_true(vim.tbl_contains(lines, 'answer line'))
+  end)
+
+  it('waits for the final answer when history briefly ends before the answer is persisted', function()
+    local result_buf
+    local message_reads = 0
+
+    vim.api.nvim_open_win = function(buf, enter, config)
+      result_buf = buf
+      return original_open_win(buf, enter, config)
+    end
+
+    http.request = function(method, path, body, callback)
+      if method == 'POST' and path == '/sessions' then
+        callback({ sessionId = 'side-1' }, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/mode' then
+        callback({}, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/messages' then
+        callback({}, nil)
+      elseif method == 'GET' and path == '/sessions/side-1/messages' then
+        message_reads = message_reads + 1
+        if message_reads == 1 then
+          callback({
+            events = {
+              { Type = 'assistant.turn_start' },
+              { Type = 'assistant.turn_end' },
+            },
+          }, nil)
+        else
+          callback({
+            events = {
+              { Type = 'assistant.turn_start' },
+              { Type = 'assistant.message', Data = { Content = 'Recovered final answer' } },
+              { Type = 'assistant.turn_end' },
+            },
+          }, nil)
+        end
+      elseif method == 'DELETE' and path == '/sessions/side-1?delete=true' then
+        callback({}, nil)
+      else
+        error('unexpected request: ' .. method .. ' ' .. path)
+      end
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+
+    assert_true(slash.execute('/ask based on README generate 2 intros'))
+    assert_true(vim.wait(1200, function()
+      return result_buf ~= nil
+    end, 50))
+
+    local lines = vim.api.nvim_buf_get_lines(result_buf, 0, -1, false)
+    assert_true(vim.tbl_contains(lines, 'Recovered final answer'))
+    assert_eq(2, message_reads)
+  end)
+end)
+
 describe('rewind command', function()
   local agent
   local slash
@@ -1769,6 +1956,23 @@ describe('chat input behavior', function()
     assert_eq('Keep editing', captured.items[1])
     assert_eq('Close input', captured.items[2])
     assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
+  end)
+
+  it('uses Enter to confirm popup completion before prompt submission', function()
+    local original_pumvisible = vim.fn.pumvisible
+
+    vim.fn.pumvisible = function()
+      return 1
+    end
+    local confirm_keys = input._confirm_completion_or_submit()
+    vim.fn.pumvisible = function()
+      return 0
+    end
+    local submit_keys = input._confirm_completion_or_submit()
+    vim.fn.pumvisible = original_pumvisible
+
+    assert_eq(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), confirm_keys)
+    assert_eq(vim.api.nvim_replace_termcodes('<CR>', true, false, true), submit_keys)
   end)
 
   it('does not show the checkpoint id in the input separator', function()

@@ -37,6 +37,13 @@ local function conversation_separator_text(width)
   return string.rep('-', width)
 end
 
+local function confirm_completion_or_submit()
+  if vim.fn.pumvisible() == 1 then
+    return vim.api.nvim_replace_termcodes('<C-y>', true, false, true)
+  end
+  return vim.api.nvim_replace_termcodes('<CR>', true, false, true)
+end
+
 local function refresh_separator()
   if not state.input_bufnr or not vim.api.nvim_buf_is_valid(state.input_bufnr) then
     return
@@ -628,6 +635,13 @@ local function create_input_buffer()
 
   -- <C-s> submits in prompt mode; <CR> submits via prompt_setcallback().
   vim.keymap.set({ 'n', 'i' }, '<C-s>', submit_buffer, { buffer = bufnr, silent = true, desc = 'Submit prompt to Copilot' })
+  vim.keymap.set('i', '<CR>', confirm_completion_or_submit, {
+    buffer = bufnr,
+    expr = true,
+    replace_keycodes = false,
+    silent = true,
+    desc = 'Confirm completion or submit prompt',
+  })
   vim.keymap.set('n', 'q', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('n', '<Esc>', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('i', '<Esc>', '<Esc>', { buffer = bufnr, silent = true, desc = 'Switch to normal mode' })
@@ -864,5 +878,6 @@ M._discovered_instruction_names = discovered_instruction_names
 M._discovered_mcp_names = discovered_mcp_names
 M._discovered_model_ids = discovered_model_ids
 M._discovered_session_items = discovered_session_items
+M._confirm_completion_or_submit = confirm_completion_or_submit
 
 return M

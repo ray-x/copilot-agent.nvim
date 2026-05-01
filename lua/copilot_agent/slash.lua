@@ -18,6 +18,7 @@ local session = require('copilot_agent.session')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local tasks = require('copilot_agent.tasks')
+local utils = require('copilot_agent.utils')
 local window = require('copilot_agent.window')
 
 local state = cfg.state
@@ -25,6 +26,7 @@ local notify = cfg.notify
 local append_entry = render.append_entry
 local refresh_statuslines = sl.refresh_statuslines
 local request = http.request
+local split_lines = utils.split_lines
 
 local M = {}
 local search_label_max_len = 72
@@ -130,10 +132,18 @@ local function dispatch_prompt(prompt, opts)
 end
 
 local function show_markdown_result(title, lines)
+  local normalized_lines = {}
+  for _, line in ipairs(lines or {}) do
+    vim.list_extend(normalized_lines, split_lines(type(line) == 'string' and line or tostring(line or '')))
+  end
+  if vim.tbl_isempty(normalized_lines) then
+    normalized_lines = { '' }
+  end
+
   local width = math.min(math.floor(vim.o.columns * 0.8), 120)
-  local height = math.min(math.max(#lines + 2, 12), math.floor(vim.o.lines * 0.8))
+  local height = math.min(math.max(#normalized_lines + 2, 12), math.floor(vim.o.lines * 0.8))
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, normalized_lines)
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'wipe'
   vim.bo[buf].swapfile = false
@@ -168,24 +178,68 @@ local function delete_side_session(session_id, callback)
   end, { auto_start = false })
 end
 
-local function extract_side_session_answer(session_events)
-  local answer = nil
-  local turn_started = false
-  local turn_finished = false
-  for _, event in ipairs(session_events or {}) do
-    local event_type = event and event.type or nil
-    local data = event and event.data or {}
-    if event_type == 'assistant.turn_start' then
-      turn_started = true
-    elseif event_type == 'assistant.message' and type(data.content) == 'string' and vim.trim(data.content) ~= '' then
-      answer = data.content
-    elseif event_type == 'assistant.turn_end' and turn_started then
-      turn_finished = true
-    elseif event_type == 'error' then
-      return nil, true, vim.inspect(data)
+local function first_non_empty_string(...)
+  for i = 1, select('#', ...) do
+    local value = select(i, ...)
+    if type(value) == 'string' and value ~= '' then
+      return value
     end
   end
-  return answer, turn_finished, nil
+  return nil
+end
+
+local function event_type_of(event)
+  if type(event) ~= 'table' then
+    return nil
+  end
+  return event.type or event.Type
+end
+
+local function event_data_of(event)
+  if type(event) ~= 'table' then
+    return {}
+  end
+  local data = event.data or event.Data
+  return type(data) == 'table' and data or {}
+end
+
+local function extract_side_session_answer(session_events)
+  local answer = nil
+  local answer_parts = {}
+  local turn_started = false
+  local turn_finished = false
+  local final_message_seen = false
+  for _, event in ipairs(session_events or {}) do
+    local event_type = event_type_of(event)
+    local data = event_data_of(event)
+    if event_type == 'assistant.turn_start' then
+      turn_started = true
+    elseif event_type == 'assistant.message_delta' then
+      local delta = first_non_empty_string(data.deltaContent, data.DeltaContent, data.content, data.Content)
+      if delta and vim.trim(delta) ~= '' then
+        answer_parts[#answer_parts + 1] = delta
+      end
+    elseif event_type == 'assistant.message' then
+      local tool_requests = data.toolRequests or data.ToolRequests
+      local has_tool_requests = type(tool_requests) == 'table' and not vim.tbl_isempty(tool_requests)
+      local content = first_non_empty_string(data.content, data.Content)
+      if content and vim.trim(content) ~= '' then
+        answer = content
+        if not has_tool_requests then
+          final_message_seen = true
+        end
+      end
+    elseif event_type == 'assistant.turn_end' and turn_started then
+      turn_finished = true
+    elseif event_type == 'session.error' or event_type == 'error' then
+      return nil, true, first_non_empty_string(data.message, data.Message) or vim.inspect(data)
+    end
+  end
+  if (answer == nil or answer == '') and #answer_parts > 0 then
+    answer = table.concat(answer_parts)
+  end
+  local has_answer = type(answer) == 'string' and vim.trim(answer) ~= ''
+  return answer, (turn_finished and has_answer) or final_message_seen, nil
 end
 
 local function show_side_question_result(prompt, answer)
@@ -1236,5 +1290,7 @@ function M.execute(text, opts)
   end
   return handler(args, opts or {}) == true
 end
+
+M._extract_side_session_answer = extract_side_session_answer
 
 return M

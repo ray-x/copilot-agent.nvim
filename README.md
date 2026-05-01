@@ -2,15 +2,16 @@
 
 GitHub Copilot's agentic runtime, natively in Neovim. A lightweight Go bridge to the [official SDK](https://github.com/github/copilot-sdk) with native tool execution, four chat modes, session-aware permissions, persistent sessions, repository-local agent/skill discovery, and LSP code actions.
 
-## Cool features
+## Advanced Agentic Features
 
-- Full Copilot SDK tool loop (read/write files, run terminal commands, search/fetch the web, and more)
-- Real agentic loop with interactive approvals, approve-reads, approve-all, reject-all, and autopilot
-- Per-request approval UI with allow-directory, allow-tool, allow-all, and diff-review flows
-- Sub-agent streaming events and background task tracking
-- Repository-local `.github/agents` and `.github/skills` support, aligned with Copilot config discovery in VS Code
-- LSP code actions (Explain code, Fix code, Add tests, Add docs)
-- Diff view with neovim diff mode or `delta` depends on your config
+- Native SDK Agent Loop: Leverages the official Copilot SDK to perform autonomous tasks like reading/writing files, executing terminal commands, and fetching web data.
+- Flexible Permission Control: Total oversight with four execution modes: from **Interactive (per-call approval)** all the way to fully autonomous **Autopilot**.
+- Seamless Editor Interop: Switch between Neovim and VS Code without losing context; shares sessions, custom agents, and skill directories natively.
+- Repository-Native Config: Aligns with GitHub's standards by supporting `.github/agents` and `.github/skills` for project-specific AI behaviors.
+- Granular Approval UI: Review changes with precision using delta or Neovim diffs, and manage permissions by directory or specific tool.
+- Undo and rewind to restore the codebase to previous conversation
+- LSP-Integrated Actions: Access AI power through standard LSP code actions to explain, fix, test, or document code directly in your buffer
+- Real-time Observability: Monitor background tasks and sub-agent events as they happen via a live streaming UI.
 
 ---
 

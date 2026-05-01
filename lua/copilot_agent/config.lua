@@ -46,6 +46,10 @@ local defaults = {
     -- true  = enable on buffer creation, refresh once per completed turn (default)
     -- false = disable entirely (raw markdown text, faster)
     render_markdown = false,
+    -- Work around an upstream Neovim Treesitter/folding issue in plugin-owned
+    -- markdown prompt buffers by disabling Treesitter for those transient UI
+    -- windows. Set false if you prefer to keep Treesitter attached there.
+    protect_markdown_buffer = true,
     -- File picker to use when attaching files/folders from <C-a>.
     -- 'auto' detects in order: snacks → telescope → fzf-lua → mini.pick → vim.ui.input
     -- Set to 'native' to always use vim.ui.input (completion-based path entry).

@@ -107,42 +107,45 @@ local function merge_sessions(response)
   local merged = {}
   local order = {}
 
-  local function upsert(session)
+  local function upsert(session, live_source)
     local id = session_id_of(session)
     if not id or id == '' then
       return
     end
+    local normalized = vim.deepcopy(session)
+    normalized.live = live_source == true
     if not merged[id] then
       order[#order + 1] = id
-      merged[id] = vim.deepcopy(session)
+      merged[id] = normalized
       return
     end
 
     local existing = merged[id]
-    if session.live then
-      local combined = vim.deepcopy(session)
+    if live_source then
+      local combined = normalized
       combined.context = combined.context or existing.context
       combined.workingDirectory = combined.workingDirectory or existing.workingDirectory
       combined.summary = combined.summary or existing.summary
       combined.modifiedTime = combined.modifiedTime or existing.modifiedTime
       combined.startTime = combined.startTime or existing.startTime
+      combined.createdAt = combined.createdAt or existing.createdAt
       merged[id] = combined
       return
     end
 
-    existing.context = existing.context or session.context
-    existing.workingDirectory = existing.workingDirectory or session.workingDirectory
-    existing.summary = existing.summary or session.summary
-    existing.modifiedTime = existing.modifiedTime or session.modifiedTime
-    existing.startTime = existing.startTime or session.startTime
-    existing.createdAt = existing.createdAt or session.createdAt
+    existing.context = existing.context or normalized.context
+    existing.workingDirectory = existing.workingDirectory or normalized.workingDirectory
+    existing.summary = existing.summary or normalized.summary
+    existing.modifiedTime = existing.modifiedTime or normalized.modifiedTime
+    existing.startTime = existing.startTime or normalized.startTime
+    existing.createdAt = existing.createdAt or normalized.createdAt
   end
 
   for _, session in ipairs((response and response.persisted) or {}) do
-    upsert(session)
+    upsert(session, false)
   end
   for _, session in ipairs((response and response.live) or {}) do
-    upsert(session)
+    upsert(session, true)
   end
 
   local items = {}

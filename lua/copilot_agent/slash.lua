@@ -160,7 +160,8 @@ local function show_markdown_result(title, lines)
     title = ' ' .. title .. ' ',
     title_pos = 'center',
   })
-  window.protect_markdown_buffer(buf, winid)
+  window.disable_folds(winid)
+  window.set_window_syntax(winid, 'markdown')
   local function close()
     if vim.api.nvim_win_is_valid(winid) then
       vim.api.nvim_win_close(winid, true)

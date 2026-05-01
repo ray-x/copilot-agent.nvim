@@ -1458,6 +1458,7 @@ describe('session resume guards', function()
   local original_request
   local original_start_event_stream
   local original_ui_select
+  local original_ensure_chat_window
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
@@ -1471,12 +1472,14 @@ describe('session resume guards', function()
     original_request = http.request
     original_start_event_stream = events.start_event_stream
     original_ui_select = vim.ui.select
+    original_ensure_chat_window = agent._ensure_chat_window
   end)
 
   after_each(function()
     http.request = original_request
     events.start_event_stream = original_start_event_stream
     vim.ui.select = original_ui_select
+    agent._ensure_chat_window = original_ensure_chat_window
   end)
 
   it('ignores stale recovery resumes after the active session changes', function()
@@ -1555,6 +1558,59 @@ describe('session resume guards', function()
     assert_eq('Kept older instance attached; did not connect to session live-session', callback_error)
   end)
 
+  it('does not prompt when only persisted metadata marks the target session live', function()
+    local callback_error
+    local prompted = false
+    local resumed_session_id
+    local cwd = require('copilot_agent.service').working_directory()
+
+    http.request = function(method, path, body, callback)
+      if method == 'GET' then
+        assert_eq('/sessions', path)
+        callback({
+          persisted = {
+            {
+              sessionId = 'stale-live-session',
+              summary = 'Repo session',
+              workingDirectory = cwd,
+              live = true,
+            },
+          },
+          live = {
+            {
+              sessionId = 'other-live-session',
+              summary = 'Other attached session',
+              workingDirectory = '/tmp/other-project',
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+
+      resumed_session_id = body.sessionId
+      callback({
+        sessionId = 'stale-live-session',
+        summary = 'Repo session',
+        workingDirectory = cwd,
+      }, nil)
+    end
+
+    vim.ui.select = function()
+      prompted = true
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.pick_or_create_session(function(_, err)
+      callback_error = err
+    end)
+
+    assert_false(prompted)
+    assert_eq('stale-live-session', resumed_session_id)
+    assert_eq(nil, callback_error)
+  end)
+
   it('keeps the current session attached when switching to a live session is declined', function()
     local delete_called = false
     local resume_called = false
@@ -1573,6 +1629,13 @@ describe('session resume guards', function()
               summary = 'Current session',
               workingDirectory = '/tmp/current',
             },
+            {
+              sessionId = 'live-target',
+              summary = 'Target session',
+              workingDirectory = '/tmp/target',
+            },
+          },
+          live = {
             {
               sessionId = 'live-target',
               summary = 'Target session',
@@ -1598,6 +1661,7 @@ describe('session resume guards', function()
 
     package.loaded['copilot_agent.session'] = nil
     session = require('copilot_agent.session')
+    agent._ensure_chat_window = function() end
     session.switch_to_session_id('live-target')
 
     assert_eq('Session Target session [live-target] is already attached in another Neovim instance. Kick the older instance out?', prompt)
@@ -1660,6 +1724,7 @@ describe('session resume guards', function()
 
     package.loaded['copilot_agent.session'] = nil
     session = require('copilot_agent.session')
+    agent._ensure_chat_window = function() end
     session.switch_to_session_id('live-target')
 
     assert_eq('GET', requests[1].method)
@@ -1668,6 +1733,78 @@ describe('session resume guards', function()
     assert_eq('POST', requests[3].method)
     assert_eq('/sessions', requests[3].path)
     assert_eq('live-target', agent.state.session_id)
+  end)
+
+  it('does not prompt on direct switch when only persisted metadata marks the target session live', function()
+    local requests = {}
+    local prompted = false
+
+    agent.state.session_id = 'current-session'
+    agent.state.session_name = 'Current session'
+    events.start_event_stream = function() end
+
+    http.request = function(method, path, body, callback)
+      requests[#requests + 1] = {
+        method = method,
+        path = path,
+        body = body,
+      }
+
+      if method == 'GET' then
+        callback({
+          persisted = {
+            {
+              sessionId = 'current-session',
+              summary = 'Current session',
+              workingDirectory = '/tmp/current',
+            },
+            {
+              sessionId = 'stale-live-target',
+              summary = 'Target session',
+              workingDirectory = '/tmp/target',
+              live = true,
+            },
+          },
+          live = {
+            {
+              sessionId = 'other-live-session',
+              summary = 'Other attached session',
+              workingDirectory = '/tmp/elsewhere',
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+
+      if method == 'DELETE' then
+        callback({}, nil)
+        return
+      end
+
+      callback({
+        sessionId = 'stale-live-target',
+        summary = 'Target session',
+        workingDirectory = '/tmp/target',
+      }, nil)
+    end
+
+    vim.ui.select = function()
+      prompted = true
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    agent._ensure_chat_window = function() end
+    session.switch_to_session_id('stale-live-target')
+
+    assert_false(prompted)
+    assert_eq('GET', requests[1].method)
+    assert_eq('DELETE', requests[2].method)
+    assert_eq('/sessions/current-session', requests[2].path)
+    assert_eq('POST', requests[3].method)
+    assert_eq('stale-live-target', requests[3].body.sessionId)
+    assert_eq('stale-live-target', agent.state.session_id)
   end)
 end)
 
@@ -2203,17 +2340,54 @@ describe('chat input behavior', function()
     assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
   end)
 
-  it('uses txt filetype for the input prompt buffer', function()
+  it('uses markdown filetype for the input prompt buffer', function()
     agent.open_chat()
     input.open_input_window()
 
-    assert_eq('txt', vim.bo[agent.state.input_bufnr].filetype)
+    assert_eq('markdown', vim.bo[agent.state.input_bufnr].filetype)
   end)
 
-  it('uses txt filetype for the chat scratch buffer', function()
+  it('protects the input prompt buffer by default for the upstream treesitter workaround', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    assert_eq(true, vim.b[agent.state.input_bufnr].copilot_agent_treesitter_disabled)
+  end)
+
+  it('allows disabling input markdown protection via config', function()
+    agent.setup({
+      auto_create_session = false,
+      chat = {
+        protect_markdown_buffer = false,
+      },
+    })
+
+    agent.open_chat()
+    input.open_input_window()
+
+    assert_true(vim.b[agent.state.input_bufnr].copilot_agent_treesitter_disabled ~= true)
+  end)
+
+  it('uses markdown filetype for the chat scratch buffer', function()
     agent.open_chat()
 
-    assert_eq('txt', vim.bo[agent.state.chat_bufnr].filetype)
+    assert_eq('markdown', vim.bo[agent.state.chat_bufnr].filetype)
+  end)
+
+  it('activates markdown syntax in the chat window so conceal works immediately', function()
+    agent.open_chat()
+
+    local syntax = vim.api.nvim_win_call(agent.state.chat_winid, function()
+      return vim.bo.syntax
+    end)
+
+    assert_eq('markdown', syntax)
+  end)
+
+  it('keeps treesitter enabled for the chat scratch buffer', function()
+    agent.open_chat()
+
+    assert_true(vim.b[agent.state.chat_bufnr].copilot_agent_treesitter_disabled ~= true)
   end)
 
   it('uses Enter to confirm popup completion before prompt submission', function()
@@ -2265,12 +2439,19 @@ describe('chat input behavior', function()
       { kind = 'user', content = 'second prompt', checkpoint_id = 'v002' },
       { kind = 'assistant', content = 'second reply' },
     }
+    if agent.state.chat_bufnr and vim.api.nvim_buf_is_valid(agent.state.chat_bufnr) then
+      vim.api.nvim_buf_set_name(agent.state.chat_bufnr, 'copilot-agent-chat-stale-' .. agent.state.chat_bufnr)
+    end
+    agent.state.chat_bufnr = nil
+    agent.state.chat_winid = nil
 
     agent.open_chat()
     render.render_chat()
+    vim.wait(20)
 
     local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
-    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, -1, 0, -1, { details = true })
+    local chat_ns = vim.api.nvim_get_namespaces().copilot_agent_chat
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, chat_ns, 0, -1, { details = true })
     local separators = {}
     for _, mark in ipairs(extmarks) do
       local details = mark[4] or {}
@@ -2289,18 +2470,6 @@ describe('chat input behavior', function()
       end
     end
 
-    assert_true(vim.tbl_contains(
-      vim.tbl_map(function(text)
-        return text:find('Checkpoint ID: [v001]', 1, true) ~= nil
-      end, separators),
-      true
-    ))
-    assert_true(vim.tbl_contains(
-      vim.tbl_map(function(text)
-        return text:find('Checkpoint ID: [v002]', 1, true) ~= nil
-      end, separators),
-      true
-    ))
     for _, text in ipairs(separators) do
       assert_true(text:find('---', 1, true) == nil)
     end

@@ -409,6 +409,59 @@ func TestCountDiscoverableConfigCountsMCPServers(t *testing.T) {
 	}
 }
 
+func TestManagedSessionSummaryLiveReflectsActiveSubscribers(t *testing.T) {
+	t.Parallel()
+
+	managed := &managedSession{
+		session:     &copilot.Session{SessionID: "session-123"},
+		subscribers: make(map[chan sseMessage]struct{}),
+	}
+
+	if managed.summary().Live {
+		t.Fatal("expected detached managed session summary to report live=false")
+	}
+
+	sub := managed.subscribe()
+	defer managed.unsubscribe(sub)
+
+	if !managed.summary().Live {
+		t.Fatal("expected attached managed session summary to report live=true")
+	}
+}
+
+func TestLiveSessionSummariesOnlyIncludesAttachedSessions(t *testing.T) {
+	t.Parallel()
+
+	detached := &managedSession{
+		session:     &copilot.Session{SessionID: "detached-session"},
+		subscribers: make(map[chan sseMessage]struct{}),
+	}
+	attached := &managedSession{
+		session:     &copilot.Session{SessionID: "attached-session"},
+		subscribers: make(map[chan sseMessage]struct{}),
+	}
+	sub := attached.subscribe()
+	defer attached.unsubscribe(sub)
+
+	svc := &service{
+		sessions: map[string]*managedSession{
+			"detached-session": detached,
+			"attached-session": attached,
+		},
+	}
+
+	live := svc.liveSessionSummaries()
+	if len(live) != 1 {
+		t.Fatalf("expected 1 attached session, got %d", len(live))
+	}
+	if live[0].SessionID != "attached-session" {
+		t.Fatalf("expected attached-session, got %+v", live[0])
+	}
+	if !live[0].Live {
+		t.Fatal("expected attached session summary to report live=true")
+	}
+}
+
 // ── decodeJSON ────────────────────────────────────────────────────────────────
 
 func TestDecodeJSONAcceptsValidBody(t *testing.T) {

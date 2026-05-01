@@ -520,9 +520,7 @@ local function create_input_buffer()
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].bufhidden = 'hide'
-  -- Keep the prompt buffer on a plain text filetype so Treesitter/render-markdown
-  -- do not attach to a prompt buffer during teardown.
-  vim.bo[bufnr].filetype = 'txt'
+  vim.bo[bufnr].filetype = 'markdown'
   -- copilot.lua skips prompt buffers by default; this explicit flag overrides it.
   vim.b[bufnr].copilot_enabled = true
 

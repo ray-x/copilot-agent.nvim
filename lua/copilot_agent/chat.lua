@@ -27,6 +27,14 @@ local schedule_render = render.schedule_render
 
 local M = {}
 
+local function attach_chat_markdown(bufnr, winid)
+  win.disable_folds(winid)
+  win.set_window_syntax(winid, 'markdown')
+  if vim.wo[winid].conceallevel == 0 then
+    vim.wo[winid].conceallevel = 2
+  end
+end
+
 local function help_lines()
   return {
     ' Copilot Agent – Help ',
@@ -355,8 +363,7 @@ local function open_chat_win(bufnr, opts)
       win = 0,
     })
   end
-  win.protect_markdown_buffer(bufnr, state.chat_winid)
-  vim.wo[state.chat_winid].conceallevel = 2
+  attach_chat_markdown(bufnr, state.chat_winid)
 end
 
 function M.ensure_chat_window(opts)
@@ -385,7 +392,7 @@ function M.ensure_chat_window(opts)
   vim.bo[bufnr].buflisted = true
   vim.bo[bufnr].bufhidden = 'hide'
   vim.bo[bufnr].swapfile = false
-  vim.bo[bufnr].filetype = 'txt'
+  vim.bo[bufnr].filetype = 'markdown'
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
   vim.api.nvim_buf_set_name(bufnr, buf_name)

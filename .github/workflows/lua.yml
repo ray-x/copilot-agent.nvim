@@ -67,11 +67,15 @@ jobs:
             curl -sL "$URL" | tar xzf - --strip-components=1 -C _neovim
           }
 
-      - name: Install plenary.nvim
+      - name: Install test plugins
         run: |
           mkdir -p ~/.local/share/nvim/site/pack/vendor/start
-          git clone --depth 1 https://github.com/nvim-lua/plenary.nvim \
-            ~/.local/share/nvim/site/pack/vendor/start/plenary.nvim
+          test -d ~/.local/share/nvim/site/pack/vendor/start/plenary.nvim || \
+            git clone --depth 1 https://github.com/nvim-lua/plenary.nvim \
+              ~/.local/share/nvim/site/pack/vendor/start/plenary.nvim
+          test -d ~/.local/share/nvim/site/pack/vendor/start/nvim-treesitter || \
+            git clone --depth 1 https://github.com/nvim-treesitter/nvim-treesitter \
+              ~/.local/share/nvim/site/pack/vendor/start/nvim-treesitter
           ln -s "$PWD" ~/.local/share/nvim/site/pack/vendor/start/copilot-agent.nvim
 
       - name: Run integration tests
@@ -81,4 +85,3 @@ jobs:
             -c "PlenaryBustedFile tests/integration/setup_spec.lua" \
             2>&1
           echo "Exit code: $?"
-

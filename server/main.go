@@ -776,6 +776,9 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	sub := managed.subscribe()
+	defer managed.unsubscribe(sub)
+
 	if err := writeSSE(w, "host.session_attached", mustJSON(hostEvent{Timestamp: time.Now().UTC(), Data: managed.summary()})); err != nil {
 		return
 	}
@@ -813,9 +816,6 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		flusher.Flush()
 	}
-
-	sub := managed.subscribe()
-	defer managed.unsubscribe(sub)
 
 	keepAlive := time.NewTicker(15 * time.Second)
 	defer keepAlive.Stop()
@@ -1001,6 +1001,9 @@ func (s *service) liveSessionSummaries() []sessionSummary {
 
 	items := make([]sessionSummary, 0, len(s.sessions))
 	for _, managed := range s.sessions {
+		if !managed.hasSubscribers() {
+			continue
+		}
 		items = append(items, managed.summary())
 	}
 	return items
@@ -1257,18 +1260,27 @@ func (m *managedSession) answerPermission(requestID string, approved bool) error
 }
 
 func (m *managedSession) summary() sessionSummary {
+	sessionID := ""
+	workspacePath := ""
+	capabilities := copilot.SessionCapabilities{}
+	if m.session != nil {
+		sessionID = m.session.SessionID
+		workspacePath = m.session.WorkspacePath()
+		capabilities = m.session.Capabilities()
+	}
+
 	return sessionSummary{
-		SessionID:         m.session.SessionID,
+		SessionID:         sessionID,
 		Model:             m.model,
 		AgentMode:         m.agentMode,
 		WorkingDirectory:  m.workingDirectory,
-		WorkspacePath:     m.session.WorkspacePath(),
+		WorkspacePath:     workspacePath,
 		PermissionMode:    m.permissionMode,
 		ExcludedTools:     m.excludedTools,
-		Capabilities:      m.session.Capabilities(),
+		Capabilities:      capabilities,
 		PendingUserInputs: m.pendingUserInputsSnapshot(),
 		Summary:           m.sessionName,
-		Live:              true,
+		Live:              m.hasSubscribers(),
 		CreatedAt:         m.createdAt,
 		Resumed:           m.resumed,
 		Streaming:         m.streaming,
@@ -1280,6 +1292,12 @@ func (m *managedSession) summary() sessionSummary {
 		SkillCount:        m.skillCount,
 		MCPCount:          m.mcpCount,
 	}
+}
+
+func (m *managedSession) hasSubscribers() bool {
+	m.subscribersMu.RLock()
+	defer m.subscribersMu.RUnlock()
+	return len(m.subscribers) > 0
 }
 
 func countDiscoverableConfig(workingDirectory string) (instructionCount, agentCount, skillCount, mcpCount int) {

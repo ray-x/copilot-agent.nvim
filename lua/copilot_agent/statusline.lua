@@ -274,9 +274,82 @@ local function build_parts(...)
   return parts
 end
 
+local function statusline_visible_text(text)
+  if type(text) ~= 'string' or text == '' then
+    return ''
+  end
+  return text:gsub('%%#.-#', ''):gsub('%%%*', '')
+end
+
+local function statusline_text_width(text)
+  return vim.fn.strdisplaywidth(statusline_visible_text(text))
+end
+
+local function truncate_plain_text(text, max_width)
+  text = type(text) == 'string' and text or ''
+  max_width = math.max(1, math.floor(tonumber(max_width) or 1))
+  if vim.fn.strdisplaywidth(text) <= max_width then
+    return text
+  end
+  if max_width <= 1 then
+    return '…'
+  end
+
+  local out = {}
+  local width = 0
+  local char_count = vim.fn.strchars(text)
+  for idx = 1, char_count do
+    local s = vim.fn.strcharpart(text, idx - 1, 1)
+    local next_width = vim.fn.strdisplaywidth(table.concat(out) .. s .. '…')
+    if next_width > max_width then
+      break
+    end
+    out[#out + 1] = s
+    width = next_width
+  end
+  if #out == 0 or width > max_width then
+    return '…'
+  end
+  return table.concat(out) .. '…'
+end
+
+local function fit_statusline_parts(parts, width, sep)
+  sep = sep or ' '
+  width = math.max(1, math.floor(tonumber(width) or 0))
+  if width <= 0 then
+    return ''
+  end
+
+  local out = {}
+  local used = 0
+  local sep_width = statusline_text_width(sep)
+
+  for _, part in ipairs(parts) do
+    if type(part) == 'string' and part ~= '' then
+      local part_width = statusline_text_width(part)
+      local extra = (#out > 0) and sep_width or 0
+      if used + extra + part_width <= width then
+        if #out > 0 then
+          used = used + sep_width
+        end
+        out[#out + 1] = part
+        used = used + part_width
+      else
+        local remaining = width - used - extra
+        if #out == 0 and remaining > 0 then
+          out[#out + 1] = truncate_plain_text(statusline_visible_text(part), remaining)
+        end
+        break
+      end
+    end
+  end
+
+  return table.concat(out, sep)
+end
+
 function M.statusline_component()
   local width = vim.api.nvim_win_get_width(0)
-  return table.concat(
+  return fit_statusline_parts(
     build_parts(
       M.statusline_mode(),
       M.statusline_permission(),
@@ -288,6 +361,7 @@ function M.statusline_component()
       M.statusline_config(width),
       M.statusline_attachments()
     ),
+    width,
     ' '
   )
 end
@@ -298,7 +372,7 @@ function M.refresh_input_statusline()
   end
   local width = vim.api.nvim_win_get_width(state.input_winid)
   local line = ' '
-    .. table.concat(
+    .. fit_statusline_parts(
       build_parts(
         M.statusline_mode(),
         M.statusline_permission(),
@@ -308,11 +382,12 @@ function M.refresh_input_statusline()
         M.statusline_intent(),
         M.statusline_context(),
         M.statusline_config_highlighted(width),
-        M.statusline_attachments()
+        M.statusline_attachments(),
+        '(? for help)'
       ),
+      math.max(1, width - 1),
       '  '
     )
-    .. '  (? for help)'
   vim.wo[state.input_winid].statusline = line
   local ok, input = pcall(require, 'copilot_agent.input')
   if ok and type(input.refresh_separator) == 'function' then
@@ -326,19 +401,20 @@ function M.refresh_chat_statusline()
   end
   local width = vim.api.nvim_win_get_width(state.chat_winid)
   local line = ' '
-    .. table.concat(
+    .. fit_statusline_parts(
       build_parts(
-        M.statusline_mode(),
-        M.statusline_permission(),
-        M.statusline_busy(),
-        M.statusline_model(),
-        M.statusline_tool(),
-        M.statusline_intent(),
-        M.statusline_context(),
-        M.statusline_config_highlighted(width),
-        M.statusline_session(width)
-      ),
-      '  '
+      M.statusline_mode(),
+      M.statusline_busy(),
+      M.statusline_session(width),
+      M.statusline_permission(),
+      M.statusline_model(),
+      M.statusline_tool(),
+      M.statusline_intent(),
+      M.statusline_context(),
+      M.statusline_config_highlighted(width)
+    ),
+    math.max(1, width - 1),
+    '  '
     )
   vim.wo[state.chat_winid].statusline = line
 end

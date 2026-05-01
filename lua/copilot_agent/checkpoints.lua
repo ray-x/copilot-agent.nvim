@@ -482,6 +482,14 @@ local function apply_snapshot(snapshot)
   state.assistant_entries = {}
   state.stream_line_start = nil
   state.active_tool = nil
+  state.active_tool_run_id = nil
+  state.active_tool_detail = nil
+  state.pending_tool_detail = nil
+  state.overlay_tool_display = nil
+  state.overlay_tool_queue = {}
+  state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+  state.active_turn_assistant_index = nil
+  state.active_turn_assistant_message_id = nil
   state.current_intent = nil
   state.context_tokens = nil
   state.context_limit = nil
@@ -526,6 +534,7 @@ local function replace_with_new_session(snapshot, callback)
       return
     end
     apply_snapshot(snapshot)
+    render.reset_frozen_render()
     render.render_chat()
     sl.refresh_statuslines()
     require('copilot_agent').open_chat({ activate_input_on_session_ready = false })

@@ -17,6 +17,7 @@ local window = require('copilot_agent.window')
 
 local state = cfg.state
 local notify = cfg.notify
+local log = cfg.log
 
 local decode_json = http.decode_json
 local request = http.request
@@ -37,6 +38,8 @@ local stop_thinking_spinner = render.stop_thinking_spinner
 local reset_pending_assistant_entry = render.reset_pending_assistant_entry
 local append_reasoning_delta = render.append_reasoning_delta
 local clear_reasoning_preview = render.clear_reasoning_preview
+local refresh_reasoning_overlay = render.refresh_reasoning_overlay
+local reset_frozen_render = render.reset_frozen_render
 local scroll_to_bottom = render.scroll_to_bottom
 
 local is_thinking_content = utils.is_thinking_content
@@ -47,6 +50,7 @@ local queued_prompt_requests = {}
 local queued_prompt_request_ids = {}
 local prompt_handoff_delay_ms = 20
 local intentionally_stopped_event_jobs = {}
+local sanitize_permission_text
 
 local function preload_history_checkpoint_ids(session_id)
   local ids = {}
@@ -90,6 +94,355 @@ local function first_non_empty(...)
   return nil
 end
 
+local function preview_log_text(text, max_len)
+  if type(text) ~= 'string' then
+    return '<non-string>'
+  end
+  local preview = text:gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
+  max_len = math.max(16, math.floor(tonumber(max_len) or 120))
+  if #preview > max_len then
+    return preview:sub(1, max_len - 1) .. '…'
+  end
+  return preview
+end
+
+local function preview_delta_boundary(current, delta)
+  current = type(current) == 'string' and current or ''
+  delta = type(delta) == 'string' and delta or ''
+  local current_tail = current:sub(math.max(1, #current - 23), #current)
+  local delta_head = delta:sub(1, 24)
+  local tail_last = current_tail:sub(-1)
+  local head_first = delta_head:sub(1, 1)
+  local suspicious_join = tail_last ~= '' and head_first ~= '' and tail_last:match('[%w%)]') and head_first:match('[%w%(]') and not tail_last:match('%s') and not head_first:match('%s')
+
+  return string.format('tail=%s head=%s suspicious=%s', preview_log_text(current_tail, 40), preview_log_text(delta_head, 40), tostring(suspicious_join and true or false))
+end
+
+local function merge_assistant_delta_content(current, delta, ctx)
+  current = type(current) == 'string' and current or ''
+  delta = type(delta) == 'string' and delta or ''
+  local function finish(decision, result, extra)
+    extra = extra or {}
+    log(
+      string.format(
+        'assistant.message_delta merge decision=%s message_id=%s key=%s idx=%s current_len=%d delta_len=%d result_len=%d overlap=%s current=%s delta=%s result=%s',
+        tostring(decision),
+        tostring((ctx or {}).message_id or '<none>'),
+        tostring((ctx or {}).entry_key or '<none>'),
+        tostring((ctx or {}).entry_index or '<none>'),
+        #current,
+        #delta,
+        #(type(result) == 'string' and result or ''),
+        tostring(extra.overlap or '<none>'),
+        preview_log_text(current),
+        preview_log_text(delta),
+        preview_log_text(result)
+      ),
+      vim.log.levels.DEBUG
+    )
+    return result
+  end
+
+  if delta == '' then
+    return finish('ignore-empty-delta', current)
+  end
+  if current == '' or is_thinking_content(current) then
+    return finish('append-initial-delta', current .. delta)
+  end
+  if current:sub(-#delta) == delta then
+    return finish('ignore-duplicate-suffix', current)
+  end
+  if delta:sub(1, #current) == current then
+    return finish('replace-cumulative-delta', delta)
+  end
+
+  local max_overlap = math.min(#current, #delta)
+  for overlap = max_overlap, 1, -1 do
+    if current:sub(#current - overlap + 1) == delta:sub(1, overlap) then
+      return finish('merge-literal-overlap', current .. delta:sub(overlap + 1), { overlap = overlap })
+    end
+  end
+
+  return finish('append-raw-delta', current .. delta)
+end
+
+local function merge_assistant_message_content(current, incoming, ctx)
+  current = type(current) == 'string' and current or ''
+  incoming = type(incoming) == 'string' and incoming or ''
+  local function finish(decision, result, extra)
+    extra = extra or {}
+    log(
+      string.format(
+        'assistant.message merge decision=%s message_id=%s key=%s idx=%s current_len=%d incoming_len=%d result_len=%d overlap=%s current=%s incoming=%s result=%s',
+        tostring(decision),
+        tostring((ctx or {}).message_id or '<none>'),
+        tostring((ctx or {}).entry_key or '<none>'),
+        tostring((ctx or {}).entry_index or '<none>'),
+        #current,
+        #incoming,
+        #(type(result) == 'string' and result or ''),
+        tostring(extra.overlap or '<none>'),
+        preview_log_text(current),
+        preview_log_text(incoming),
+        preview_log_text(result)
+      ),
+      vim.log.levels.DEBUG
+    )
+    return result
+  end
+  if incoming == '' then
+    return finish('ignore-empty-incoming', current)
+  end
+  if current == '' or is_thinking_content(current) then
+    return finish('replace-empty-or-thinking', incoming)
+  end
+  local function canonicalize(text)
+    return text:gsub('\r\n?', '\n'):gsub('’', "'"):gsub('‘', "'"):gsub('“', '"'):gsub('”', '"'):lower():gsub('[%p%c]+', ' '):gsub('%s+', ' '):match('^%s*(.-)%s*$')
+  end
+  local function split_message_lines(text)
+    return vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
+  end
+  local function overlap_line_count(current_lines, incoming_lines)
+    local max_overlap = math.min(#current_lines, #incoming_lines)
+    for overlap = max_overlap, 1, -1 do
+      local matches = true
+      for idx = 1, overlap do
+        local current_line = canonicalize(current_lines[#current_lines - overlap + idx] or '')
+        local incoming_line = canonicalize(incoming_lines[idx] or '')
+        if current_line ~= incoming_line and (current_line ~= '' or incoming_line ~= '') then
+          matches = false
+          break
+        end
+      end
+      if matches then
+        return overlap
+      end
+    end
+    return 0
+  end
+  local canonical_current = canonicalize(current)
+  local canonical_incoming = canonicalize(incoming)
+  if current == incoming then
+    return finish('keep-identical-literal', current)
+  end
+  if canonical_current ~= '' and canonical_current == canonical_incoming then
+    return finish('replace-canonical-equal', incoming)
+  end
+  if incoming:sub(1, #current) == current then
+    return finish('replace-prefix-extension', incoming)
+  end
+  if canonical_current ~= '' and canonical_incoming ~= '' then
+    if vim.startswith(canonical_incoming, canonical_current) then
+      return finish('replace-canonical-prefix-extension', incoming)
+    end
+    if canonical_current:find(canonical_incoming, 1, true) then
+      return finish('keep-canonical-substring', current)
+    end
+  end
+  if current:find(incoming, 1, true) then
+    return finish('keep-literal-substring', current)
+  end
+  local current_lines = split_message_lines(current)
+  local incoming_lines = split_message_lines(incoming)
+  local overlap = overlap_line_count(current_lines, incoming_lines)
+  if overlap > 0 then
+    local merged = {}
+    for idx = 1, #current_lines - overlap do
+      merged[#merged + 1] = current_lines[idx]
+    end
+    for _, line in ipairs(incoming_lines) do
+      merged[#merged + 1] = line
+    end
+    return finish('merge-line-overlap', table.concat(merged, '\n'), { overlap = overlap })
+  end
+  local separator = current:match('\n$') and '' or '\n'
+  return finish('append-fallback', current .. separator .. incoming)
+end
+
+local function looks_like_shell_tool(name)
+  if type(name) ~= 'string' or name == '' then
+    return false
+  end
+  name = vim.trim(name):lower()
+  return name == 'bash' or name == 'sh' or name == 'zsh' or name == 'fish' or name == 'pwsh' or name == 'powershell' or name == 'cmd'
+end
+
+local function overlay_now_ms()
+  local hrtime = (vim.uv or vim.loop).hrtime
+  return math.floor(hrtime() / 1e6)
+end
+
+local function cancel_overlay_tool_schedule()
+  state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+end
+
+local function min_overlay_tool_duration_ms()
+  return 1000
+end
+
+local function extract_shell_command_text(data)
+  data = type(data) == 'table' and data or {}
+  local function assemble_command_with_args(command_value, arg_values)
+    local parts = {}
+    local command = sanitize_permission_text(command_value)
+    if command then
+      parts[#parts + 1] = command
+    end
+
+    if type(arg_values) == 'table' then
+      for _, value in ipairs(arg_values) do
+        local arg = sanitize_permission_text(value)
+        if arg then
+          parts[#parts + 1] = arg
+        end
+      end
+    elseif type(arg_values) == 'string' then
+      local args = sanitize_permission_text(arg_values)
+      if args then
+        parts[#parts + 1] = args
+      end
+    end
+
+    if #parts == 0 then
+      return nil
+    end
+    return sanitize_permission_text(table.concat(parts, ' '))
+  end
+
+  local visited = {}
+  local nested_keys = {
+    'input',
+    'toolInput',
+    'tool_input',
+    'parameters',
+    'params',
+    'payload',
+    'request',
+    'call',
+    'invocation',
+    'details',
+    'metadata',
+  }
+
+  local function extract_from_table(value, depth)
+    if type(value) ~= 'table' or depth > 3 or visited[value] then
+      return nil
+    end
+    visited[value] = true
+
+    local command_with_args =
+      assemble_command_with_args(value.command or value.executable or value.program or value.cmd, value.arguments or value.args or value.argv or value.commandArgs or value.command_args)
+    if command_with_args then
+      return command_with_args
+    end
+
+    local detail = sanitize_permission_text(
+      value.fullCommandText
+        or value.commandLine
+        or value.commandText
+        or value.shellCommand
+        or value.rawCommand
+        or value.raw_command
+        or value.invocation
+        or value.command
+        or value.toolDescription
+        or value.description
+        or value.intention
+    )
+    if detail then
+      return detail
+    end
+
+    for _, key in ipairs(nested_keys) do
+      local nested = extract_from_table(value[key], depth + 1)
+      if nested then
+        return nested
+      end
+    end
+
+    for _, nested in pairs(value) do
+      local detail_from_nested = extract_from_table(nested, depth + 1)
+      if detail_from_nested then
+        return detail_from_nested
+      end
+    end
+
+    return nil
+  end
+
+  return extract_from_table(data, 1)
+end
+
+local function extract_shell_tool_detail(tool_name, data)
+  local detail = extract_shell_command_text(data)
+  if detail then
+    return detail
+  end
+
+  if looks_like_shell_tool(tool_name) then
+    return state.pending_tool_detail
+  end
+  return nil
+end
+
+local function schedule_overlay_tool_clear(delay_ms, run_id)
+  cancel_overlay_tool_schedule()
+  local token = state.overlay_tool_schedule_token
+  vim.defer_fn(function()
+    if state.overlay_tool_schedule_token ~= token then
+      return
+    end
+    local current = state.overlay_tool_display
+    if not current or current.run_id ~= run_id or current.completed ~= true then
+      return
+    end
+    state.overlay_tool_display = nil
+    refresh_reasoning_overlay(true)
+  end, math.max(0, math.floor(tonumber(delay_ms) or 0)))
+end
+
+local function enqueue_overlay_tool(tool_name, detail)
+  if not looks_like_shell_tool(tool_name) then
+    return nil
+  end
+
+  state.overlay_tool_run_id = (tonumber(state.overlay_tool_run_id) or 0) + 1
+  local item = {
+    run_id = state.overlay_tool_run_id,
+    tool = tool_name,
+    detail = detail,
+    completed = false,
+    display_started_ms = overlay_now_ms(),
+  }
+
+  cancel_overlay_tool_schedule()
+  state.overlay_tool_display = item
+  refresh_reasoning_overlay(true)
+  return item.run_id
+end
+
+local function complete_overlay_tool(run_id)
+  if type(run_id) ~= 'number' then
+    return
+  end
+
+  local current = state.overlay_tool_display
+  if not current or current.run_id ~= run_id then
+    return
+  end
+
+  current.completed = true
+  local elapsed = overlay_now_ms() - (tonumber(current.display_started_ms) or 0)
+  local remaining = math.max(0, min_overlay_tool_duration_ms() - elapsed)
+  schedule_overlay_tool_clear(remaining, run_id)
+end
+
+local function reset_overlay_tool_state()
+  cancel_overlay_tool_schedule()
+  state.overlay_tool_display = nil
+  state.overlay_tool_queue = {}
+end
+
 local active_background_task_status = {
   running = true,
   inbox = true,
@@ -100,7 +453,16 @@ local function reset_live_activity_state()
   state.pending_checkpoint_ops = 0
   state.pending_workspace_updates = 0
   state.background_tasks = {}
-  clear_reasoning_preview()
+  state.active_tool = nil
+  state.active_tool_run_id = nil
+  state.active_tool_detail = nil
+  state.pending_tool_detail = nil
+  state.recent_activity_lines = {}
+  reset_overlay_tool_state()
+  state.active_turn_assistant_index = nil
+  state.active_turn_assistant_message_id = nil
+  state.current_intent = nil
+  clear_reasoning_preview('live activity reset')
 end
 
 local function set_background_task(key, opts)
@@ -114,6 +476,7 @@ local function set_background_task(key, opts)
     if state.background_tasks[key] ~= nil then
       state.background_tasks[key] = nil
       refresh_statuslines()
+      refresh_reasoning_overlay()
     end
     return
   end
@@ -125,6 +488,7 @@ local function set_background_task(key, opts)
   task.description = first_non_empty(opts.description, task.description)
   state.background_tasks[key] = task
   refresh_statuslines()
+  refresh_reasoning_overlay()
 end
 
 -- Show a diff in a floating window.
@@ -290,7 +654,7 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
   end)
 end
 
-local function sanitize_permission_text(text)
+sanitize_permission_text = function(text)
   if type(text) ~= 'string' then
     return nil
   end
@@ -308,7 +672,7 @@ local function build_permission_prompt(permission)
   local parts = {}
 
   if kind == 'shell' then
-    local cmd = sanitize_permission_text(permission.fullCommandText or permission.intention) or '(shell command)'
+    local cmd = extract_shell_command_text(permission) or '(shell command)'
     parts[#parts + 1] = 'Run shell command'
     parts[#parts + 1] = cmd
   elseif kind == 'write' then
@@ -675,7 +1039,7 @@ local function handle_host_event(event_name, payload)
 
   local data = payload and payload.data or {}
   if event_name == 'host.session_attached' then
-    clear_reasoning_preview()
+    clear_reasoning_preview('session attached')
     sync_model_state(data.model, data.reasoningEffort)
     sync_config_counts(data)
     state.session_name = session_names.resolve(data.summary, data.sessionId or state.session_id)
@@ -706,8 +1070,15 @@ local function handle_host_event(event_name, payload)
     local req = data.request or {}
     local req_id = req.id
     local mode = data.mode or 'interactive'
+    local perm = req.request or {}
+    if perm.kind == 'shell' then
+      state.pending_tool_detail = extract_shell_command_text(perm)
+    elseif perm.kind == 'mcp' or perm.kind == 'custom-tool' then
+      state.pending_tool_detail = sanitize_permission_text(perm.toolDescription or perm.intention)
+    else
+      state.pending_tool_detail = nil
+    end
     if mode == 'interactive' and req_id then
-      local perm = req.request or {}
       local kind = perm.kind or 'unknown'
       local sid = state.session_id
       local event_session_id = data.sessionId
@@ -736,6 +1107,7 @@ local function handle_host_event(event_name, payload)
     state.history_checkpoint_ids = nil
     state.history_pending_user_entries = {}
     refresh_statuslines()
+    reset_frozen_render()
     render_chat()
     scroll_to_bottom()
   end
@@ -989,6 +1361,31 @@ local function reload_buffer_from_disk(bufnr, abs_path, opts)
   return summary, nil
 end
 
+local function sanitize_reload_error(err)
+  if err == nil then
+    return nil
+  end
+
+  local line = tostring(err):match('([^\n]+)')
+  return line or tostring(err)
+end
+
+local function is_expected_reload_attention(err)
+  local message = sanitize_reload_error(err)
+  if not message then
+    return false
+  end
+
+  return message == 'buffer has unsaved changes' or message:find('E37:', 1, true) ~= nil or message:find('No write since last change', 1, true) ~= nil
+end
+
+local function reload_attention_level(err)
+  if is_expected_reload_attention(err) then
+    return vim.log.levels.INFO
+  end
+  return vim.log.levels.WARN
+end
+
 local function check_open_buffers_for_external_changes(opts)
   opts = opts or {}
   local uv = vim.uv or vim.loop
@@ -1010,7 +1407,10 @@ local function check_open_buffers_for_external_changes(opts)
               if modified_buffer_changed_on_disk(bufnr, path) and confirm_external_buffer_reload() then
                 local summary, reload_err = reload_buffer_from_disk(bufnr, path, { force = true })
                 if reload_err then
-                  notify('External reload needs attention: ' .. vim.fn.fnamemodify(path, ':t') .. ' (' .. tostring(summary or 'content updated') .. '); ' .. tostring(reload_err), vim.log.levels.WARN)
+                  notify(
+                    'External reload needs attention: ' .. vim.fn.fnamemodify(path, ':t') .. ' (' .. tostring(summary or 'content updated') .. '); ' .. tostring(sanitize_reload_error(reload_err)),
+                    reload_attention_level(reload_err)
+                  )
                 end
               end
             else
@@ -1058,14 +1458,36 @@ local function handle_session_event(payload)
     end
     local entry, idx, key = ensure_assistant_entry(data.messageId)
     local delta = data.deltaContent or ''
+    log(
+      string.format(
+        'assistant.message_delta received message_id=%s key=%s idx=%s delta_len=%d existing_len=%d delta=%s',
+        tostring(data.messageId or '<none>'),
+        tostring(key or '<none>'),
+        tostring(idx or '<none>'),
+        #delta,
+        #((entry and entry.content) or ''),
+        preview_log_text(delta)
+      ),
+      vim.log.levels.DEBUG
+    )
 
-    -- Always discard thinking-only tokens (dots, whitespace) regardless of
-    -- whether real content has already accumulated. Start the spinner on the
-    -- first such token so the user sees activity.
-    if is_thinking_content(delta) then
-      if state.thinking_entry_key == nil and is_thinking_content(entry.content) then
+    -- Treat dots/whitespace as spinner noise only before any real assistant
+    -- content has started. Once content exists, punctuation/newline-only
+    -- deltas are part of the real streamed message and must be preserved.
+    if is_thinking_content(delta) and is_thinking_content(entry.content) then
+      if state.thinking_entry_key == nil then
         start_thinking_spinner(key)
       end
+      log(
+        string.format(
+          'assistant.message_delta ignored thinking-only message_id=%s key=%s idx=%s delta=%s',
+          tostring(data.messageId or '<none>'),
+          tostring(key or '<none>'),
+          tostring(idx or '<none>'),
+          preview_log_text(delta)
+        ),
+        vim.log.levels.DEBUG
+      )
       -- Spinner timer drives render; no buffer update needed.
       return
     end
@@ -1077,7 +1499,24 @@ local function handle_session_event(payload)
         entry.content = ''
       end
     end
-    entry.content = (entry.content or '') .. delta
+    local previous_content = entry.content or ''
+    entry.content = merge_assistant_delta_content(previous_content, delta, {
+      message_id = data.messageId,
+      entry_key = key,
+      entry_index = idx,
+    })
+    log(
+      string.format(
+        'assistant.message_delta appended message_id=%s key=%s idx=%s result_len=%d boundary={%s} content=%s',
+        tostring(data.messageId or '<none>'),
+        tostring(key or '<none>'),
+        tostring(idx or '<none>'),
+        #(entry.content or ''),
+        preview_delta_boundary(previous_content, delta),
+        preview_log_text(entry.content)
+      ),
+      vim.log.levels.DEBUG
+    )
     if idx then
       stream_update(entry, idx)
     else
@@ -1103,11 +1542,30 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.message' then
-    local entry = ensure_assistant_entry(data.messageId)
+    local entry, idx, key = ensure_assistant_entry(data.messageId)
     local first_message_for_entry = (entry.content or '') == ''
+    local had_stream_start = state.stream_line_start ~= nil
     if type(data.content) == 'string' and not is_thinking_content(data.content) then
       stop_thinking_spinner()
-      entry.content = data.content
+      log(
+        string.format(
+          'assistant.message received message_id=%s key=%s idx=%s active_message_id=%s incoming_len=%d existing_len=%d incoming=%s existing=%s',
+          tostring(data.messageId or '<none>'),
+          tostring(key or '<none>'),
+          tostring(idx or '<none>'),
+          tostring(state.active_turn_assistant_message_id or '<none>'),
+          #(data.content or ''),
+          #(entry.content or ''),
+          preview_log_text(data.content),
+          preview_log_text(entry.content)
+        ),
+        vim.log.levels.DEBUG
+      )
+      entry.content = merge_assistant_message_content(entry.content, data.content, {
+        message_id = data.messageId,
+        entry_key = key,
+        entry_index = idx,
+      })
     end
     if state.history_loading and first_message_for_entry then
       assign_history_checkpoint_id(data.messageId)
@@ -1117,9 +1575,32 @@ local function handle_session_event(payload)
         pending_turn.assistant_message_id = data.messageId
       end
     end
-    state.stream_line_start = nil
+    log(
+      string.format(
+        'assistant.message preserving stream start message_id=%s idx=%s stream_line_start=%s had_stream_start=%s',
+        tostring(data.messageId or '<none>'),
+        tostring(idx or '<none>'),
+        tostring(state.stream_line_start or '<none>'),
+        tostring(had_stream_start)
+      ),
+      vim.log.levels.DEBUG
+    )
     schedule_render()
     return
+  end
+
+  if state.history_loading then
+    if
+      event_type == 'subagent.started'
+      or event_type == 'subagent.completed'
+      or event_type == 'subagent.failed'
+      or event_type == 'assistant.intent'
+      or event_type == 'tool.execution_start'
+      or event_type == 'tool.execution_complete'
+      or event_type == 'assistant.reasoning_delta'
+    then
+      return
+    end
   end
 
   if event_type == 'assistant.turn_end' then
@@ -1143,12 +1624,20 @@ local function handle_session_event(payload)
     end
     stop_thinking_spinner()
     reset_pending_assistant_entry()
-    clear_reasoning_preview()
+    clear_reasoning_preview('turn end')
     state.stream_line_start = nil
     state.chat_busy = false
+    complete_overlay_tool(state.active_tool_run_id)
+    state.recent_activity_lines = {}
     state.active_tool = nil
+    state.active_tool_run_id = nil
+    state.active_tool_detail = nil
+    state.pending_tool_detail = nil
+    state.active_turn_assistant_index = nil
+    state.active_turn_assistant_message_id = nil
     state.current_intent = nil
     refresh_statuslines()
+    refresh_reasoning_overlay()
     render_chat() -- immediate full render on turn completion
     schedule_open_buffer_refresh()
     return
@@ -1185,26 +1674,39 @@ local function handle_session_event(payload)
   if event_type == 'assistant.intent' then
     state.current_intent = data.intent or nil
     refresh_statuslines()
+    refresh_reasoning_overlay()
     return
   end
 
   if event_type == 'assistant.turn_start' then
-    clear_reasoning_preview()
+    clear_reasoning_preview('turn start')
     state.active_tool = nil
+    state.active_tool_run_id = nil
+    state.active_tool_detail = nil
     state.current_intent = nil
     refresh_statuslines()
+    refresh_reasoning_overlay()
     return
   end
 
   if event_type == 'tool.execution_start' then
+    state.chat_busy = true
     state.active_tool = data.toolName or nil
+    state.active_tool_detail = extract_shell_tool_detail(state.active_tool, data)
+    state.active_tool_run_id = enqueue_overlay_tool(state.active_tool, state.active_tool_detail)
+    state.pending_tool_detail = nil
     refresh_statuslines()
+    refresh_reasoning_overlay()
     return
   end
 
   if event_type == 'tool.execution_complete' then
+    complete_overlay_tool(state.active_tool_run_id)
     state.active_tool = nil
+    state.active_tool_run_id = nil
+    state.active_tool_detail = nil
     refresh_statuslines()
+    refresh_reasoning_overlay()
     return
   end
 
@@ -1229,6 +1731,17 @@ local function handle_session_event(payload)
     end
     local _, _, key = ensure_assistant_entry(data.messageId)
     local delta = first_non_empty(data.deltaContent, data.content, data.delta, data.text) or ''
+    log(
+      string.format(
+        'reasoning_delta received message_id=%s key=%s len=%d chat_open=%s enabled=%s',
+        tostring(data.messageId or '<none>'),
+        tostring(key or '<none>'),
+        #delta,
+        tostring(state.chat_bufnr ~= nil and vim.api.nvim_buf_is_valid(state.chat_bufnr)),
+        tostring((((state.config or {}).chat or {}).reasoning or {}).enabled == true)
+      ),
+      vim.log.levels.DEBUG
+    )
     append_reasoning_delta(key, delta)
     return
   end
@@ -1307,7 +1820,10 @@ local function handle_session_event(payload)
         end
         if reload_err then
           if reload_err ~= 'user declined reload' then
-            notify('Agent updated on disk: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. '); reload skipped: ' .. tostring(reload_err), vim.log.levels.WARN)
+            notify(
+              'Agent updated on disk: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. '); reload skipped: ' .. tostring(sanitize_reload_error(reload_err)),
+              reload_attention_level(reload_err)
+            )
           end
         else
           notify('Agent reloaded: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. ')', vim.log.levels.INFO)
@@ -1329,10 +1845,20 @@ local function handle_session_event(payload)
   if event_type == 'error' then
     stop_thinking_spinner()
     reset_pending_assistant_entry()
-    clear_reasoning_preview()
+    clear_reasoning_preview('error')
     state.stream_line_start = nil
     state.chat_busy = false
+    complete_overlay_tool(state.active_tool_run_id)
+    state.recent_activity_lines = {}
+    state.active_tool = nil
+    state.active_tool_run_id = nil
+    state.active_tool_detail = nil
+    state.pending_tool_detail = nil
+    state.active_turn_assistant_index = nil
+    state.active_turn_assistant_message_id = nil
+    state.current_intent = nil
     refresh_statuslines()
+    refresh_reasoning_overlay()
     append_entry('error', vim.inspect(data))
   end
 end
@@ -1525,6 +2051,7 @@ function M.reload_session_history(session_id, callback)
     state.history_loading = false
     state.history_checkpoint_ids = nil
     state.history_pending_user_entries = {}
+    reset_frozen_render()
     render_chat()
     scroll_to_bottom()
     callback(nil, #((response and response.events) or {}))

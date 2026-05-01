@@ -47,6 +47,22 @@ function M.setup(opts)
   state.base_url_managed = opts == nil or opts.base_url == nil
   -- Initialize runtime permission mode from config.
   state.permission_mode = state.config.permission_mode or 'interactive'
+  -- Reset transient live activity / overlay state when setup is rerun.
+  state.active_tool = nil
+  state.active_tool_run_id = nil
+  state.active_tool_detail = nil
+  state.pending_tool_detail = nil
+  state.overlay_tool_display = nil
+  state.overlay_tool_queue = {}
+  state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+  state.recent_activity_lines = {}
+  state.current_intent = nil
+  state.background_tasks = {}
+  state.reasoning_entry_key = nil
+  state.reasoning_text = ''
+  state.reasoning_lines = {}
+  state.active_turn_assistant_index = nil
+  state.active_turn_assistant_message_id = nil
 
   -- Default highlight groups for the chat buffer (link targets can be overridden
   -- by the user's colorscheme or config before calling setup()).
@@ -55,13 +71,15 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, 'CopilotAgentDone', { link = 'DiagnosticOk', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentRule', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentCheckpoint', { link = 'Comment', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentActivity', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentReasoning', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentStatuslineCount', { link = 'Number', default = true })
   local ui_group = vim.api.nvim_create_augroup('CopilotAgentUI', { clear = true })
-  vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
+  vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized', 'WinScrolled' }, {
     group = ui_group,
     callback = function()
       require('copilot_agent.statusline').refresh_statuslines()
+      require('copilot_agent.render').refresh_reasoning_overlay(true)
     end,
   })
   vim.api.nvim_create_autocmd('FileChangedShell', {

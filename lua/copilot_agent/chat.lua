@@ -21,9 +21,11 @@ local refresh_statuslines = sl.refresh_statuslines
 local refresh_chat_statusline = sl.refresh_chat_statusline
 
 local render_chat = render.render_chat
+local reset_frozen_render = render.reset_frozen_render
 local scroll_to_bottom = render.scroll_to_bottom
 local append_entry = render.append_entry
 local schedule_render = render.schedule_render
+local refresh_reasoning_overlay = render.refresh_reasoning_overlay
 
 local M = {}
 
@@ -382,6 +384,7 @@ function M.ensure_chat_window(opts)
     end
     -- Buffer exists but window was closed — reopen it.
     open_chat_win(state.chat_bufnr, opts)
+    reset_frozen_render()
     render_chat()
     refresh_chat_statusline()
     scroll_to_bottom()
@@ -431,6 +434,7 @@ function M.ensure_chat_window(opts)
   end, { buffer = bufnr, silent = true, desc = 'Cancel the current Copilot turn' })
 
   vim.keymap.set('n', 'R', function()
+    reset_frozen_render()
     render_chat()
   end, { buffer = bufnr, silent = true })
 
@@ -448,6 +452,7 @@ function M.ensure_chat_window(opts)
   -- Shared action keymaps: mode, model, attachments, tools, permission, history, help.
   M.setup_action_keymaps(bufnr)
 
+  reset_frozen_render()
   render_chat()
   scroll_to_bottom()
   state._chat_was_open = true
@@ -506,6 +511,7 @@ function M.focus_chat()
     else
       state.chat_bufnr = c.bufnr
       open_chat_win(c.bufnr)
+      reset_frozen_render()
       render_chat()
       refresh_chat_statusline()
       scroll_to_bottom()
@@ -528,6 +534,7 @@ function M.focus_chat()
     else
       state.chat_bufnr = chosen.bufnr
       open_chat_win(chosen.bufnr)
+      reset_frozen_render()
       render_chat()
       refresh_chat_statusline()
       scroll_to_bottom()
@@ -892,8 +899,20 @@ function M.ask(prompt, opts)
         end
         if request_err then
           state.pending_checkpoint_turn = nil
+          state.active_turn_assistant_index = nil
+          state.active_turn_assistant_message_id = nil
+          state.active_tool = nil
+          state.active_tool_run_id = nil
+          state.active_tool_detail = nil
+          state.pending_tool_detail = nil
+          state.overlay_tool_display = nil
+          state.overlay_tool_queue = {}
+          state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+          state.recent_activity_lines = {}
+          state.current_intent = nil
           state.chat_busy = false
           refresh_statuslines()
+          refresh_reasoning_overlay(true)
           append_entry('error', 'Failed to send prompt: ' .. request_err)
         end
       end)

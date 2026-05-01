@@ -815,7 +815,7 @@ function M.open_input_window()
   end
 
   if not chat_winid then
-    chat_winid = 0
+    chat_winid = win.resolve_split_target()
   end
 
   if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
@@ -832,6 +832,9 @@ function M.open_input_window()
 
   -- Open a small horizontal split below the active chat window via the API.
   local parent_win = chat_winid
+  if not parent_win then
+    error('No non-floating window available for input split')
+  end
   state.input_winid = vim.api.nvim_open_win(state.input_bufnr, true, {
     split = 'below',
     win = parent_win,

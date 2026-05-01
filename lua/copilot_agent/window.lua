@@ -6,6 +6,40 @@ local state = require('copilot_agent.config').state
 
 local M = {}
 
+function M.is_floating_window(winid)
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return false
+  end
+
+  local config = vim.api.nvim_win_get_config(winid)
+  return type(config.relative) == 'string' and config.relative ~= ''
+end
+
+function M.resolve_split_target(preferred_winid)
+  local candidates = {}
+  if preferred_winid then
+    candidates[#candidates + 1] = preferred_winid
+  end
+  candidates[#candidates + 1] = vim.api.nvim_get_current_win()
+
+  local current_tab = vim.api.nvim_get_current_tabpage()
+  for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(current_tab)) do
+    candidates[#candidates + 1] = winid
+  end
+
+  local seen = {}
+  for _, winid in ipairs(candidates) do
+    if winid and not seen[winid] and vim.api.nvim_win_is_valid(winid) then
+      seen[winid] = true
+      if not M.is_floating_window(winid) then
+        return winid
+      end
+    end
+  end
+
+  return nil
+end
+
 function M.set_window_syntax(winid, syntax)
   if not winid or not vim.api.nvim_win_is_valid(winid) then
     return

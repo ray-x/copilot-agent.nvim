@@ -2207,6 +2207,28 @@ describe('chat session activation', function()
     assert_true(captured_opts.open_input_on_session_ready)
   end)
 
+  it('opens chat from a floating current window by splitting a normal window instead', function()
+    local float_buf = vim.api.nvim_create_buf(false, true)
+    local float_win = vim.api.nvim_open_win(float_buf, true, {
+      relative = 'editor',
+      width = 20,
+      height = 4,
+      row = 1,
+      col = 1,
+      style = 'minimal',
+      border = 'rounded',
+    })
+
+    agent.open_chat()
+
+    assert_true(agent.state.chat_winid and vim.api.nvim_win_is_valid(agent.state.chat_winid))
+    assert_true(vim.api.nvim_win_get_config(agent.state.chat_winid).relative == '')
+
+    if vim.api.nvim_win_is_valid(float_win) then
+      vim.api.nvim_win_close(float_win, true)
+    end
+  end)
+
   it('does not request prompt activation when sending a direct prompt', function()
     local original_open_chat = agent.open_chat
     local original_with_session = session.with_session

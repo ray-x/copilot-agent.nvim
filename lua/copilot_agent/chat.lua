@@ -27,7 +27,7 @@ local schedule_render = render.schedule_render
 
 local M = {}
 
-local function attach_chat_markdown(bufnr, winid)
+local function attach_chat_markdown(winid)
   win.disable_folds(winid)
   win.set_window_syntax(winid, 'markdown')
   if vim.wo[winid].conceallevel == 0 then
@@ -358,12 +358,16 @@ local function open_chat_win(bufnr, opts)
     vim.api.nvim_win_set_buf(0, bufnr)
     state.chat_winid = vim.api.nvim_get_current_win()
   else
+    local parent_win = win.resolve_split_target()
+    if not parent_win then
+      error('No non-floating window available for chat split')
+    end
     state.chat_winid = vim.api.nvim_open_win(bufnr, true, {
       split = 'right',
-      win = 0,
+      win = parent_win,
     })
   end
-  attach_chat_markdown(bufnr, state.chat_winid)
+  attach_chat_markdown(state.chat_winid)
 end
 
 function M.ensure_chat_window(opts)

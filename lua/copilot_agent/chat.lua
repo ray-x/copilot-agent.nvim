@@ -385,7 +385,7 @@ function M.ensure_chat_window(opts)
   vim.bo[bufnr].buflisted = true
   vim.bo[bufnr].bufhidden = 'hide'
   vim.bo[bufnr].swapfile = false
-  vim.bo[bufnr].filetype = 'markdown'
+  vim.bo[bufnr].filetype = 'txt'
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
   vim.api.nvim_buf_set_name(bufnr, buf_name)

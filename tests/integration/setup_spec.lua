@@ -2140,7 +2140,7 @@ describe('chat input behavior', function()
   local vscode_mcp_backup
 
   before_each(function()
-    vim.cmd('tabonly | only')
+    pcall(vim.cmd, 'tabonly | only')
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.chat'] = nil
     package.loaded['copilot_agent.input'] = nil
@@ -2174,7 +2174,7 @@ describe('chat input behavior', function()
         vim.fn.delete(vscode_mcp)
       end
     end
-    vim.cmd('tabonly | only')
+    pcall(vim.cmd, 'tabonly | only')
   end)
 
   it('prompts before closing input with unsent text', function()
@@ -2201,6 +2201,19 @@ describe('chat input behavior', function()
     assert_eq('Keep editing', captured.items[1])
     assert_eq('Close input', captured.items[2])
     assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
+  end)
+
+  it('uses txt filetype for the input prompt buffer', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    assert_eq('txt', vim.bo[agent.state.input_bufnr].filetype)
+  end)
+
+  it('uses txt filetype for the chat scratch buffer', function()
+    agent.open_chat()
+
+    assert_eq('txt', vim.bo[agent.state.chat_bufnr].filetype)
   end)
 
   it('uses Enter to confirm popup completion before prompt submission', function()

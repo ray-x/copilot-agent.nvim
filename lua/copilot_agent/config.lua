@@ -50,6 +50,12 @@ local defaults = {
     -- markdown prompt buffers by disabling Treesitter for those transient UI
     -- windows. Set false if you prefer to keep Treesitter attached there.
     protect_markdown_buffer = true,
+    -- Live-only reasoning preview sourced from assistant.reasoning_delta events.
+    -- This is transient UI state: it is not written into the transcript/history.
+    reasoning = {
+      enabled = false,
+      max_lines = 5,
+    },
     -- File picker to use when attaching files/folders from <C-a>.
     -- 'auto' detects in order: snacks → telescope → fzf-lua → mini.pick → vim.ui.input
     -- Set to 'native' to always use vim.ui.input (completion-based path entry).
@@ -117,6 +123,8 @@ local state = {
   thinking_timer = nil, -- uv timer while assistant is generating
   thinking_frame = 1, -- current spinner frame index
   thinking_entry_key = nil, -- key in assistant_entries that is currently "thinking"
+  pending_assistant_entry_key = nil, -- stable placeholder key before the SDK assigns messageId
+  pending_assistant_serial = 0, -- fallback sequence for placeholder assistant entries
   -- Incremental streaming render
   render_pending = false, -- true when a debounced render is scheduled
   stream_line_start = nil, -- 0-based buf line where current streaming entry content begins
@@ -133,6 +141,9 @@ local state = {
   current_model = nil, -- model ID from SDK events (overrides config default in display)
   active_tool = nil, -- name of currently executing tool (nil when idle)
   current_intent = nil, -- latest intent string from assistant.intent event
+  reasoning_entry_key = nil, -- assistant entry currently receiving reasoning deltas
+  reasoning_text = '', -- raw reasoning delta text accumulated for the active turn
+  reasoning_lines = {}, -- normalized reasoning preview lines (trimmed, not transcript)
   context_tokens = nil, -- current token count in context window
   context_limit = nil, -- max token count for context window
   instruction_count = 0, -- discovered repository instructions for the active session

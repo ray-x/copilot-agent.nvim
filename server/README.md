@@ -80,3 +80,47 @@ configures its HTTP client automatically — no manual `base_url` needed.
 | `host.model_changed`           | Model switched on live session                                                    |
 | `host.session_disconnected`    | Session was closed                                                                |
 | `: keepalive`                  | SSE keepalive comment (ignore)                                                    |
+
+## Quick Start (HTTP API)
+
+```bash
+# Terminal 1: start the service using the pre-built binary (no Go needed)
+# Download it first with :CopilotAgentInstall inside Neovim, then:
+~/.local/share/nvim/lazy/copilot-agent.nvim/bin/copilot-agent
+
+# Or build from source (requires Go 1.24+)
+cd server/ && go run . -cli-path ~/.local/share/github-copilot/index.js
+# prints: COPILOT_AGENT_ADDR=127.0.0.1:XXXXX
+
+# Terminal 2: create a session (replace port)
+curl -s -X POST http://127.0.0.1:XXXXX/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"workingDirectory":".","permissionMode":"approve-all","clientName":"test"}'
+
+# Stream events (replace SESSION_ID)
+curl -N http://127.0.0.1:XXXXX/sessions/SESSION_ID/events
+
+# Send a message
+curl -X POST http://127.0.0.1:XXXXX/sessions/SESSION_ID/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Explain what this project does."}'
+```
+
+## Testing
+
+```bash
+# Go tests (vet, fmt, unit tests, build)
+cd server/
+go vet ./...
+go test -race ./...
+go build ./...
+
+# Lua unit tests (no Neovim required)
+busted --lpath='lua/?.lua;lua/?/init.lua' tests/unit/
+
+# Neovim integration tests (requires nvim on PATH)
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedFile tests/integration/setup_spec.lua"
+```
+
+CI runs all of the above automatically on push and PR via GitHub Actions.

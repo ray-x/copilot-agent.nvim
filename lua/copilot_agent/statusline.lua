@@ -119,6 +119,24 @@ function M.statusline_intent()
   return ''
 end
 
+function M.statusline_reasoning(max_len)
+  local lines = state.reasoning_lines or {}
+  if #lines == 0 then
+    return ''
+  end
+
+  local text = lines[#lines] or ''
+  if #lines > 1 then
+    text = '… ' .. text
+  end
+
+  max_len = math.max(1, math.floor(tonumber(max_len) or 32))
+  if #text > max_len then
+    text = text:sub(1, max_len - 1) .. '…'
+  end
+  return '🧠' .. text
+end
+
 function M.statusline_context()
   if state.context_tokens and state.context_limit and state.context_limit > 0 then
     return '📊' .. format_tokens(state.context_tokens) .. '/' .. format_tokens(state.context_limit)

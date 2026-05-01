@@ -34,6 +34,9 @@ local clear_transcript = render.clear_transcript
 local ensure_assistant_entry = render.ensure_assistant_entry
 local start_thinking_spinner = render.start_thinking_spinner
 local stop_thinking_spinner = render.stop_thinking_spinner
+local reset_pending_assistant_entry = render.reset_pending_assistant_entry
+local append_reasoning_delta = render.append_reasoning_delta
+local clear_reasoning_preview = render.clear_reasoning_preview
 local scroll_to_bottom = render.scroll_to_bottom
 
 local is_thinking_content = utils.is_thinking_content
@@ -97,6 +100,7 @@ local function reset_live_activity_state()
   state.pending_checkpoint_ops = 0
   state.pending_workspace_updates = 0
   state.background_tasks = {}
+  clear_reasoning_preview()
 end
 
 local function set_background_task(key, opts)
@@ -671,6 +675,7 @@ local function handle_host_event(event_name, payload)
 
   local data = payload and payload.data or {}
   if event_name == 'host.session_attached' then
+    clear_reasoning_preview()
     sync_model_state(data.model, data.reasoningEffort)
     sync_config_counts(data)
     state.session_name = session_names.resolve(data.summary, data.sessionId or state.session_id)
@@ -1051,8 +1056,7 @@ local function handle_session_event(payload)
     if not state.history_loading and pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
       pending_turn.assistant_message_id = data.messageId
     end
-    local key = data.messageId or ('assistant-' .. tostring(#state.entries + 1))
-    local entry = ensure_assistant_entry(data.messageId)
+    local entry, idx, key = ensure_assistant_entry(data.messageId)
     local delta = data.deltaContent or ''
 
     -- Always discard thinking-only tokens (dots, whitespace) regardless of
@@ -1074,7 +1078,6 @@ local function handle_session_event(payload)
       end
     end
     entry.content = (entry.content or '') .. delta
-    local idx = state.assistant_entries[key]
     if idx then
       stream_update(entry, idx)
     else
@@ -1139,6 +1142,8 @@ local function handle_session_event(payload)
       end
     end
     stop_thinking_spinner()
+    reset_pending_assistant_entry()
+    clear_reasoning_preview()
     state.stream_line_start = nil
     state.chat_busy = false
     state.active_tool = nil
@@ -1184,6 +1189,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.turn_start' then
+    clear_reasoning_preview()
     state.active_tool = nil
     state.current_intent = nil
     refresh_statuslines()
@@ -1215,7 +1221,19 @@ local function handle_session_event(payload)
     return
   end
 
-  if event_type == 'assistant.reasoning_delta' or event_type == 'assistant.streaming_delta' then
+  if event_type == 'assistant.reasoning_delta' then
+    local was_busy = state.chat_busy
+    state.chat_busy = true
+    if not was_busy then
+      refresh_statuslines()
+    end
+    local _, _, key = ensure_assistant_entry(data.messageId)
+    local delta = first_non_empty(data.deltaContent, data.content, data.delta, data.text) or ''
+    append_reasoning_delta(key, delta)
+    return
+  end
+
+  if event_type == 'assistant.streaming_delta' then
     return
   end
 
@@ -1310,6 +1328,8 @@ local function handle_session_event(payload)
 
   if event_type == 'error' then
     stop_thinking_spinner()
+    reset_pending_assistant_entry()
+    clear_reasoning_preview()
     state.stream_line_start = nil
     state.chat_busy = false
     refresh_statuslines()

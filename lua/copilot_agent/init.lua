@@ -55,6 +55,7 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, 'CopilotAgentDone', { link = 'DiagnosticOk', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentRule', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentCheckpoint', { link = 'Comment', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentReasoning', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentStatuslineCount', { link = 'Number', default = true })
   local ui_group = vim.api.nvim_create_augroup('CopilotAgentUI', { clear = true })
   vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
@@ -197,6 +198,28 @@ end
 
 function M.review_diff()
   events.review_diff()
+end
+
+function M.get_reasoning(max_lines)
+  local lines = render.reasoning_lines(max_lines)
+  return {
+    active = state.reasoning_entry_key ~= nil and #lines > 0,
+    entry_key = state.reasoning_entry_key,
+    text = state.reasoning_text or '',
+    lines = lines,
+  }
+end
+
+function M.get_reasoning_text()
+  return state.reasoning_text or ''
+end
+
+function M.get_reasoning_lines(max_lines)
+  return render.reasoning_lines(max_lines)
+end
+
+function M.statusline_reasoning(max_len)
+  return sl.statusline_reasoning(max_len)
 end
 
 function M.status()

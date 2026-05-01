@@ -16,12 +16,129 @@ local highlight_lines -- forward declaration; defined below
 
 local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
+local REASONING_NS = vim.api.nvim_create_namespace('copilot_agent_reasoning')
 local RENDER_DEBOUNCE_MS = 150
 local STREAM_DEBOUNCE_MS = 80
+local REASONING_DEBOUNCE_MS = 80
 local SPINNER_INTERVAL_MS = 500
 
 local is_thinking_content = utils.is_thinking_content
 local split_lines = utils.split_lines
+
+local function refresh_statuslines()
+  local ok, sl = pcall(require, 'copilot_agent.statusline')
+  if ok and type(sl.refresh_statuslines) == 'function' then
+    sl.refresh_statuslines()
+  end
+end
+
+local function reasoning_config()
+  local reasoning = (((state.config or {}).chat or {}).reasoning or {})
+  local enabled = reasoning.enabled == true
+  local max_lines = tonumber(reasoning.max_lines) or 5
+  max_lines = math.max(1, math.min(20, math.floor(max_lines)))
+  return enabled, max_lines
+end
+
+local function normalize_reasoning_lines(text)
+  if type(text) ~= 'string' or text == '' then
+    return {}
+  end
+  local lines = vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
+  while #lines > 0 and lines[#lines] == '' do
+    table.remove(lines)
+  end
+  return lines
+end
+
+function M.reasoning_lines(max_lines)
+  local lines = vim.deepcopy(state.reasoning_lines or {})
+  if max_lines == nil then
+    max_lines = select(2, reasoning_config())
+  else
+    max_lines = math.max(1, math.floor(tonumber(max_lines) or 5))
+  end
+  if #lines <= max_lines then
+    return lines
+  end
+  local trimmed = {}
+  for i = #lines - max_lines + 1, #lines do
+    trimmed[#trimmed + 1] = lines[i]
+  end
+  return trimmed
+end
+
+local function reasoning_virtual_lines(lines)
+  local virt_lines = {}
+  for idx, line in ipairs(lines) do
+    local prefix = idx == 1 and '  Reasoning: ' or '             '
+    virt_lines[#virt_lines + 1] = {
+      { prefix .. line, 'CopilotAgentReasoning' },
+    }
+  end
+  return virt_lines
+end
+
+local function clear_reasoning_overlay()
+  local bufnr = state.chat_bufnr
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    vim.api.nvim_buf_clear_namespace(bufnr, REASONING_NS, 0, -1)
+  end
+end
+
+local reasoning_timer = uv.new_timer()
+
+local function update_reasoning_overlay_now()
+  clear_reasoning_overlay()
+
+  local enabled, max_lines = reasoning_config()
+  if not enabled or state.history_loading then
+    return
+  end
+
+  local bufnr = state.chat_bufnr
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  local lines = M.reasoning_lines(max_lines)
+  if #lines == 0 then
+    return
+  end
+
+  local anchor_row = math.max(vim.api.nvim_buf_line_count(bufnr) - 1, 0)
+  vim.api.nvim_buf_set_extmark(bufnr, REASONING_NS, anchor_row, 0, {
+    virt_lines = reasoning_virtual_lines(lines),
+    virt_lines_leftcol = true,
+  })
+end
+
+function M.refresh_reasoning_overlay()
+  reasoning_timer:stop()
+  reasoning_timer:start(REASONING_DEBOUNCE_MS, 0, vim.schedule_wrap(update_reasoning_overlay_now))
+end
+
+function M.clear_reasoning_preview()
+  state.reasoning_entry_key = nil
+  state.reasoning_text = ''
+  state.reasoning_lines = {}
+  clear_reasoning_overlay()
+  refresh_statuslines()
+end
+
+function M.append_reasoning_delta(entry_key, delta)
+  if type(delta) ~= 'string' or delta == '' then
+    return
+  end
+  if type(entry_key) == 'string' and entry_key ~= '' and state.reasoning_entry_key ~= entry_key then
+    state.reasoning_text = ''
+  end
+  state.reasoning_entry_key = entry_key or state.reasoning_entry_key
+  state.reasoning_text = (state.reasoning_text or '') .. delta
+  state.reasoning_lines = normalize_reasoning_lines(state.reasoning_text)
+  M.refresh_reasoning_overlay()
+  refresh_statuslines()
+end
 
 local function separator_rule_width()
   local win = state.chat_winid
@@ -53,6 +170,51 @@ local function plain_separator_chunks()
   }
 end
 
+local function active_thinking_entry_index()
+  local key = state.thinking_entry_key
+  if type(key) ~= 'string' or key == '' then
+    return nil
+  end
+  return state.assistant_entries[key]
+end
+
+local function pending_assistant_entry_key()
+  if type(state.pending_assistant_entry_key) == 'string' and state.pending_assistant_entry_key ~= '' then
+    return state.pending_assistant_entry_key
+  end
+
+  local pending_turn = state.pending_checkpoint_turn
+  if pending_turn and pending_turn.session_id == state.session_id and pending_turn.entry_index then
+    state.pending_assistant_entry_key = string.format('pending:%s:%s', pending_turn.session_id, pending_turn.entry_index)
+    return state.pending_assistant_entry_key
+  end
+
+  state.pending_assistant_serial = (tonumber(state.pending_assistant_serial) or 0) + 1
+  state.pending_assistant_entry_key = 'pending-assistant:' .. tostring(state.pending_assistant_serial)
+  return state.pending_assistant_entry_key
+end
+
+local function adopt_pending_assistant_entry(message_id)
+  local pending_key = state.pending_assistant_entry_key
+  if type(message_id) ~= 'string' or message_id == '' or type(pending_key) ~= 'string' or pending_key == '' then
+    return nil
+  end
+
+  local index = state.assistant_entries[pending_key]
+  if not index or not state.entries[index] then
+    state.pending_assistant_entry_key = nil
+    return nil
+  end
+
+  state.assistant_entries[message_id] = index
+  state.assistant_entries[pending_key] = nil
+  if state.thinking_entry_key == pending_key then
+    state.thinking_entry_key = message_id
+  end
+  state.pending_assistant_entry_key = nil
+  return index
+end
+
 -- ── Thinking spinner ──────────────────────────────────────────────────────────
 
 function M.stop_thinking_spinner()
@@ -66,6 +228,11 @@ function M.stop_thinking_spinner()
     state.thinking_timer = nil
   end
   state.thinking_entry_key = nil
+  state._spinner_line = nil
+end
+
+function M.reset_pending_assistant_entry()
+  state.pending_assistant_entry_key = nil
 end
 
 function M.start_thinking_spinner(entry_key)
@@ -73,6 +240,7 @@ function M.start_thinking_spinner(entry_key)
   state.thinking_entry_key = entry_key
   state.thinking_frame = 1
   state._spinner_line = nil -- buffer row of the spinner text (0-indexed)
+  M.schedule_render()
   local timer = uv.new_timer()
   state.thinking_timer = timer
   timer:start(
@@ -100,21 +268,7 @@ function M.start_thinking_spinner(entry_key)
           vim.bo[bufnr].modified = false
         end)
       else
-        -- First tick: append the spinner lines at the end of the buffer
-        -- instead of doing a full render_chat().
-        local lc = state._rendered_line_count or vim.api.nvim_buf_line_count(bufnr)
-        local spinner_lines = { 'Assistant:', '  ' .. (SPINNER_FRAMES[1] or '⠋') .. ' Thinking…', '' }
-        pcall(function()
-          vim.bo[bufnr].modifiable = true
-          vim.bo[bufnr].readonly = false
-          vim.api.nvim_buf_set_lines(bufnr, lc, -1, false, spinner_lines)
-          highlight_lines(bufnr, lc, lc + #spinner_lines)
-          vim.bo[bufnr].modifiable = false
-          vim.bo[bufnr].readonly = true
-          vim.bo[bufnr].modified = false
-        end)
-        -- The spinner text is the second line we just appended (0-indexed: lc + 1).
-        state._spinner_line = lc + 1
+        M.schedule_render()
       end
     end)
   )
@@ -286,7 +440,7 @@ end
 -- entry_lines: format one entry into a list of display lines.
 -- align: when true (default), apply align_tables. Pass false during streaming
 --        to skip the O(n) table scan on every incremental update.
-function M.entry_lines(entry, _, align)
+function M.entry_lines(entry, idx, align)
   if align == nil then
     align = true
   end
@@ -299,7 +453,7 @@ function M.entry_lines(entry, _, align)
     out[#out + 1] = ''
   elseif entry.kind == 'assistant' then
     if is_thinking_content(entry.content) then
-      if state.chat_busy then
+      if state.chat_busy and active_thinking_entry_index() == idx then
         out[#out + 1] = 'Assistant:'
         out[#out + 1] = '  ' .. (SPINNER_FRAMES[state.thinking_frame] or '⠋') .. ' Thinking…'
         out[#out + 1] = ''
@@ -417,6 +571,7 @@ function M.render_chat()
 
   local at_bottom = M.chat_at_bottom()
   state.entry_row_index = {}
+  state._spinner_line = nil
 
   local lines = {
     state.config.chat.title,
@@ -434,6 +589,9 @@ function M.render_chat()
     for idx, entry in ipairs(state.entries) do
       local elines = M.entry_lines(entry, idx)
       if #elines > 0 then
+        if entry.kind == 'assistant' and is_thinking_content(entry.content) and active_thinking_entry_index() == idx then
+          state._spinner_line = #lines + 1
+        end
         if entry.kind == 'assistant' and not is_thinking_content(entry.content) and M.should_merge_assistant(idx) then
           elines[1] = ''
         end
@@ -469,6 +627,7 @@ function M.render_chat()
   if not state.chat_busy then
     M.notify_render_plugins(bufnr)
   end
+  M.refresh_reasoning_overlay()
 end
 
 -- ── Debounced / incremental render ────────────────────────────────────────────
@@ -534,6 +693,7 @@ function M.stream_update(entry, idx)
       if at_bottom then
         M.scroll_to_bottom()
       end
+      M.refresh_reasoning_overlay()
     end)
   )
 end
@@ -586,10 +746,22 @@ function M.append_entry(kind, content, attachments, opts)
 end
 
 function M.ensure_assistant_entry(message_id)
-  local key = message_id or ('assistant-' .. tostring(#state.entries + 1))
+  local key = message_id
+  if type(message_id) == 'string' and message_id ~= '' then
+    local adopted_index = adopt_pending_assistant_entry(message_id)
+    if adopted_index and state.entries[adopted_index] then
+      return state.entries[adopted_index], adopted_index, message_id
+    end
+  else
+    key = pending_assistant_entry_key()
+  end
+
   local index = state.assistant_entries[key]
   if index and state.entries[index] then
-    return state.entries[index]
+    if type(message_id) == 'string' and message_id ~= '' then
+      state.pending_assistant_entry_key = nil
+    end
+    return state.entries[index], index, key
   end
   table.insert(state.entries, {
     kind = 'assistant',
@@ -597,12 +769,13 @@ function M.ensure_assistant_entry(message_id)
   })
   index = #state.entries
   state.assistant_entries[key] = index
-  return state.entries[index]
+  return state.entries[index], index, key
 end
 
 function M.clear_transcript()
   state.entries = {}
   state.assistant_entries = {}
+  state.pending_assistant_entry_key = nil
   state.stream_line_start = nil
   state.entry_row_index = {}
   state.pending_checkpoint_turn = nil
@@ -612,6 +785,7 @@ function M.clear_transcript()
   state.context_limit = nil
   state.history_checkpoint_ids = nil
   state.history_pending_user_entries = {}
+  M.clear_reasoning_preview()
   M.schedule_render()
 end
 

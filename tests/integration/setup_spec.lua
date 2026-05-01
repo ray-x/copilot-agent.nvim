@@ -313,6 +313,12 @@ describe('statusline API', function()
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
+      chat = {
+        reasoning = {
+          enabled = true,
+          max_lines = 3,
+        },
+      },
       service = {
         auto_start = true,
       },
@@ -426,6 +432,12 @@ describe('model state sync', function()
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
+      chat = {
+        reasoning = {
+          enabled = true,
+          max_lines = 3,
+        },
+      },
       service = {
         auto_start = true,
       },
@@ -485,6 +497,167 @@ describe('model state sync', function()
     assert_eq('claude-opus-4.7', agent.state.current_model)
     assert_eq('claude-opus-4.7', agent.state.config.session.model)
     assert_eq('medium', agent.state.reasoning_effort)
+  end)
+
+  it('tracks rolling reasoning deltas and exposes them through the public API', function()
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-1',
+        deltaContent = 'alpha\nbeta\n',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-1',
+        deltaContent = 'gamma\ndelta',
+      },
+    })
+
+    local reasoning = agent.get_reasoning()
+    assert_true(reasoning.active)
+    assert_eq('assistant-1', reasoning.entry_key)
+    assert_eq('alpha\nbeta\ngamma\ndelta', reasoning.text)
+    assert_eq(3, #reasoning.lines)
+    assert_eq('beta', reasoning.lines[1])
+    assert_eq('gamma', reasoning.lines[2])
+    assert_eq('delta', reasoning.lines[3])
+    assert_true(agent.statusline_reasoning(24):find('delta', 1, true) ~= nil)
+
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    reasoning = agent.get_reasoning()
+    assert_false(reasoning.active)
+    assert_eq('', reasoning.text)
+    assert_eq(0, #reasoning.lines)
+  end)
+
+  it('renders a rolling reasoning preview in chat virtual lines', function()
+    agent.open_chat()
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-2',
+        deltaContent = 'one\ntwo\nthree\nfour',
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    local preview = vim.tbl_map(function(virt_line)
+      return virt_line[1][1]
+    end, virt_lines)
+
+    assert_eq('  Reasoning: two', preview[1])
+    assert_eq('             three', preview[2])
+    assert_eq('             four', preview[3])
+
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(200)
+    extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(0, #extmarks)
+  end)
+
+  it('deduplicates the thinking spinner and keeps it anchored before message ids arrive', function()
+    local render = require('copilot_agent.render')
+    local function assistant_entries()
+      local entries = {}
+      for _, entry in ipairs(agent.state.entries) do
+        if entry.kind == 'assistant' then
+          entries[#entries + 1] = entry
+        end
+      end
+      return entries
+    end
+
+    render.stop_thinking_spinner()
+    render.reset_pending_assistant_entry()
+    render.clear_transcript()
+    agent.state.chat_busy = false
+    agent.state.pending_checkpoint_turn = nil
+    agent.state.session_id = 'session-123'
+    agent.open_chat()
+    render.append_entry('user', 'pending prompt')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'pending prompt',
+      entry_index = 1,
+    }
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        deltaContent = '...',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        deltaContent = '   ',
+      },
+    })
+
+    vim.wait(250)
+    local assistants = assistant_entries()
+
+    local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
+    local spinner_rows = {}
+    for row, line in ipairs(lines) do
+      if line:find('Thinking…', 1, true) ~= nil then
+        spinner_rows[#spinner_rows + 1] = row
+      end
+    end
+
+    assert_eq(1, #spinner_rows)
+    assert_eq(1, #assistants)
+
+    local first_spinner_row = spinner_rows[1]
+    vim.wait(650)
+    lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
+    local current_spinner_row
+    local spinner_count = 0
+    for row, line in ipairs(lines) do
+      if line:find('Thinking…', 1, true) ~= nil then
+        spinner_count = spinner_count + 1
+        current_spinner_row = row
+      end
+    end
+
+    assert_eq(1, spinner_count)
+    assert_eq(first_spinner_row, current_spinner_row)
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-42',
+        deltaContent = 'final answer',
+      },
+    })
+
+    vim.wait(150)
+    assistants = assistant_entries()
+    assert_eq(1, #assistants)
+    assert_eq('final answer', assistants[1].content)
+
+    agent.state.pending_checkpoint_turn = nil
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
   end)
 end)
 

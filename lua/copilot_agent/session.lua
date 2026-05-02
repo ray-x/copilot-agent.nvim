@@ -41,6 +41,7 @@ local truncate_session_summary = utils.truncate_session_summary
 local unavailable_model_from_error = utils.unavailable_model_from_error
 
 local M = {}
+local create_session
 
 local function formatted_session_summary(summary)
   return truncate_session_summary(summary, 32)
@@ -249,7 +250,7 @@ end
 
 local function confirm_takeover_if_live(session, callback)
   if not (session and session.live == true) then
-    callback(true)
+    callback('resume')
     return
   end
 
@@ -257,25 +258,38 @@ local function confirm_takeover_if_live(session, callback)
   vim.ui.select({
     'Keep older instance attached',
     'Kick older instance out',
+    'New Session',
   }, {
     prompt = 'Session ' .. session_label .. ' is already attached in another Neovim instance. Kick the older instance out?',
   }, function(choice)
     if choice == 'Kick older instance out' then
       log('resume takeover confirmed for ' .. format_session_id(session.sessionId), vim.log.levels.INFO)
-      callback(true)
+      callback('resume')
+      return
+    end
+
+    if choice == 'New Session' then
+      log('resume takeover creating replacement session instead of resuming ' .. format_session_id(session.sessionId), vim.log.levels.INFO)
+      callback('new')
       return
     end
 
     local message = 'Kept older instance attached; did not connect to session ' .. format_session_id(session.sessionId)
     log('resume takeover declined for ' .. format_session_id(session.sessionId), vim.log.levels.INFO)
-    callback(false, message)
+    callback('cancel', message)
   end)
 end
 
 local function resume_known_session(session, callback, opts)
   opts = opts or {}
-  confirm_takeover_if_live(session, function(allowed, message)
-    if not allowed then
+  confirm_takeover_if_live(session, function(decision, message)
+    if decision == 'new' then
+      append_entry('system', 'Creating a new session instead of resuming ' .. format_session_id(session.sessionId))
+      create_session(callback)
+      return
+    end
+
+    if decision ~= 'resume' then
       cancel_attach_attempt(message, callback, { resolve_pending = opts.resolve_pending })
       return
     end
@@ -361,8 +375,6 @@ function M.resume_session(session_id, callback, opts)
     end
   end)
 end
-
-local create_session
 
 function M.pick_or_create_session(callback)
   local wd = working_directory()
@@ -672,7 +684,7 @@ function M.new_session()
   M.discard_pending_attachments()
   clear_transcript()
   -- Ensure chat window via lazy require to avoid circular dependency.
-  require('copilot_agent').open_chat()
+  require('copilot_agent')._ensure_chat_window()
   M.disconnect_session(previous_session_id, false, function(err)
     if err then
       append_entry('error', 'Failed to disconnect previous session: ' .. err)
@@ -694,7 +706,7 @@ function M.clear_and_new_session()
   local previous_working_directory = state.session_working_directory
   M.discard_pending_attachments()
   clear_transcript()
-  require('copilot_agent').open_chat()
+  require('copilot_agent')._ensure_chat_window()
 
   local function create_replacement()
     M.create_new_session(function(session_id, create_err)
@@ -756,8 +768,13 @@ function M.switch_to_session_id(target_session_id, target_session)
   end
 
   if target_session then
-    confirm_takeover_if_live(target_session, function(allowed, message)
-      if not allowed then
+    confirm_takeover_if_live(target_session, function(decision, message)
+      if decision == 'new' then
+        M.new_session()
+        return
+      end
+
+      if decision ~= 'resume' then
         append_entry('system', message)
         return
       end
@@ -780,8 +797,13 @@ function M.switch_to_session_id(target_session_id, target_session)
       end
     end
 
-    confirm_takeover_if_live(found_session, function(allowed, message)
-      if not allowed then
+    confirm_takeover_if_live(found_session, function(decision, message)
+      if decision == 'new' then
+        M.new_session()
+        return
+      end
+
+      if decision ~= 'resume' then
         append_entry('system', message)
         return
       end

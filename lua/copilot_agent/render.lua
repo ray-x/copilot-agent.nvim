@@ -22,8 +22,8 @@ local RENDER_DEBOUNCE_MS = 150
 local STREAM_DEBOUNCE_MS = 80
 local REASONING_DEBOUNCE_MS = 80
 local SPINNER_INTERVAL_MS = 500
+local CHAT_SCROLL_GUARD_MS = 80
 
-local is_thinking_content = utils.is_thinking_content
 local split_lines = utils.split_lines
 
 local function refresh_statuslines()
@@ -46,14 +46,25 @@ local function normalize_reasoning_lines(text)
     return {}
   end
   local lines = vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
-  while #lines > 0 and lines[#lines] == '' do
-    table.remove(lines)
+  local filtered = {}
+  for _, line in ipairs(lines) do
+    if line ~= '' then
+      filtered[#filtered + 1] = line
+    end
   end
-  return lines
+  return filtered
 end
 
 function M.reasoning_lines(max_lines)
   local lines = vim.deepcopy(state.reasoning_lines or {})
+  -- Filter out empty lines to save precious overlay space
+  local non_empty = {}
+  for _, line in ipairs(lines) do
+    if line ~= '' then
+      non_empty[#non_empty + 1] = line
+    end
+  end
+  lines = non_empty
   if max_lines == nil then
     max_lines = select(2, reasoning_config())
   else
@@ -69,18 +80,6 @@ function M.reasoning_lines(max_lines)
   return trimmed
 end
 
-local function truncate_overlay_text(text, max_len)
-  text = type(text) == 'string' and text:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
-  if text == '' then
-    return ''
-  end
-  max_len = math.max(1, math.floor(tonumber(max_len) or 72))
-  if #text > max_len then
-    return text:sub(1, max_len - 1) .. '…'
-  end
-  return text
-end
-
 local function preview_log_text(text, max_len)
   if type(text) ~= 'string' then
     return '<non-string>'
@@ -93,12 +92,56 @@ local function preview_log_text(text, max_len)
   return preview
 end
 
+local function wrap_overlay_text(text, max_width)
+  text = type(text) == 'string' and text:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
+  if text == '' then
+    return {}
+  end
+  max_width = math.max(20, math.floor(tonumber(max_width) or 72))
+  if vim.fn.strdisplaywidth(text) <= max_width then
+    return { text }
+  end
+  local wrapped = {}
+  local pos = 1
+  while pos <= #text do
+    local chunk = text:sub(pos, pos + max_width - 1)
+    if pos + max_width - 1 < #text then
+      local break_at = chunk:find('%s[^%s]*$')
+      if break_at and break_at > math.floor(max_width * 0.3) then
+        chunk = chunk:sub(1, break_at - 1)
+      end
+    end
+    wrapped[#wrapped + 1] = vim.trim(chunk)
+    pos = pos + #chunk
+    while pos <= #text and text:sub(pos, pos) == ' ' do
+      pos = pos + 1
+    end
+  end
+  return wrapped
+end
+
+local function activity_overlay_width()
+  local win = state.chat_winid
+  if win and vim.api.nvim_win_is_valid(win) then
+    return math.max(24, vim.api.nvim_win_get_width(win) - 4)
+  end
+  return 72
+end
+
 local function tool_is_displayable_in_overlay(name)
   if type(name) ~= 'string' or name == '' then
     return false
   end
   local normalized = vim.trim(name):lower()
-  if normalized == 'bash' or normalized == 'sh' or normalized == 'zsh' or normalized == 'fish' or normalized == 'pwsh' or normalized == 'powershell' or normalized == 'cmd' then
+  if
+    normalized == 'bash'
+    or normalized == 'sh'
+    or normalized == 'zsh'
+    or normalized == 'fish'
+    or normalized == 'pwsh'
+    or normalized == 'powershell'
+    or normalized == 'cmd'
+  then
     return true
   end
   return false
@@ -111,27 +154,55 @@ local function activity_overlay_lines(_)
   end
 
   local line = overlay_tool.tool
-  if type(overlay_tool.detail) == 'string' and overlay_tool.detail ~= '' and overlay_tool.detail ~= overlay_tool.tool then
+  if
+    type(overlay_tool.detail) == 'string'
+    and overlay_tool.detail ~= ''
+    and overlay_tool.detail ~= overlay_tool.tool
+  then
     line = line .. ' — ' .. overlay_tool.detail
   end
-  return {
-    '🔧 ' .. truncate_overlay_text(line, 72),
-  }
+  line = type(line) == 'string' and line:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
+  if line == '' then
+    return {}
+  end
+  local prefix = '🔧 '
+  local max_w = activity_overlay_width() - vim.fn.strdisplaywidth(prefix)
+  local wrapped = wrap_overlay_text(line, max_w)
+  if #wrapped == 0 then
+    return {}
+  end
+  wrapped[1] = prefix .. wrapped[1]
+  return wrapped
 end
 
-local function append_overlay_section(virt_lines, lines, first_prefix, other_prefix, highlight)
+local function append_overlay_section(virt_lines, lines, first_prefix, other_prefix, highlight, right_align)
+  local win_width
+  if right_align then
+    local win = state.chat_winid
+    win_width = (win and vim.api.nvim_win_is_valid(win)) and vim.api.nvim_win_get_width(win) or 80
+  end
   for idx, line in ipairs(lines) do
     local prefix = idx == 1 and first_prefix or other_prefix
-    virt_lines[#virt_lines + 1] = {
-      { prefix .. line, highlight },
-    }
+    local display_text = prefix .. line
+    if right_align and win_width then
+      local text_width = vim.fn.strdisplaywidth(display_text)
+      local pad = math.max(0, win_width - text_width - 1)
+      virt_lines[#virt_lines + 1] = {
+        { string.rep(' ', pad), '' },
+        { display_text, highlight },
+      }
+    else
+      virt_lines[#virt_lines + 1] = {
+        { display_text, highlight },
+      }
+    end
   end
 end
 
 local function reasoning_virtual_lines(task_lines, reasoning_lines)
   local virt_lines = {}
-  append_overlay_section(virt_lines, task_lines, '  Activity: ', '            ', 'CopilotAgentActivity')
-  append_overlay_section(virt_lines, reasoning_lines, '  Reasoning: ', '             ', 'CopilotAgentReasoning')
+  append_overlay_section(virt_lines, task_lines, '  Activity: ', '            ', 'CopilotAgentActivity', true)
+  append_overlay_section(virt_lines, reasoning_lines, '  Reasoning: ', '             ', 'CopilotAgentReasoning', false)
   return virt_lines
 end
 
@@ -155,14 +226,6 @@ end
 
 local function overlay_anchor(bufnr)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
-  local winid = state.chat_winid
-  if winid and vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
-    local info = vim.fn.getwininfo(winid)[1]
-    local botline = info and tonumber(info.botline) or nil
-    if botline and botline > 0 then
-      return math.max(math.min(botline, line_count) - 1, 0), true
-    end
-  end
   return math.max(line_count - 1, 0), false
 end
 
@@ -171,7 +234,14 @@ local function update_reasoning_overlay_now()
 
   local enabled, max_lines = reasoning_config()
   if not enabled or state.history_loading then
-    log(string.format('reasoning overlay skipped enabled=%s history_loading=%s', tostring(enabled), tostring(state.history_loading)), vim.log.levels.DEBUG)
+    log(
+      string.format(
+        'reasoning overlay skipped enabled=%s history_loading=%s',
+        tostring(enabled),
+        tostring(state.history_loading)
+      ),
+      vim.log.levels.DEBUG
+    )
     return
   end
 
@@ -194,7 +264,16 @@ local function update_reasoning_overlay_now()
     virt_lines_leftcol = true,
     virt_lines_above = anchor_above,
   })
-  log(string.format('reasoning overlay updated activity=%d reasoning=%d anchor_row=%d above=%s', #task_lines, #reasoning_lines, anchor_row, tostring(anchor_above)), vim.log.levels.DEBUG)
+  log(
+    string.format(
+      'reasoning overlay updated activity=%d reasoning=%d anchor_row=%d above=%s',
+      #task_lines,
+      #reasoning_lines,
+      anchor_row,
+      tostring(anchor_above)
+    ),
+    vim.log.levels.DEBUG
+  )
 end
 
 function M.refresh_reasoning_overlay(immediate)
@@ -310,7 +389,8 @@ local function pending_assistant_entry_key()
 
   local pending_turn = state.pending_checkpoint_turn
   if pending_turn and pending_turn.session_id == state.session_id and pending_turn.entry_index then
-    state.pending_assistant_entry_key = string.format('pending:%s:%s', pending_turn.session_id, pending_turn.entry_index)
+    state.pending_assistant_entry_key =
+      string.format('pending:%s:%s', pending_turn.session_id, pending_turn.entry_index)
     return state.pending_assistant_entry_key
   end
 
@@ -352,6 +432,29 @@ local function active_turn_entry_index()
   return index
 end
 
+local function trailing_assistant_entry_index()
+  if state.history_loading or state.chat_busy ~= true then
+    return nil
+  end
+  for idx = #state.entries, 1, -1 do
+    local entry = state.entries[idx]
+    if not entry then
+      return nil
+    end
+    if entry.kind == 'assistant' then
+      local trimmed = (entry.content or ''):match('^%s*(.-)%s*$')
+      if trimmed ~= '' then
+        return idx
+      end
+      return idx
+    end
+    if entry.kind ~= 'assistant' then
+      return nil
+    end
+  end
+  return nil
+end
+
 local function bind_active_turn_message_id(index, message_id)
   if type(index) ~= 'number' or not state.entries[index] then
     return
@@ -371,63 +474,8 @@ local function bind_active_turn_message_id(index, message_id)
   state.active_turn_assistant_message_id = message_id
 end
 
--- ── Thinking spinner ──────────────────────────────────────────────────────────
-
-function M.stop_thinking_spinner()
-  if state.thinking_timer then
-    pcall(function()
-      state.thinking_timer:stop()
-    end)
-    pcall(function()
-      state.thinking_timer:close()
-    end)
-    state.thinking_timer = nil
-  end
-  state.thinking_entry_key = nil
-  state._spinner_line = nil
-end
-
 function M.reset_pending_assistant_entry()
   state.pending_assistant_entry_key = nil
-end
-
-function M.start_thinking_spinner(entry_key)
-  M.stop_thinking_spinner()
-  state.thinking_entry_key = entry_key
-  state.thinking_frame = 1
-  state._spinner_line = nil -- buffer row of the spinner text (0-indexed)
-  M.schedule_render()
-  local timer = uv.new_timer()
-  state.thinking_timer = timer
-  timer:start(
-    0,
-    SPINNER_INTERVAL_MS,
-    vim.schedule_wrap(function()
-      if not state.thinking_timer then
-        return
-      end
-      state.thinking_frame = (state.thinking_frame % #SPINNER_FRAMES) + 1
-      local bufnr = state.chat_bufnr
-      if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-        return
-      end
-      local row = state._spinner_line
-      if row then
-        -- Fast path: just replace the single spinner line in-place.
-        local text = '  ' .. (SPINNER_FRAMES[state.thinking_frame] or '⠋') .. ' Thinking…'
-        pcall(function()
-          vim.bo[bufnr].modifiable = true
-          vim.bo[bufnr].readonly = false
-          vim.api.nvim_buf_set_lines(bufnr, row, row + 1, false, { text })
-          vim.bo[bufnr].modifiable = false
-          vim.bo[bufnr].readonly = true
-          vim.bo[bufnr].modified = false
-        end)
-      else
-        M.schedule_render()
-      end
-    end)
-  )
 end
 
 -- ── Render-markdown plugin bridge ─────────────────────────────────────────────
@@ -463,7 +511,7 @@ function M.should_merge_assistant(idx)
     end
     -- Skip entries that are thinking-only or whitespace-only.
     local trimmed = (e.content or ''):match('^%s*(.-)%s*$')
-    if not is_thinking_content(e.content) and trimmed ~= '' then
+    if trimmed ~= '' then
       return true
     end
   end
@@ -717,7 +765,13 @@ local function normalize_content_lines(lines)
     local next_item = normalized[idx + 1]
     local current_blocks_following = item.in_fence and item.fence_role ~= 'close'
     local next_blocks_spacing = next_item and next_item.in_fence and next_item.fence_role ~= 'close'
-    if next_item and not current_blocks_following and not next_blocks_spacing and next_item.kind ~= 'blank' and needs_blank_after(item.kind, next_item.kind) then
+    if
+      next_item
+      and not current_blocks_following
+      and not next_blocks_spacing
+      and next_item.kind ~= 'blank'
+      and needs_blank_after(item.kind, next_item.kind)
+    then
       with_transitions[#with_transitions + 1] = ''
     end
   end
@@ -744,22 +798,14 @@ function M.entry_lines(entry, idx, align)
     end
     out[#out + 1] = ''
   elseif entry.kind == 'assistant' then
-    if is_thinking_content(entry.content) then
-      if state.chat_busy and active_thinking_entry_index() == idx then
-        out[#out + 1] = 'Assistant:'
-        out[#out + 1] = '  ' .. (SPINNER_FRAMES[state.thinking_frame] or '⠋') .. ' Thinking…'
-        out[#out + 1] = ''
+    -- Skip entries whose content is only whitespace after trimming.
+    local trimmed = (entry.content or ''):match('^%s*(.-)%s*$')
+    if trimmed ~= '' then
+      out[#out + 1] = 'Assistant:'
+      for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
+        out[#out + 1] = '  ' .. l
       end
-    else
-      -- Skip entries whose content is only whitespace after trimming.
-      local trimmed = (entry.content or ''):match('^%s*(.-)%s*$')
-      if trimmed ~= '' then
-        out[#out + 1] = 'Assistant:'
-        for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
-          out[#out + 1] = '  ' .. l
-        end
-        out[#out + 1] = ''
-      end
+      out[#out + 1] = ''
     end
   else
     out[#out + 1] = 'User:'
@@ -795,6 +841,40 @@ function M.chat_at_bottom()
   return info[1].botline >= lc - 3
 end
 
+local function with_programmatic_chat_scroll(callback)
+  state.chat_scroll_guard = (tonumber(state.chat_scroll_guard) or 0) + 1
+  local ok, result = pcall(callback)
+  vim.defer_fn(function()
+    state.chat_scroll_guard = math.max((tonumber(state.chat_scroll_guard) or 1) - 1, 0)
+  end, CHAT_SCROLL_GUARD_MS)
+  if not ok then
+    error(result)
+  end
+  return result
+end
+
+local function set_chat_view(topline, cursor_line)
+  local winid = state.chat_winid
+  local bufnr = state.chat_bufnr
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  local last_line = math.max(1, vim.api.nvim_buf_line_count(bufnr))
+  topline = math.max(1, math.min(math.floor(tonumber(topline) or 1), last_line))
+  cursor_line = math.max(1, math.min(math.floor(tonumber(cursor_line) or topline), last_line))
+
+  with_programmatic_chat_scroll(function()
+    vim.api.nvim_win_set_cursor(winid, { cursor_line, 0 })
+    vim.api.nvim_win_call(winid, function()
+      vim.fn.winrestview({ topline = topline })
+    end)
+  end)
+end
+
 function M.scroll_to_bottom()
   local winid = state.chat_winid
   local bufnr = state.chat_bufnr
@@ -805,13 +885,9 @@ function M.scroll_to_bottom()
     return
   end
   local lc = vim.api.nvim_buf_line_count(bufnr)
-  -- Use API-only calls to avoid triggering extra redraws from normal-mode commands.
-  vim.api.nvim_win_set_cursor(winid, { lc, 0 })
   local win_height = vim.api.nvim_win_get_height(winid)
   local topline = math.max(1, lc - win_height + 1)
-  vim.api.nvim_win_call(winid, function()
-    vim.fn.winrestview({ topline = topline })
-  end)
+  set_chat_view(topline, lc)
 end
 
 local function current_chat_view()
@@ -823,14 +899,14 @@ local function current_chat_view()
   return info and info[1] or nil
 end
 
-local function live_turn_follow_active()
+local function auto_follow_active_conversation()
   if state.history_loading then
     return false
   end
   if not state.active_conversation_entry_index then
     return false
   end
-  return state.chat_busy == true or state.pending_checkpoint_turn ~= nil
+  return state.chat_auto_scroll_enabled ~= false
 end
 
 local function active_conversation_topline()
@@ -861,31 +937,56 @@ function M.follow_active_conversation(force)
     return false
   end
 
+  if force then
+    state.chat_auto_scroll_enabled = true
+  elseif state.chat_auto_scroll_enabled == false then
+    return false
+  end
+
   local view = current_chat_view()
   if not view then
     return false
   end
 
-  if not force and state.chat_follow_topline and math.abs((view.topline or 0) - state.chat_follow_topline) > 1 then
-    state.active_conversation_entry_index = nil
-    state.chat_follow_topline = nil
-    return false
-  end
-
   local win_height = math.max(1, vim.api.nvim_win_get_height(winid))
   local step = math.max(1, math.floor(win_height / 2))
-  local topline = math.max(anchor_topline, state.chat_follow_topline or anchor_topline)
+  local topline = force and anchor_topline or math.max(anchor_topline, state.chat_follow_topline or anchor_topline)
   local last_line = vim.api.nvim_buf_line_count(bufnr)
   if last_line > (topline + win_height - 1) then
-    topline = topline + step
+    topline = math.min(last_line, topline + step)
   end
 
   state.chat_follow_topline = topline
-  vim.api.nvim_win_set_cursor(winid, { math.min(anchor_topline, last_line), 0 })
-  vim.api.nvim_win_call(winid, function()
-    vim.fn.winrestview({ topline = topline })
-  end)
+  set_chat_view(topline, math.min(topline, last_line))
   return true
+end
+
+function M.handle_chat_window_scrolled(winid)
+  winid = tonumber(winid)
+  if not winid or not state.chat_winid or winid ~= state.chat_winid then
+    return
+  end
+  if not vim.api.nvim_win_is_valid(winid) or state.history_loading then
+    return
+  end
+  if (tonumber(state.chat_scroll_guard) or 0) > 0 then
+    return
+  end
+
+  local view = current_chat_view()
+  if not view then
+    return
+  end
+
+  if M.chat_at_bottom() then
+    state.chat_auto_scroll_enabled = true
+    state.chat_follow_topline = view.topline or state.chat_follow_topline
+    return
+  end
+
+  if state.active_conversation_entry_index then
+    state.chat_auto_scroll_enabled = false
+  end
 end
 
 -- Highlight chat role headers using extmarks (works alongside treesitter).
@@ -1017,10 +1118,7 @@ function M.render_chat()
     local entry = state.entries[idx]
     local elines = M.entry_lines(entry, idx)
     if #elines > 0 then
-      if entry.kind == 'assistant' and is_thinking_content(entry.content) and active_thinking_entry_index() == idx then
-        state._spinner_line = frozen_lines + #lines + 1
-      end
-      if entry.kind == 'assistant' and not is_thinking_content(entry.content) and M.should_merge_assistant(idx) then
+      if entry.kind == 'assistant' and M.should_merge_assistant(idx) then
         if #lines > 0 and lines[#lines] == '' then
           table.remove(lines)
         end
@@ -1052,7 +1150,12 @@ function M.render_chat()
     stream_timer:stop()
     stream_pending = false
     log(
-      string.format('render_chat preserved streaming start idx=%s start=%d total_lines=%d', tostring(state.active_turn_assistant_index or '<none>'), state.stream_line_start, total_lines),
+      string.format(
+        'render_chat preserved streaming start idx=%s start=%d total_lines=%d',
+        tostring(state.active_turn_assistant_index or '<none>'),
+        state.stream_line_start,
+        total_lines
+      ),
       vim.log.levels.DEBUG
     )
   else
@@ -1073,9 +1176,8 @@ function M.render_chat()
   local sl = require('copilot_agent.statusline')
   sl.refresh_chat_statusline()
 
-  local force_follow = live_turn_follow_active()
-  local followed = M.follow_active_conversation(force_follow)
-  if not followed and at_bottom and not force_follow then
+  local followed = auto_follow_active_conversation() and M.follow_active_conversation(false)
+  if not followed and at_bottom then
     M.scroll_to_bottom()
   end
   M.notify_render_plugins(bufnr)
@@ -1112,15 +1214,15 @@ function M.stream_update(entry, idx)
   state._stream_idx = idx
   if stream_pending then
     if entry.kind == 'assistant' then
-      log(
-        string.format(
-          'assistant stream update coalesced idx=%s content_len=%d content=%s',
-          tostring(idx or '<none>'),
-          #((entry and entry.content) or ''),
-          preview_log_text((entry and entry.content) or '')
-        ),
-        vim.log.levels.DEBUG
-      )
+      -- log(
+      -- string.format(
+      -- 'assistant stream update coalesced idx=%s content_len=%d content=%s',
+      -- tostring(idx or '<none>'),
+      -- #((entry and entry.content) or ''),
+      -- preview_log_text((entry and entry.content) or '')
+      -- ),
+      -- vim.log.levels.DEBUG
+      -- )
     end
     return
   end
@@ -1141,7 +1243,7 @@ function M.stream_update(entry, idx)
       end
 
       local new_lines = M.entry_lines(e, i, false) -- skip align_tables during streaming
-      local merge_assistant = e.kind == 'assistant' and not is_thinking_content(e.content) and M.should_merge_assistant(i)
+      local merge_assistant = e.kind == 'assistant' and M.should_merge_assistant(i)
       if merge_assistant and #new_lines > 0 then
         new_lines = collapse_merged_assistant_lines(new_lines)
       end
@@ -1190,9 +1292,8 @@ function M.stream_update(entry, idx)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
       vim.bo[bufnr].modified = false
-      local force_follow = live_turn_follow_active()
-      local followed = M.follow_active_conversation(force_follow)
-      if not followed and at_bottom and not force_follow then
+      local followed = auto_follow_active_conversation() and M.follow_active_conversation(false)
+      if not followed and at_bottom then
         M.scroll_to_bottom()
       end
       M.refresh_reasoning_overlay()
@@ -1224,6 +1325,7 @@ function M.append_entry(kind, content, attachments, opts)
   if kind == 'user' and not state.history_loading then
     state.active_conversation_entry_index = idx
     state.chat_follow_topline = nil
+    state.chat_auto_scroll_enabled = true
   end
   state.stream_line_start = nil
 
@@ -1232,7 +1334,7 @@ function M.append_entry(kind, content, attachments, opts)
   if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
     local new_lines = M.entry_lines(entry, idx)
     if #new_lines > 0 then
-      local merge_assistant = kind == 'assistant' and not is_thinking_content(content) and M.should_merge_assistant(idx)
+      local merge_assistant = kind == 'assistant' and M.should_merge_assistant(idx)
       if merge_assistant then
         new_lines = collapse_merged_assistant_lines(new_lines)
       end
@@ -1256,9 +1358,8 @@ function M.append_entry(kind, content, attachments, opts)
       if kind == 'user' then
         M.follow_active_conversation(true)
       else
-        local force_follow = live_turn_follow_active()
-        local followed = M.follow_active_conversation(force_follow)
-        if not followed and at_bottom and not force_follow then
+        local followed = auto_follow_active_conversation() and M.follow_active_conversation(false)
+        if not followed and at_bottom then
           M.scroll_to_bottom()
         end
       end
@@ -1273,7 +1374,9 @@ function M.ensure_assistant_entry(message_id)
   local active_index = active_turn_entry_index()
   if active_index then
     bind_active_turn_message_id(active_index, message_id)
-    local active_key = (type(message_id) == 'string' and message_id ~= '' and message_id) or state.active_turn_assistant_message_id or pending_assistant_entry_key()
+    local active_key = (type(message_id) == 'string' and message_id ~= '' and message_id)
+      or state.active_turn_assistant_message_id
+      or pending_assistant_entry_key()
     return state.entries[active_index], active_index, active_key
   end
 
@@ -1298,6 +1401,18 @@ function M.ensure_assistant_entry(message_id)
     state.active_turn_assistant_index = index
     return state.entries[index], index, key
   end
+
+  local trailing_index = trailing_assistant_entry_index()
+  if trailing_index and state.entries[trailing_index] then
+    state.assistant_entries[key] = trailing_index
+    state.active_turn_assistant_index = trailing_index
+    if type(message_id) == 'string' and message_id ~= '' then
+      bind_active_turn_message_id(trailing_index, message_id)
+      return state.entries[trailing_index], trailing_index, message_id
+    end
+    return state.entries[trailing_index], trailing_index, key
+  end
+
   table.insert(state.entries, {
     kind = 'assistant',
     content = '',
@@ -1330,6 +1445,8 @@ function M.clear_transcript()
   state.recent_activity_lines = {}
   state.active_conversation_entry_index = nil
   state.chat_follow_topline = nil
+  state.chat_auto_scroll_enabled = true
+  state.chat_scroll_guard = 0
   state.current_intent = nil
   state.context_tokens = nil
   state.context_limit = nil

@@ -77,9 +77,12 @@ function M.setup(opts)
   local ui_group = vim.api.nvim_create_augroup('CopilotAgentUI', { clear = true })
   vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized', 'WinScrolled' }, {
     group = ui_group,
-    callback = function()
+    callback = function(args)
       require('copilot_agent.statusline').refresh_statuslines()
-      require('copilot_agent.render').refresh_reasoning_overlay(true)
+      if args.event == 'WinScrolled' then
+        render.handle_chat_window_scrolled(tonumber(args.match))
+      end
+      render.refresh_reasoning_overlay(true)
     end,
   })
   vim.api.nvim_create_autocmd('FileChangedShell', {

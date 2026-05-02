@@ -5,9 +5,13 @@
 -- Pure HTTP / JSON helpers. No session or service logic.
 
 local cfg = require('copilot_agent.config')
+local logger = require('copilot_agent.log')
 local utils = require('copilot_agent.utils')
 local state = cfg.state
 local notify = cfg.notify
+local log = logger.log
+local should_log = logger.should_log
+local serialize_log_value = logger.serialize_log_value
 local normalize_base_url = cfg.normalize_base_url
 local is_connection_error = utils.is_connection_error
 
@@ -15,6 +19,43 @@ local M = {}
 
 function M.build_url(path)
   return normalize_base_url(state.config.base_url) .. path
+end
+
+local function log_http_request(mode, method, path, body)
+  if not should_log(vim.log.levels.DEBUG) then
+    return
+  end
+  log(
+    string.format(
+      'http.%s request method=%s path=%s url=%s body=%s',
+      mode,
+      tostring(method),
+      tostring(path),
+      M.build_url(path),
+      serialize_log_value(body)
+    ),
+    vim.log.levels.DEBUG
+  )
+end
+
+local function log_http_response(mode, method, path, status, exit_code, payload, err)
+  local level = err and vim.log.levels.WARN or vim.log.levels.DEBUG
+  if not should_log(level) then
+    return
+  end
+  log(
+    string.format(
+      'http.%s response method=%s path=%s status=%s exit=%s error=%s payload=%s',
+      mode,
+      tostring(method),
+      tostring(path),
+      tostring(status or '<none>'),
+      tostring(exit_code or '<none>'),
+      tostring(err or '<none>'),
+      serialize_log_value(payload)
+    ),
+    level
+  )
 end
 
 function M.ensure_curl()
@@ -25,7 +66,8 @@ function M.ensure_curl()
   return false
 end
 
-function M.decode_json(raw)
+function M.decode_json(raw, opts)
+  opts = opts or {}
   if raw == nil or raw == '' then
     return nil
   end
@@ -41,7 +83,19 @@ function M.decode_json(raw)
 
   local ok, decoded = pcall(decoder, raw)
   if ok then
+    if opts.log ~= false and should_log(vim.log.levels.DEBUG) then
+      log(
+        string.format('json.decode ok type=%s raw=%s', type(decoded), serialize_log_value(raw, { max_len = 1000 })),
+        vim.log.levels.DEBUG
+      )
+    end
     return decoded
+  end
+  if opts.log ~= false then
+    log(
+      string.format('json.decode failed error=%s raw=%s', tostring(decoded), serialize_log_value(raw, { max_len = 1000 })),
+      vim.log.levels.WARN
+    )
   end
   return nil, decoded
 end
@@ -56,7 +110,14 @@ function M.encode_json(value)
     error('no JSON encoder available in this Neovim version')
   end
 
-  return encoder(value)
+  local encoded = encoder(value)
+  if should_log(vim.log.levels.DEBUG) then
+    log(
+      string.format('json.encode value=%s encoded=%s', serialize_log_value(value), serialize_log_value(encoded, { max_len = 1000 })),
+      vim.log.levels.DEBUG
+    )
+  end
+  return encoded
 end
 
 -- Synchronous HTTP request via vim.system / vim.fn.system.
@@ -65,6 +126,7 @@ function M.sync_request(method, path, body)
     return nil, 'curl executable not found: ' .. state.config.curl_bin
   end
 
+  log_http_request('sync', method, path, body)
   local args = {
     state.config.curl_bin,
     '-sS',
@@ -97,6 +159,7 @@ function M.sync_request(method, path, body)
 
     if result.code ~= 0 and (status == nil or status < 400) then
       local message = (result.stderr and vim.trim(result.stderr) ~= '' and result.stderr) or response_body
+      log_http_response('sync', method, path, status, result.code, response_body, vim.trim(message))
       return nil, vim.trim(message), status
     end
 
@@ -106,9 +169,11 @@ function M.sync_request(method, path, body)
       if type(payload) == 'table' and type(payload.error) == 'string' then
         message = payload.error
       end
+      log_http_response('sync', method, path, status, result.code, payload or response_body, message)
       return nil, message, status
     end
 
+    log_http_response('sync', method, path, status, result.code, payload, nil)
     return payload, nil, status
   end
 
@@ -121,6 +186,7 @@ function M.sync_request(method, path, body)
   end
 
   if code ~= 0 and (status == nil or status < 400) then
+    log_http_response('sync', method, path, status, code, response_body, vim.trim(response_body))
     return nil, vim.trim(response_body), status
   end
 
@@ -130,9 +196,11 @@ function M.sync_request(method, path, body)
     if type(payload) == 'table' and type(payload.error) == 'string' then
       message = payload.error
     end
+    log_http_response('sync', method, path, status, code, payload or response_body, message)
     return nil, message, status
   end
 
+  log_http_response('sync', method, path, status, code, payload, nil)
   return payload, nil, status
 end
 
@@ -143,6 +211,7 @@ function M.raw_request(method, path, body, callback)
     return
   end
 
+  log_http_request('async', method, path, body)
   local stdout = {}
   local stderr = {}
   local args = {
@@ -190,6 +259,7 @@ function M.raw_request(method, path, body, callback)
 
         local stderr_text = table.concat(stderr, '\n')
         if code ~= 0 and (status == nil or status < 400) then
+          log_http_response('async', method, path, status, code, response_body, stderr_text ~= '' and stderr_text or response_body)
           callback(nil, stderr_text ~= '' and stderr_text or response_body, status)
           return
         end
@@ -200,15 +270,18 @@ function M.raw_request(method, path, body, callback)
           if type(payload) == 'table' and type(payload.error) == 'string' then
             message = payload.error
           end
+          log_http_response('async', method, path, status, code, payload or response_body, message)
           callback(nil, message, status)
           return
         end
 
+        log_http_response('async', method, path, status, code, payload, nil)
         callback(payload, nil, status)
       end)
     end,
   })
   if job_id <= 0 then
+    log_http_response('async', method, path, nil, job_id, nil, 'failed to start curl job')
     vim.schedule(function()
       callback(nil, 'failed to start curl job for ' .. method .. ' ' .. path)
     end)
@@ -222,13 +295,36 @@ function M.request(method, path, body, callback, opts)
   opts = opts or {}
   M.raw_request(method, path, body, function(payload, err, status)
     if err and opts.auto_start ~= false and is_connection_error(err) then
+      log(
+        string.format(
+          'http.request retry method=%s path=%s status=%s reason=%s',
+          tostring(method),
+          tostring(path),
+          tostring(status or '<none>'),
+          serialize_log_value(err, { max_len = 600 })
+        ),
+        vim.log.levels.WARN
+      )
       -- Lazy-require to break http↔service circular dependency.
       local service = require('copilot_agent.service')
       service.ensure_service_running(function(start_err)
         if start_err then
+          log(
+            string.format(
+              'http.request retry failed method=%s path=%s startup_error=%s',
+              tostring(method),
+              tostring(path),
+              serialize_log_value(start_err, { max_len = 600 })
+            ),
+            vim.log.levels.WARN
+          )
           callback(nil, err .. '\n' .. start_err, status)
           return
         end
+        log(
+          string.format('http.request retrying method=%s path=%s after service start', tostring(method), tostring(path)),
+          vim.log.levels.DEBUG
+        )
         M.raw_request(method, path, body, callback)
       end)
       return

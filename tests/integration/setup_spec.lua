@@ -201,6 +201,119 @@ describe('M.setup', function()
     assert_eq(1, #lines)
     assert_true(lines[1]:find('info should be written', 1, true) ~= nil)
   end)
+
+  it('includes the caller file and line number in DEBUG log entries', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'DEBUG' })
+    local cfg = require('copilot_agent.config')
+    local expected_line = debug.getinfo(1, 'l').currentline + 1
+    cfg.log('caller metadata smoke test', vim.log.levels.DEBUG)
+
+    vim.fn.stdpath = original_stdpath
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    assert_eq(1, #lines)
+    assert_true(lines[1]:find('tests/integration/setup_spec.lua:' .. expected_line, 1, true) ~= nil)
+    assert_true(lines[1]:find('caller metadata smoke test', 1, true) ~= nil)
+  end)
+
+  it('logs HTTP actions and sanitized session events when DEBUG file logging is enabled', function()
+    local original_stdpath = vim.fn.stdpath
+    local original_vim_system = vim.system
+    local temp_log_dir = vim.fn.tempname()
+    local long_content = string.rep('A', 130)
+    local truncated_content = string.rep('A', 119) .. '…'
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'DEBUG' })
+    local http = require('copilot_agent.http')
+    local events = require('copilot_agent.events')
+    local encode_json = (vim.json and vim.json.encode) or vim.fn.json_encode
+
+    vim.system = function()
+      return {
+        wait = function()
+          return {
+            code = 0,
+            stdout = '{"ok":true}\n200',
+            stderr = '',
+          }
+        end,
+      }
+    end
+
+    http.sync_request('POST', '/debug-log', { prompt = 'trace me' })
+    agent.state.sse_event = {
+      event = 'session.event',
+      data = {
+        encode_json({
+          type = 'assistant.message',
+          data = {
+            messageId = 'debug-turn',
+            content = long_content,
+            encryptedContent = 'top-secret',
+          },
+        }),
+      },
+    }
+    events.flush_sse_event()
+
+    vim.system = original_vim_system
+    vim.fn.stdpath = original_stdpath
+
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('http.sync request method=POST path=/debug-log', 1, true) ~= nil)
+    assert_true(joined:find('http.sync response method=POST path=/debug-log status=200', 1, true) ~= nil)
+    assert_true(joined:find('sse.event raw event=session.event', 1, true) ~= nil)
+    assert_true(joined:find('session.event received type=assistant.message', 1, true) ~= nil)
+    assert_true(joined:find('content = "' .. truncated_content .. '"', 1, true) ~= nil)
+    assert_true(joined:find('encryptedContent', 1, true) == nil)
+    assert_true(joined:find('top-secret', 1, true) == nil)
+  end)
+
+  it('logs non-json session events as strings before decode failure handling', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'DEBUG' })
+    local events = require('copilot_agent.events')
+
+    agent.state.sse_event = {
+      event = 'session.event',
+      data = {
+        'plain text session event',
+      },
+    }
+    events.flush_sse_event()
+
+    vim.fn.stdpath = original_stdpath
+
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('sse.event raw event=session.event string=plain text session event', 1, true) ~= nil)
+  end)
 end)
 
 describe('service coordination', function()
@@ -1044,6 +1157,65 @@ describe('model state sync', function()
     assert_true(joined:find('assistant.message received', 1, true) ~= nil)
     assert_true(joined:find('assistant.message merge decision=', 1, true) ~= nil)
     assert_true(joined:find('assistant stream update applying', 1, true) ~= nil)
+  end)
+
+  it('preserves distinct assistant.message chunks when the same message id sends non-overlapping content', function()
+    local render = require('copilot_agent.render')
+    render.clear_transcript()
+    agent.state.session_id = 'session-merge-preserve'
+    agent.open_chat()
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-merge-preserve',
+        content = 'First section.',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-merge-preserve',
+        content = 'Second section.',
+      },
+    })
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('assistant', entry.kind)
+    assert_eq('First section.\nSecond section.', entry.content)
+  end)
+
+  it('replaces a corrupted streamed draft with the final assistant.message payload', function()
+    local render = require('copilot_agent.render')
+    render.clear_transcript()
+    agent.state.session_id = 'session-merge-replace'
+    agent.open_chat()
+
+    local stable_prefix = string.rep(
+      'All five improvements are implemented. Here is a stable streamed prefix that should match the final payload. ',
+      3
+    )
+    local streamed = stable_prefix .. 'The activity lines are paded with spaces.'
+    local final = stable_prefix .. 'The activity lines are padded with spaces.\n\nFinal line.'
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-merge-replace',
+        content = streamed,
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-merge-replace',
+        content = final,
+      },
+    })
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('assistant', entry.kind)
+    assert_eq(final, entry.content)
   end)
 
   it('anchors activity virtual text to the bottom of the visible chat window', function()
@@ -2237,8 +2409,74 @@ describe('session resume guards', function()
     assert_eq('Session Live session summary [live-session] is already attached in another Neovim instance. Kick the older instance out?', prompt)
     assert_eq('Keep older instance attached', items[1])
     assert_eq('Kick older instance out', items[2])
+    assert_eq('New Session', items[3])
     assert_false(resumed)
     assert_eq('Kept older instance attached; did not connect to session live-session', callback_error)
+  end)
+
+  it('creates a new session when takeover prompt chooses New Session during auto-resume', function()
+    local requests = {}
+    local callback_session_id
+    local callback_error
+    local prompt
+    local items
+    local cwd = require('copilot_agent.service').working_directory()
+
+    events.start_event_stream = function() end
+
+    http.request = function(method, path, body, callback)
+      requests[#requests + 1] = {
+        method = method,
+        path = path,
+        body = body,
+      }
+      if method == 'GET' then
+        assert_eq('/sessions', path)
+        callback({
+          persisted = {},
+          live = {
+            {
+              sessionId = 'live-session',
+              summary = 'Live session summary',
+              workingDirectory = cwd,
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+
+      assert_eq('POST', method)
+      assert_eq('/sessions', path)
+      assert_eq(nil, body.sessionId)
+      assert_eq(nil, body.resume)
+      callback({
+        sessionId = 'fresh-session',
+        workingDirectory = cwd,
+      }, nil)
+    end
+
+    vim.ui.select = function(choice_items, opts, on_choice)
+      items = choice_items
+      prompt = opts.prompt
+      on_choice('New Session', 3)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.pick_or_create_session(function(session_id, err)
+      callback_session_id = session_id
+      callback_error = err
+    end)
+
+    assert_eq('Session Live session summary [live-session] is already attached in another Neovim instance. Kick the older instance out?', prompt)
+    assert_eq('Keep older instance attached', items[1])
+    assert_eq('Kick older instance out', items[2])
+    assert_eq('New Session', items[3])
+    assert_eq('GET', requests[1].method)
+    assert_eq('POST', requests[2].method)
+    assert_eq(nil, callback_error)
+    assert_eq('fresh-session', callback_session_id)
   end)
 
   it('does not prompt when only persisted metadata marks the target session live', function()
@@ -2351,6 +2589,87 @@ describe('session resume guards', function()
     assert_false(delete_called)
     assert_false(resume_called)
     assert_eq('current-session', agent.state.session_id)
+  end)
+
+  it('creates a new session when switching to a live session and choosing New Session', function()
+    local requests = {}
+    local prompt
+    local items
+
+    agent.state.session_id = 'current-session'
+    agent.state.session_name = 'Current session'
+    events.start_event_stream = function() end
+
+    http.request = function(method, path, body, callback)
+      requests[#requests + 1] = {
+        method = method,
+        path = path,
+        body = body,
+      }
+
+      if method == 'GET' then
+        callback({
+          persisted = {
+            {
+              sessionId = 'current-session',
+              summary = 'Current session',
+              workingDirectory = '/tmp/current',
+            },
+            {
+              sessionId = 'live-target',
+              summary = 'Target session',
+              workingDirectory = '/tmp/target',
+            },
+          },
+          live = {
+            {
+              sessionId = 'live-target',
+              summary = 'Target session',
+              workingDirectory = '/tmp/target',
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+
+      if method == 'DELETE' then
+        callback({}, nil)
+        return
+      end
+
+      assert_eq('POST', method)
+      assert_eq('/sessions', path)
+      assert_eq(nil, body.sessionId)
+      assert_eq(nil, body.resume)
+      callback({
+        sessionId = 'fresh-session',
+        summary = 'Fresh session',
+        workingDirectory = '/tmp/current',
+      }, nil)
+    end
+
+    vim.ui.select = function(choice_items, opts, on_choice)
+      prompt = opts.prompt
+      items = choice_items
+      on_choice('New Session', 3)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    agent._ensure_chat_window = function() end
+    session.switch_to_session_id('live-target')
+
+    assert_eq('Session Target session [live-target] is already attached in another Neovim instance. Kick the older instance out?', prompt)
+    assert_eq('Keep older instance attached', items[1])
+    assert_eq('Kick older instance out', items[2])
+    assert_eq('New Session', items[3])
+    assert_eq('GET', requests[1].method)
+    assert_eq('DELETE', requests[2].method)
+    assert_eq('/sessions/current-session', requests[2].path)
+    assert_eq('POST', requests[3].method)
+    assert_eq('/sessions', requests[3].path)
+    assert_eq('fresh-session', agent.state.session_id)
   end)
 
   it('switches after confirming takeover of a live session', function()
@@ -2595,6 +2914,148 @@ describe('session picker labels', function()
     assert_eq('abcdefghijklmnopqrstuvwxyz012345 [' .. expected_id .. ']', captured.items[1])
     assert_eq('second live session summary [' .. expected_id_2 .. ']', captured.items[2])
     assert_eq('Create new session', captured.items[3])
+  end)
+end)
+
+describe('new session creation', function()
+  local agent
+  local session
+  local http
+  local events
+  local original_request
+  local original_start_event_stream
+  local original_ui_select
+  local original_ensure_chat_window
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    agent.state.config.auto_create_session = true
+    http = require('copilot_agent.http')
+    events = require('copilot_agent.events')
+    original_request = http.request
+    original_start_event_stream = events.start_event_stream
+    original_ui_select = vim.ui.select
+    original_ensure_chat_window = agent._ensure_chat_window
+  end)
+
+  after_each(function()
+    http.request = original_request
+    events.start_event_stream = original_start_event_stream
+    vim.ui.select = original_ui_select
+    agent._ensure_chat_window = original_ensure_chat_window
+  end)
+
+  it('creates a fresh session without re-entering the attach-or-resume flow', function()
+    local requests = {}
+    local ensured_chat = false
+
+    agent.state.session_id = 'current-session'
+    agent.state.session_name = 'Current session'
+    events.start_event_stream = function() end
+    agent._ensure_chat_window = function()
+      ensured_chat = true
+    end
+
+    http.request = function(method, path, body, callback)
+      requests[#requests + 1] = method .. ' ' .. path
+      if method == 'GET' then
+        error('new_session unexpectedly tried to list existing sessions')
+      end
+      if method == 'DELETE' then
+        assert_eq('/sessions/current-session', path)
+        callback({}, nil)
+        return
+      end
+
+      assert_eq('POST', method)
+      assert_eq('/sessions', path)
+      assert_eq(nil, body.sessionId)
+      assert_eq(nil, body.resume)
+      callback({
+        sessionId = 'new-session',
+        workingDirectory = require('copilot_agent.service').working_directory(),
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.new_session()
+
+    assert_true(ensured_chat)
+    assert_eq('new-session', agent.state.session_id)
+    assert.same({
+      'DELETE /sessions/current-session',
+      'POST /sessions',
+    }, requests)
+  end)
+
+  it('creates a fresh session from the switch-session picker new entry', function()
+    local get_requests = 0
+    local extra_prompt = nil
+
+    agent.state.session_id = 'current-session'
+    agent.state.session_name = 'Current session'
+    events.start_event_stream = function() end
+    agent._ensure_chat_window = function() end
+
+    http.request = function(method, path, body, callback)
+      if method == 'GET' then
+        get_requests = get_requests + 1
+        assert_eq('/sessions', path)
+        callback({
+          persisted = {
+            {
+              sessionId = 'current-session',
+              summary = 'Current session',
+              workingDirectory = require('copilot_agent.service').working_directory(),
+            },
+          },
+          live = {
+            {
+              sessionId = 'current-session',
+              summary = 'Current session',
+              workingDirectory = require('copilot_agent.service').working_directory(),
+              live = true,
+            },
+          },
+        }, nil)
+        return
+      end
+
+      if method == 'DELETE' then
+        assert_eq('/sessions/current-session', path)
+        callback({}, nil)
+        return
+      end
+
+      assert_eq('POST', method)
+      assert_eq('/sessions', path)
+      assert_eq(nil, body.sessionId)
+      assert_eq(nil, body.resume)
+      callback({
+        sessionId = 'new-session',
+        workingDirectory = require('copilot_agent.service').working_directory(),
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    vim.ui.select = function(items, opts, on_choice)
+      if opts.prompt == 'Switch session' then
+        on_choice(items[#items], #items)
+        return
+      end
+      extra_prompt = opts.prompt
+    end
+
+    session.switch_session()
+
+    assert_eq(1, get_requests)
+    assert_eq(nil, extra_prompt)
+    assert_eq('new-session', agent.state.session_id)
   end)
 end)
 
@@ -3294,6 +3755,62 @@ describe('chat input behavior', function()
     }, { unpack(lines, #lines - 2, #lines) })
   end)
 
+  it('reuses the trailing live assistant entry when turn tracking is briefly missing', function()
+    local render = require('copilot_agent.render')
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    local prompt_idx = render.append_entry('user', 'debug duplicates')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'debug duplicates',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        deltaContent = 'I found the mismatch and I am tracing the render race now',
+      },
+    })
+
+    -- Simulate a transient loss of active-turn metadata before the final
+    -- assistant.message arrives with a concrete messageId.
+    agent.state.pending_checkpoint_turn = nil
+    agent.state.active_turn_assistant_index = nil
+    agent.state.active_turn_assistant_message_id = nil
+    agent.state.chat_busy = true
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-final',
+        content = 'I found the mismatch, and I am tracing the render race now.',
+      },
+    })
+
+    vim.wait(250)
+
+    local assistant_entries = {}
+    for _, entry in ipairs(agent.state.entries) do
+      if entry.kind == 'assistant' then
+        assistant_entries[#assistant_entries + 1] = entry
+      end
+    end
+    assert_eq(1, #assistant_entries)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Assistant:',
+      '  I found the mismatch, and I am tracing the render race now.',
+      '',
+    }, { unpack(lines, #lines - 2, #lines) })
+  end)
+
   it('preserves punctuation and blank-line deltas after real streamed content starts', function()
     local render = require('copilot_agent.render')
     local events = require('copilot_agent.events')
@@ -3491,6 +4008,8 @@ describe('chat input behavior', function()
     agent.state.entry_row_index = {}
     agent.state.active_conversation_entry_index = nil
     agent.state.chat_follow_topline = nil
+    agent.state.chat_auto_scroll_enabled = true
+    agent.state.chat_scroll_guard = 0
     vim.api.nvim_win_set_buf(winid, bufnr)
     vim.api.nvim_win_get_height = function(target_winid)
       if target_winid == winid then
@@ -3571,6 +4090,8 @@ describe('chat input behavior', function()
     agent.state.entry_row_index = {}
     agent.state.active_conversation_entry_index = nil
     agent.state.chat_follow_topline = nil
+    agent.state.chat_auto_scroll_enabled = true
+    agent.state.chat_scroll_guard = 0
     vim.api.nvim_win_set_buf(winid, bufnr)
     vim.api.nvim_win_get_height = function(target_winid)
       if target_winid == winid then
@@ -3608,6 +4129,148 @@ describe('chat input behavior', function()
 
     local view = vim.fn.getwininfo(winid)[1]
     assert_eq(anchor_row + 1, view.topline)
+
+    vim.api.nvim_win_get_height = original_get_height
+    agent.state.chat_bufnr = original_chat_bufnr
+    agent.state.chat_winid = original_chat_winid
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+  end)
+
+  it('pauses auto-follow after manual scrolling and resumes it again at the bottom', function()
+    local render = require('copilot_agent.render')
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    local winid = vim.api.nvim_get_current_win()
+    local original_chat_bufnr = agent.state.chat_bufnr
+    local original_chat_winid = agent.state.chat_winid
+    local original_get_height = vim.api.nvim_win_get_height
+
+    agent.state.history_loading = false
+    agent.state.chat_bufnr = bufnr
+    agent.state.chat_winid = winid
+    agent.state.entries = {
+      {
+        kind = 'assistant',
+        content = table.concat({
+          'old line 1',
+          'old line 2',
+          'old line 3',
+          'old line 4',
+          'old line 5',
+          'old line 6',
+        }, '\n'),
+      },
+    }
+    agent.state.entry_row_index = {}
+    agent.state.active_conversation_entry_index = nil
+    agent.state.chat_follow_topline = nil
+    agent.state.chat_auto_scroll_enabled = true
+    agent.state.chat_scroll_guard = 0
+    vim.api.nvim_win_set_buf(winid, bufnr)
+    vim.api.nvim_win_get_height = function(target_winid)
+      if target_winid == winid then
+        return 8
+      end
+      return original_get_height(target_winid)
+    end
+
+    render.reset_frozen_render()
+    render.render_chat()
+    render.scroll_to_bottom()
+    vim.wait(120)
+
+    local prompt_idx = render.append_entry('user', 'new prompt')
+    local anchor_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == prompt_idx then
+        anchor_row = row
+        break
+      end
+    end
+    assert_not_nil(anchor_row)
+
+    local assistant_idx = render.append_entry('assistant', '')
+    local assistant_entry = agent.state.entries[assistant_idx]
+    assistant_entry.content = table.concat({
+      'line a',
+      'line b',
+      'line c',
+      'line d',
+      'line e',
+      'line f',
+      'line g',
+      'line h',
+      'line i',
+      'line j',
+    }, '\n')
+    render.stream_update(assistant_entry, assistant_idx)
+    vim.wait(200)
+
+    vim.api.nvim_win_set_cursor(winid, { 1, 0 })
+    vim.api.nvim_win_call(winid, function()
+      vim.fn.winrestview({ topline = 1 })
+    end)
+    render.handle_chat_window_scrolled(winid)
+
+    assert_false(agent.state.chat_auto_scroll_enabled)
+
+    assistant_entry.content = table.concat({
+      'line a',
+      'line b',
+      'line c',
+      'line d',
+      'line e',
+      'line f',
+      'line g',
+      'line h',
+      'line i',
+      'line j',
+      'line k',
+      'line l',
+      'line m',
+      'line n',
+    }, '\n')
+    render.stream_update(assistant_entry, assistant_idx)
+    vim.wait(200)
+
+    local view = vim.fn.getwininfo(winid)[1]
+    assert_eq(1, view.topline)
+
+    local win_height = vim.api.nvim_win_get_height(winid)
+    local last_line = vim.api.nvim_buf_line_count(bufnr)
+    local bottom_topline = math.max(1, last_line - win_height + 1)
+    vim.api.nvim_win_set_cursor(winid, { last_line, 0 })
+    vim.api.nvim_win_call(winid, function()
+      vim.fn.winrestview({ topline = bottom_topline })
+    end)
+    render.handle_chat_window_scrolled(winid)
+
+    assert_true(agent.state.chat_auto_scroll_enabled)
+
+    assistant_entry.content = table.concat({
+      'line a',
+      'line b',
+      'line c',
+      'line d',
+      'line e',
+      'line f',
+      'line g',
+      'line h',
+      'line i',
+      'line j',
+      'line k',
+      'line l',
+      'line m',
+      'line n',
+      'line o',
+      'line p',
+      'line q',
+      'line r',
+    }, '\n')
+    render.stream_update(assistant_entry, assistant_idx)
+    vim.wait(200)
+
+    view = vim.fn.getwininfo(winid)[1]
+    assert_true(view.topline > bottom_topline)
 
     vim.api.nvim_win_get_height = original_get_height
     agent.state.chat_bufnr = original_chat_bufnr

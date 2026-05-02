@@ -119,6 +119,7 @@ optional — defaults are shown below: >lua
     permission_mode  = "approve-all",
     auto_create_session = true,
     notify           = true,
+    file_log_level   = "WARN",  -- DEBUG logs HTTP/SSE payloads, plugin actions, and transform decisions to stdpath("log") .. "/copilot_agent.log"
 
     session = {
       working_directory        = nil,   -- function() or string; nil = cwd

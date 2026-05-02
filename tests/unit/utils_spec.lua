@@ -4,37 +4,6 @@
 
 local utils = require('copilot_agent.utils')
 
-describe('is_thinking_content', function()
-  it('treats nil as thinking', function()
-    assert.is_true(utils.is_thinking_content(nil))
-  end)
-
-  it('treats empty string as thinking', function()
-    assert.is_true(utils.is_thinking_content(''))
-  end)
-
-  it('treats whitespace-only as thinking', function()
-    assert.is_true(utils.is_thinking_content('   '))
-    assert.is_true(utils.is_thinking_content('\t\n'))
-  end)
-
-  it('treats dots-only as thinking', function()
-    assert.is_true(utils.is_thinking_content('.'))
-    assert.is_true(utils.is_thinking_content('...'))
-    assert.is_true(utils.is_thinking_content('. . .'))
-  end)
-
-  it('treats mixed dots and whitespace as thinking', function()
-    assert.is_true(utils.is_thinking_content('.. .'))
-  end)
-
-  it('treats real content as not thinking', function()
-    assert.is_false(utils.is_thinking_content('hello'))
-    assert.is_false(utils.is_thinking_content('A'))
-    assert.is_false(utils.is_thinking_content('  hello  '))
-  end)
-end)
-
 describe('split_lines', function()
   it('returns single empty string for nil', function()
     local result = utils.split_lines(nil)
@@ -86,13 +55,11 @@ describe('truncate_session_summary', function()
   end)
 
   it('prefers trimming at separators within the limit', function()
-    assert.equal('my.long.session',
-      utils.truncate_session_summary('my.long.session.name.with.extra.parts', 18))
+    assert.equal('my.long.session', utils.truncate_session_summary('my.long.session.name.with.extra.parts', 18))
   end)
 
   it('drops trailing separators from the trimmed result', function()
-    assert.equal('topic:subtopic',
-      utils.truncate_session_summary('topic:subtopic-detail-more', 20))
+    assert.equal('topic:subtopic', utils.truncate_session_summary('topic:subtopic-detail-more', 20))
   end)
 
   it('falls back to hard truncation when there is no separator', function()
@@ -154,13 +121,14 @@ describe('unavailable_model_from_error', function()
   end)
 
   it('extracts model name from standard error message', function()
-    assert.equal('gpt-5.4',
-      utils.unavailable_model_from_error('Model "gpt-5.4" is not available'))
+    assert.equal('gpt-5.4', utils.unavailable_model_from_error('Model "gpt-5.4" is not available'))
   end)
 
   it('extracts model name embedded in longer message', function()
-    assert.equal('claude-opus',
-      utils.unavailable_model_from_error('error: Model "claude-opus" is not available in this region'))
+    assert.equal(
+      'claude-opus',
+      utils.unavailable_model_from_error('error: Model "claude-opus" is not available in this region')
+    )
   end)
 end)
 

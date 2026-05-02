@@ -23,6 +23,7 @@ local refresh_chat_statusline = sl.refresh_chat_statusline
 local render_chat = render.render_chat
 local reset_frozen_render = render.reset_frozen_render
 local scroll_to_bottom = render.scroll_to_bottom
+local follow_active_conversation = render.follow_active_conversation
 local append_entry = render.append_entry
 local schedule_render = render.schedule_render
 local refresh_reasoning_overlay = render.refresh_reasoning_overlay
@@ -387,7 +388,9 @@ function M.ensure_chat_window(opts)
     reset_frozen_render()
     render_chat()
     refresh_chat_statusline()
-    scroll_to_bottom()
+    if not follow_active_conversation(false) then
+      scroll_to_bottom()
+    end
     state._chat_was_open = true
     return state.chat_bufnr
   end
@@ -454,7 +457,9 @@ function M.ensure_chat_window(opts)
 
   reset_frozen_render()
   render_chat()
-  scroll_to_bottom()
+  if not follow_active_conversation(false) then
+    scroll_to_bottom()
+  end
   state._chat_was_open = true
   return bufnr
 end
@@ -514,7 +519,9 @@ function M.focus_chat()
       reset_frozen_render()
       render_chat()
       refresh_chat_statusline()
-      scroll_to_bottom()
+      if not follow_active_conversation(false) then
+        scroll_to_bottom()
+      end
     end
     return
   end
@@ -537,7 +544,9 @@ function M.focus_chat()
       reset_frozen_render()
       render_chat()
       refresh_chat_statusline()
-      scroll_to_bottom()
+      if not follow_active_conversation(false) then
+        scroll_to_bottom()
+      end
     end
   end)
 end

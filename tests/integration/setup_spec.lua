@@ -47,6 +47,20 @@ do
   end
 end
 
+local function virt_line_text(virt_line)
+  local chunks = {}
+  for _, chunk in ipairs(virt_line or {}) do
+    chunks[#chunks + 1] = chunk[1] or ''
+  end
+  return table.concat(chunks)
+end
+
+local function trimmed_virt_lines(virt_lines)
+  return vim.tbl_map(function(virt_line)
+    return virt_line_text(virt_line):gsub('^%s+', '')
+  end, virt_lines or {})
+end
+
 local function command_exists(name)
   return vim.fn.exists(':' .. name) == 2
 end
@@ -202,6 +216,27 @@ describe('M.setup', function()
     assert_true(lines[1]:find('info should be written', 1, true) ~= nil)
   end)
 
+  it('accepts TRACE as a file log threshold', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'TRACE' })
+    local cfg = require('copilot_agent.config')
+    cfg.log('trace should be written', vim.log.levels.TRACE or vim.log.levels.DEBUG)
+
+    vim.fn.stdpath = original_stdpath
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    assert_eq(1, #lines)
+    assert_true(lines[1]:find('trace should be written', 1, true) ~= nil)
+  end)
+
   it('includes the caller file and line number in DEBUG log entries', function()
     local original_stdpath = vim.fn.stdpath
     local temp_log_dir = vim.fn.tempname()
@@ -225,7 +260,7 @@ describe('M.setup', function()
     assert_true(lines[1]:find('caller metadata smoke test', 1, true) ~= nil)
   end)
 
-  it('logs HTTP actions and sanitized session events when DEBUG file logging is enabled', function()
+  it('logs HTTP actions and sanitized session events when TRACE file logging is enabled', function()
     local original_stdpath = vim.fn.stdpath
     local original_vim_system = vim.system
     local temp_log_dir = vim.fn.tempname()
@@ -239,7 +274,7 @@ describe('M.setup', function()
       return original_stdpath(kind)
     end
 
-    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'DEBUG' })
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'TRACE' })
     local cfg = require('copilot_agent.config')
     local http = require('copilot_agent.http')
     local events = require('copilot_agent.events')
@@ -293,7 +328,7 @@ describe('M.setup', function()
     assert_true(joined:find(reasoning_id, 1, true) == nil)
   end)
 
-  it('logs non-json session events as strings before decode failure handling', function()
+  it('logs non-json session events as strings before decode failure handling at TRACE level', function()
     local original_stdpath = vim.fn.stdpath
     local temp_log_dir = vim.fn.tempname()
     vim.fn.mkdir(temp_log_dir, 'p')
@@ -304,7 +339,7 @@ describe('M.setup', function()
       return original_stdpath(kind)
     end
 
-    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'DEBUG' })
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'TRACE' })
     local events = require('copilot_agent.events')
 
     agent.state.sse_event = {
@@ -320,6 +355,50 @@ describe('M.setup', function()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     local joined = table.concat(lines, '\n')
     assert_true(joined:find('sse.event raw event=session.event string=plain text session event', 1, true) ~= nil)
+  end)
+
+  it('keeps raw host and session trace payloads out of DEBUG file logging', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({ auto_create_session = false, notify = false, file_log_level = 'DEBUG' })
+    local events = require('copilot_agent.events')
+    local encode_json = (vim.json and vim.json.encode) or vim.fn.json_encode
+
+    events.handle_host_event('host.session_attached', {
+      data = {
+        sessionId = 'session-trace-debug',
+      },
+    })
+    agent.state.sse_event = {
+      event = 'session.event',
+      data = {
+        encode_json({
+          type = 'assistant.message',
+          data = {
+            messageId = 'assistant-debug-trace',
+            content = 'hello',
+          },
+        }),
+      },
+    }
+    events.flush_sse_event()
+
+    vim.fn.stdpath = original_stdpath
+
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('host.event received event=host.session_attached', 1, true) == nil)
+    assert_true(joined:find('sse.event raw event=session.event', 1, true) == nil)
+    assert_true(joined:find('session.event received type=assistant.message', 1, true) == nil)
+    assert_true(joined:find('assistant.message preserving stream start', 1, true) ~= nil)
   end)
 end)
 
@@ -902,6 +981,60 @@ describe('model state sync', function()
     })
   end)
 
+  it('shows reasoning preview by default when reasoning deltas arrive', function()
+    agent.state.config.chat.reasoning.enabled = nil
+    agent.open_chat()
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-auto-reasoning',
+        deltaContent = 'one\ntwo',
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+  end)
+
+  it('clears the reasoning preview as soon as assistant output starts', function()
+    agent.open_chat()
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-reasoning-clear',
+        deltaContent = 'step one\nstep two',
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-reasoning-clear',
+        deltaContent = 'final answer',
+      },
+    })
+
+    vim.wait(200)
+
+    extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(0, #extmarks)
+
+    local reasoning = agent.get_reasoning()
+    assert_false(reasoning.active)
+    assert_eq('', reasoning.text)
+  end)
+
   it('renders only the active shell command in chat virtual lines', function()
     agent.open_chat()
 
@@ -932,11 +1065,11 @@ describe('model state sync', function()
     assert_eq(1, #extmarks)
 
     local virt_lines = extmarks[1][4].virt_lines or {}
-    local preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
+    assert_eq(1, #virt_lines[1])
+    assert_eq('  Activity: 🔧 bash', virt_line_text(virt_lines[1]))
+    local preview = trimmed_virt_lines(virt_lines)
 
-    assert_eq('  Activity: 🔧 bash', preview[1])
+    assert_eq('Activity: 🔧 bash', preview[1])
     assert_eq(nil, preview[2])
 
     events.handle_session_event({
@@ -958,7 +1091,7 @@ describe('model state sync', function()
     extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(1, #extmarks)
 
-    vim.wait(1100)
+    vim.wait(3200)
     extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(0, #extmarks)
   end)
@@ -992,11 +1125,10 @@ describe('model state sync', function()
     assert_eq(1, #extmarks)
 
     local virt_lines = extmarks[1][4].virt_lines or {}
-    local preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
+    local preview = trimmed_virt_lines(virt_lines)
 
-    assert_eq('  Activity: 🔧 bash — python scripts/build.py --target test', preview[1])
+    assert_true(#preview >= 2)
+    assert_eq('Activity: 🔧 bash — python scripts/build.py --target test', table.concat(preview, ' '))
 
     events.handle_session_event({
       type = 'tool.execution_complete',
@@ -1007,12 +1139,11 @@ describe('model state sync', function()
     extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(1, #extmarks)
     virt_lines = extmarks[1][4].virt_lines or {}
-    preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
-    assert_eq('  Activity: 🔧 bash — python scripts/build.py --target test', preview[1])
+    preview = trimmed_virt_lines(virt_lines)
+    assert_true(#preview >= 2)
+    assert_eq('Activity: 🔧 bash — python scripts/build.py --target test', table.concat(preview, ' '))
 
-    vim.wait(1100)
+    vim.wait(3200)
     extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(0, #extmarks)
   end)
@@ -1036,11 +1167,9 @@ describe('model state sync', function()
     assert_eq(1, #extmarks)
 
     local virt_lines = extmarks[1][4].virt_lines or {}
-    local preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
+    local preview = trimmed_virt_lines(virt_lines)
 
-    assert_eq('  Activity: 🔧 bash — git diff --name-only', preview[1])
+    assert_eq('Activity: 🔧 bash — git diff --name-only', preview[1])
   end)
 
   it('uses nested shell command fields from tool.execution_start when flat fields are unavailable', function()
@@ -1064,11 +1193,9 @@ describe('model state sync', function()
     assert_eq(1, #extmarks)
 
     local virt_lines = extmarks[1][4].virt_lines or {}
-    local preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
+    local preview = trimmed_virt_lines(virt_lines)
 
-    assert_eq('  Activity: 🔧 bash — git status --short', preview[1])
+    assert_eq('Activity: 🔧 bash — git status --short', preview[1])
   end)
 
   it('uses nested shell permission details when fullCommandText is unavailable', function()
@@ -1103,11 +1230,10 @@ describe('model state sync', function()
     assert_eq(1, #extmarks)
 
     local virt_lines = extmarks[1][4].virt_lines or {}
-    local preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
+    local preview = trimmed_virt_lines(virt_lines)
 
-    assert_eq('  Activity: 🔧 bash — python scripts/build.py --target test', preview[1])
+    assert_true(#preview >= 2)
+    assert_eq('Activity: 🔧 bash — python scripts/build.py --target test', table.concat(preview, ' '))
   end)
 
   it('does not show internal tools like sql in activity virtual lines without meaningful details', function()
@@ -1180,10 +1306,8 @@ describe('model state sync', function()
     local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(1, #extmarks)
     local virt_lines = extmarks[1][4].virt_lines or {}
-    local preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
-    assert_eq('  Activity: 🔧 bash — python scripts/task4.py', preview[1])
+    local preview = trimmed_virt_lines(virt_lines)
+    assert_eq('Activity: 🔧 bash — python scripts/task4.py', preview[1])
 
     events.handle_session_event({
       type = 'tool.execution_complete',
@@ -1212,10 +1336,8 @@ describe('model state sync', function()
     extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(1, #extmarks)
     virt_lines = extmarks[1][4].virt_lines or {}
-    preview = vim.tbl_map(function(virt_line)
-      return virt_line[1][1]
-    end, virt_lines)
-    assert_eq('  Activity: 🔧 bash — python scripts/task5.py', preview[1])
+    preview = trimmed_virt_lines(virt_lines)
+    assert_eq('Activity: 🔧 bash — python scripts/task5.py', preview[1])
   end)
 
   it('logs reasoning delta activity when DEBUG file logging is enabled', function()
@@ -1451,19 +1573,20 @@ describe('model state sync', function()
     assert_eq(final, entry.content)
   end)
 
-  it('anchors activity virtual text to the bottom of the visible chat window', function()
+  it('keeps activity virtual text visible in a bottom gutter below the transcript', function()
     local render = require('copilot_agent.render')
     agent.open_chat()
 
     local bufnr = agent.state.chat_bufnr
     local winid = agent.state.chat_winid
-    vim.api.nvim_win_set_height(winid, 8)
+    vim.api.nvim_win_set_height(winid, 12)
 
     for idx = 1, 12 do
       render.append_entry('assistant', 'history line ' .. idx)
     end
     render.render_chat()
     render.scroll_to_bottom()
+    local before = vim.fn.getwininfo(winid)[1]
 
     events.handle_session_event({
       type = 'tool.execution_start',
@@ -1481,8 +1604,222 @@ describe('model state sync', function()
     assert_eq(1, #extmarks)
 
     local info = vim.fn.getwininfo(winid)[1]
-    assert_eq(info.botline, extmarks[1][2])
-    assert_true(extmarks[1][4].virt_lines_above)
+    assert_eq(vim.api.nvim_buf_line_count(bufnr) - 1, extmarks[1][2])
+    assert_false(extmarks[1][4].virt_lines_above == true)
+    assert_eq(before.topline + 8, info.topline)
+  end)
+
+  it('reserves overlay gutter when wrapped chat lines consume the visible bottom rows', function()
+    local render = require('copilot_agent.render')
+    agent.open_chat()
+
+    local bufnr = agent.state.chat_bufnr
+    local winid = agent.state.chat_winid
+    vim.api.nvim_win_set_height(winid, 12)
+    vim.api.nvim_win_set_width(winid, 30)
+
+    local long_line = string.rep('wrapped chat output ', 6)
+    for idx = 1, 6 do
+      render.append_entry('assistant', long_line .. idx)
+    end
+    render.render_chat()
+    render.scroll_to_bottom()
+    vim.wait(120)
+
+    local line_count = vim.api.nvim_buf_line_count(bufnr)
+    local win_height = vim.api.nvim_win_get_height(winid)
+    local before = vim.fn.getwininfo(winid)[1]
+    local before_height = vim.api.nvim_win_text_height(winid, {
+      start_row = before.topline - 1,
+      end_row = line_count - 1,
+    })
+    assert_true(before_height.all <= win_height)
+    assert_true(before_height.all > win_height - 5)
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'wrapped-overlay',
+        deltaContent = 'one\ntwo\nthree',
+      },
+    })
+
+    vim.wait(500)
+
+    local after = vim.fn.getwininfo(winid)[1]
+    local after_height = vim.api.nvim_win_text_height(winid, {
+      start_row = after.topline - 1,
+      end_row = line_count - 1,
+    })
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+    assert_true(after.topline > before.topline)
+    assert_true(after_height.all <= win_height - 5)
+  end)
+
+  it('keeps real spacer lines after transcript content while reasoning overlay is active', function()
+    local render = require('copilot_agent.render')
+    agent.open_chat()
+    render.render_chat()
+
+    local bufnr = agent.state.chat_bufnr
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'spacer-lines',
+        deltaContent = 'one\ntwo\nthree',
+      },
+    })
+
+    vim.wait(500)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq(3, agent.state.chat_tail_spacer_lines)
+    assert_eq('', lines[#lines])
+    assert_eq('', lines[#lines - 1])
+    assert_eq('', lines[#lines - 2])
+
+    local assistant_idx = render.append_entry('assistant', '')
+    local assistant_entry = agent.state.entries[assistant_idx]
+    assistant_entry.content = table.concat({
+      'line a',
+      'line b',
+      'line c',
+      'line d',
+    }, '\n')
+    render.stream_update(assistant_entry, assistant_idx)
+
+    vim.wait(200)
+
+    lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq(3, agent.state.chat_tail_spacer_lines)
+    assert_eq('', lines[#lines])
+    assert_eq('', lines[#lines - 1])
+    assert_eq('', lines[#lines - 2])
+    assert_true(table.concat(lines, '\n'):find('line d', 1, true) ~= nil)
+    local with_spacers_count = vim.api.nvim_buf_line_count(bufnr)
+
+    render.clear_reasoning_preview('test')
+    vim.wait(300)
+
+    assert_eq(0, agent.state.chat_tail_spacer_lines)
+    assert_eq(with_spacers_count - 3, vim.api.nvim_buf_line_count(bufnr))
+  end)
+
+  it('scrolls live output to reveal overlay virtual text even when follow is paused', function()
+    local render = require('copilot_agent.render')
+    agent.open_chat()
+
+    local bufnr = agent.state.chat_bufnr
+    local winid = agent.state.chat_winid
+    vim.api.nvim_win_set_height(winid, 12)
+
+    for idx = 1, 20 do
+      render.append_entry('assistant', 'history line ' .. idx)
+    end
+    render.render_chat()
+    vim.api.nvim_win_call(winid, function()
+      vim.fn.winrestview({ topline = 1 })
+    end)
+    agent.state.chat_auto_scroll_enabled = false
+
+    local prompt_idx = render.append_entry('user', 'prompt')
+    agent.state.session_id = 'overlay-scroll'
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'overlay-scroll',
+      prompt = 'prompt',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'git',
+        arguments = { 'status', '--short' },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'overlay-scroll-message',
+        deltaContent = 'one\ntwo\nthree',
+      },
+    })
+
+    vim.wait(500)
+
+    local view = vim.fn.getwininfo(winid)[1]
+    assert_true(view.topline > 1)
+    assert_eq(vim.api.nvim_buf_line_count(bufnr), view.botline)
+
+    local assistant_idx = render.append_entry('assistant', '')
+    local assistant_entry = agent.state.entries[assistant_idx]
+    assistant_entry.content = table.concat({
+      'line a',
+      'line b',
+      'line c',
+      'line d',
+      'line e',
+      'line f',
+    }, '\n')
+    render.stream_update(assistant_entry, assistant_idx)
+    vim.wait(200)
+
+    local streamed_view = vim.fn.getwininfo(winid)[1]
+    assert_true(streamed_view.topline > view.topline)
+    assert_eq(vim.api.nvim_buf_line_count(bufnr), streamed_view.botline)
+  end)
+
+  it('restores the previous manual chat view after the reasoning overlay clears', function()
+    local render = require('copilot_agent.render')
+    agent.open_chat()
+
+    local bufnr = agent.state.chat_bufnr
+    local winid = agent.state.chat_winid
+    vim.api.nvim_win_set_height(winid, 12)
+
+    for idx = 1, 20 do
+      render.append_entry('assistant', 'history line ' .. idx)
+    end
+    render.render_chat()
+    vim.api.nvim_win_call(winid, function()
+      vim.fn.winrestview({ topline = 1 })
+    end)
+    agent.state.chat_auto_scroll_enabled = false
+
+    local before = vim.fn.getwininfo(winid)[1]
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'reasoning-restore',
+        deltaContent = 'one\ntwo\nthree',
+      },
+    })
+
+    vim.wait(500)
+
+    local shifted = vim.fn.getwininfo(winid)[1]
+    assert_true(shifted.topline > before.topline)
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'reasoning-restore',
+        deltaContent = 'final answer',
+      },
+    })
+
+    vim.wait(300)
+
+    local restored = vim.fn.getwininfo(winid)[1]
+    assert_eq(before.topline, restored.topline)
+    extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
+    assert_eq(0, #extmarks)
   end)
 
   it('deduplicates the thinking spinner and keeps it anchored before message ids arrive', function()
@@ -4176,6 +4513,7 @@ describe('chat input behavior', function()
     assert_eq('Second turn summary.', assistant_entries[2].content)
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local transcript_end = #lines - (agent.state.chat_tail_spacer_lines or 0)
     assert.same({
       'Assistant:',
       '  First turn summary.',
@@ -4183,7 +4521,7 @@ describe('chat input behavior', function()
       'Assistant:',
       '  Second turn summary.',
       '',
-    }, { unpack(lines, #lines - 5, #lines) })
+    }, { unpack(lines, transcript_end - 5, transcript_end) })
   end)
 
   it('starts streamed assistant output in a fresh block after assistant.turn_end', function()
@@ -4925,6 +5263,114 @@ describe('chat input behavior', function()
     view = vim.fn.getwininfo(winid)[1]
     assert_eq(anchor_row + 1 + 4, view.topline)
 
+    vim.api.nvim_win_get_height = original_get_height
+    agent.state.chat_bufnr = original_chat_bufnr
+    agent.state.chat_winid = original_chat_winid
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+  end)
+
+  it('counts overlay virtual lines and spacer tail when deciding half-page conversation follow', function()
+    local render = require('copilot_agent.render')
+    local events = require('copilot_agent.events')
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    local winid = vim.api.nvim_get_current_win()
+    local original_chat_bufnr = agent.state.chat_bufnr
+    local original_chat_winid = agent.state.chat_winid
+    local original_get_height = vim.api.nvim_win_get_height
+
+    agent.state.history_loading = false
+    agent.state.chat_bufnr = bufnr
+    agent.state.chat_winid = winid
+    agent.state.entries = {
+      {
+        kind = 'assistant',
+        content = table.concat({
+          'old line 1',
+          'old line 2',
+          'old line 3',
+          'old line 4',
+          'old line 5',
+          'old line 6',
+        }, '\n'),
+      },
+    }
+    agent.state.entry_row_index = {}
+    agent.state.active_conversation_entry_index = nil
+    agent.state.chat_follow_topline = nil
+    agent.state.chat_auto_scroll_enabled = true
+    agent.state.chat_scroll_guard = 0
+    agent.state.chat_tail_spacer_lines = 0
+    agent.state.reasoning_text = ''
+    agent.state.reasoning_lines = {}
+    vim.api.nvim_win_set_buf(winid, bufnr)
+    vim.api.nvim_win_get_height = function(target_winid)
+      if target_winid == winid then
+        return 12
+      end
+      return original_get_height(target_winid)
+    end
+
+    render.reset_frozen_render()
+    render.render_chat()
+    render.scroll_to_bottom()
+    vim.api.nvim_win_set_cursor(winid, { vim.api.nvim_buf_line_count(bufnr), 0 })
+
+    local prompt_idx = render.append_entry('user', 'overlay follow')
+    local anchor_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == prompt_idx then
+        anchor_row = row
+        break
+      end
+    end
+    assert_not_nil(anchor_row)
+
+    local view = vim.fn.getwininfo(winid)[1]
+    assert_eq(anchor_row + 1, view.topline)
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'overlay-follow',
+        deltaContent = 'step one\nstep two',
+      },
+    })
+
+    vim.wait(500)
+
+    assert_eq(3, agent.state.chat_tail_spacer_lines)
+    local assistant_idx = agent.state.active_turn_assistant_index
+    assert_not_nil(assistant_idx)
+    local assistant_entry = agent.state.entries[assistant_idx]
+    assistant_entry.content = table.concat({
+      'line a',
+      'line b',
+      'line c',
+      'line d',
+    }, '\n')
+    render.stream_update(assistant_entry, assistant_idx)
+
+    vim.wait(200)
+
+    view = vim.fn.getwininfo(winid)[1]
+    assert_true(view.topline > anchor_row + 1)
+
+    agent.state.chat_busy = false
+    agent.state.stream_line_start = nil
+    agent.state.active_turn_assistant_index = nil
+    agent.state.live_assistant_entry_index = nil
+    agent.state.active_turn_assistant_message_id = nil
+    agent.state.active_assistant_merge_group = nil
+    agent.state.reasoning_entry_key = nil
+    agent.state.reasoning_text = ''
+    agent.state.reasoning_lines = {}
+    agent.state.chat_tail_spacer_lines = 0
+    agent.state.overlay_tool_display = nil
+    agent.state.active_tool = nil
+    agent.state.active_tool_run_id = nil
+    agent.state.active_tool_detail = nil
+    agent.state.pending_tool_detail = nil
+    agent.state._rendered_line_count = nil
     vim.api.nvim_win_get_height = original_get_height
     agent.state.chat_bufnr = original_chat_bufnr
     agent.state.chat_winid = original_chat_winid

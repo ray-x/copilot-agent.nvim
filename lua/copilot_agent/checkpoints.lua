@@ -491,6 +491,9 @@ local function apply_snapshot(snapshot)
   state.recent_activity_lines = {}
   state.recent_activity_items = {}
   state.recent_activity_tool_calls = {}
+  state.overlay_gutter_restore_view = nil
+  state.chat_tail_spacer_lines = 0
+  state._rendered_line_count = nil
   state.active_turn_assistant_index = nil
   state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil

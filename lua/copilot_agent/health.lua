@@ -8,10 +8,10 @@ local M = {}
 local function check_neovim_version()
   vim.health.start('Neovim version')
   local version = vim.version()
-  if version.major > 0 or version.minor >= 10 then
-    vim.health.ok(string.format('Neovim %d.%d.%d (>= 0.10 required)', version.major, version.minor, version.patch))
+  if version.major > 0 or version.minor >= 11 then
+    vim.health.ok(string.format('Neovim %d.%d.%d (>= 0.11 required)', version.major, version.minor, version.patch))
   else
-    vim.health.error(string.format('Neovim %d.%d.%d detected — version 0.10+ is required', version.major, version.minor, version.patch))
+    vim.health.error(string.format('Neovim %d.%d.%d detected — version 0.11+ is required', version.major, version.minor, version.patch))
   end
 end
 

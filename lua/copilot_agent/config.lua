@@ -15,7 +15,7 @@ local defaults = {
   permission_mode = 'approve-all',
   auto_create_session = true,
   notify = true,
-  file_log_level = 'WARN', -- DEBUG logs full HTTP/SSE payloads + transform decisions to stdpath('log')/copilot_agent.log
+  file_log_level = 'WARN', -- TRACE logs raw host/session payloads; DEBUG logs plugin actions + HTTP details to stdpath('log')/copilot_agent.log
   log_content_length = 1000, -- max content length to include in logs (0 for unlimited, default 1000)
   service = {
     auto_start = false,
@@ -54,8 +54,10 @@ local defaults = {
     protect_markdown_buffer = true,
     -- Live-only reasoning preview sourced from assistant.reasoning_delta events.
     -- This is transient UI state: it is not written into the transcript/history.
+    -- By default it appears automatically when reasoning deltas arrive; set
+    -- enabled = false to suppress it explicitly.
     reasoning = {
-      enabled = false,
+      enabled = true,
       max_lines = 5,
     },
     -- File picker to use when attaching files/folders from <C-a>.
@@ -148,6 +150,8 @@ local state = {
   chat_follow_topline = nil, -- last auto-managed topline for current conversation follow mode
   chat_auto_scroll_enabled = true, -- false after the user scrolls away from the live conversation; re-enabled at bottom
   chat_scroll_guard = 0, -- suppresses WinScrolled reactions for programmatic transcript scrolling
+  chat_tail_spacer_lines = 0, -- real blank lines kept after transcript content while live overlay text is visible
+  overlay_gutter_restore_view = nil, -- saved manual chat view to restore after temporary overlay gutter scrolling
   pending_checkpoint_turn = nil, -- active turn waiting for a completed-turn checkpoint label
   history_loading = false, -- true while replaying SSE history; suppresses render until done
   history_checkpoint_ids = nil, -- replay mapping keyed by assistant message id for completed turns

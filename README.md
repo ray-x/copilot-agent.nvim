@@ -256,7 +256,7 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         auto_open = true,                -- show the Copilot Agent dashboard on empty startup
       },
       notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
-      file_log_level = "WARN",  -- DEBUG | INFO | WARN | ERROR; DEBUG logs HTTP/SSE payloads, plugin actions, and transform decisions to stdpath("log") .. "/copilot_agent.log"
+      file_log_level = "WARN",  -- TRACE | DEBUG | INFO | WARN | ERROR; TRACE logs raw host/session payloads, DEBUG logs plugin actions and HTTP details to stdpath("log") .. "/copilot_agent.log"
     })
     -- Start the combined HTTP + LSP service.
     -- Called automatically by CopilotAgentChat / CopilotAgentAsk if auto_start = true.

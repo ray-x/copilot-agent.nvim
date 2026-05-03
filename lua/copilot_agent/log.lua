@@ -9,6 +9,7 @@ local plugin_root = module_path and vim.fn.fnamemodify(module_path, ':h:h:h') or
 local M = {}
 
 local _log_levels = {
+  TRACE = vim.log.levels.TRACE,
   DEBUG = vim.log.levels.DEBUG,
   INFO = vim.log.levels.INFO,
   WARN = vim.log.levels.WARN,
@@ -23,7 +24,7 @@ function M.log_path()
   return vim.fn.stdpath('log') .. '/copilot_agent.log'
 end
 
-local function resolve_file_log_level(value)
+function M.resolve_log_level(value)
   if type(value) == 'number' then
     return value
   end
@@ -34,7 +35,7 @@ local function resolve_file_log_level(value)
 end
 
 function M.should_log(level)
-  local configured_level = resolve_file_log_level(current_config().file_log_level) or vim.log.levels.WARN
+  local configured_level = M.resolve_log_level(current_config().file_log_level) or vim.log.levels.WARN
   level = level or vim.log.levels.INFO
   return level >= configured_level
 end
@@ -100,12 +101,13 @@ function M.log(message, level)
   end
 
   local prefix = ({
+    [vim.log.levels.TRACE] = 'TRACE',
     [vim.log.levels.DEBUG] = 'DEBUG',
     [vim.log.levels.INFO] = 'INFO',
     [vim.log.levels.WARN] = 'WARN',
     [vim.log.levels.ERROR] = 'ERROR',
   })[level or vim.log.levels.INFO] or 'INFO'
-  local caller = level == vim.log.levels.DEBUG and resolve_log_caller() or nil
+  local caller = (level == vim.log.levels.TRACE or level == vim.log.levels.DEBUG) and resolve_log_caller() or nil
   local line
   if caller then
     line = string.format('%s [%s] %s %s\n', os.date('%Y-%m-%d %H:%M:%S'), prefix, caller, tostring(message))

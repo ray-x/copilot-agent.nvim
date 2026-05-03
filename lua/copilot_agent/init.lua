@@ -70,6 +70,9 @@ function M.setup(opts)
   state.activity_entries_visible = false
   state.current_intent = nil
   state.background_tasks = {}
+  state.overlay_gutter_restore_view = nil
+  state.chat_tail_spacer_lines = 0
+  state._rendered_line_count = nil
   state.reasoning_entry_key = nil
   state.reasoning_text = ''
   state.reasoning_lines = {}

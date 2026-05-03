@@ -42,6 +42,8 @@ local STREAM_DEBOUNCE_MS = 80
 local REASONING_DEBOUNCE_MS = 80
 local SPINNER_INTERVAL_MS = 500
 local CHAT_SCROLL_GUARD_MS = 80
+local OVERLAY_BOTTOM_GUTTER_MIN_LINES = 5
+local OVERLAY_TAIL_SPACER_LINES = 3
 
 local split_lines = utils.split_lines
 
@@ -54,7 +56,12 @@ end
 
 local function reasoning_config()
   local reasoning = (((state.config or {}).chat or {}).reasoning or {})
-  local enabled = reasoning.enabled == true
+  local enabled
+  if reasoning.enabled == nil then
+    enabled = #(state.reasoning_lines or {}) > 0 or (type(state.reasoning_effort) == 'string' and state.reasoning_effort ~= '')
+  else
+    enabled = reasoning.enabled == true
+  end
   local max_lines = tonumber(reasoning.max_lines) or 5
   max_lines = math.max(1, math.min(20, math.floor(max_lines)))
   return enabled, max_lines
@@ -236,7 +243,7 @@ end
 
 local function reasoning_virtual_lines(task_lines, reasoning_lines)
   local virt_lines = {}
-  append_overlay_section(virt_lines, task_lines, '  Activity: ', '            ', 'CopilotAgentActivity', true)
+  append_overlay_section(virt_lines, task_lines, '  Activity: ', '            ', 'CopilotAgentActivity', false)
   append_overlay_section(virt_lines, reasoning_lines, '  Reasoning: ', '             ', 'CopilotAgentReasoning', false)
   return virt_lines
 end
@@ -264,39 +271,176 @@ local function overlay_anchor(bufnr)
   return math.max(line_count - 1, 0), false
 end
 
-local function update_reasoning_overlay_now()
-  clear_reasoning_overlay()
+local chat_view_log_summary
 
-  local enabled, max_lines = reasoning_config()
-  if not enabled or state.history_loading then
-    log(string.format('reasoning overlay skipped enabled=%s history_loading=%s', tostring(enabled), tostring(state.history_loading)), vim.log.levels.DEBUG)
+local function overlay_tail_spacer_lines()
+  return math.max(0, math.floor(tonumber(state.chat_tail_spacer_lines) or 0))
+end
+
+local function append_blank_lines(lines, count)
+  count = math.max(0, math.floor(tonumber(count) or 0))
+  for _ = 1, count do
+    lines[#lines + 1] = ''
+  end
+end
+
+local function rendered_content_line_count(bufnr)
+  local rendered = tonumber(state._rendered_line_count)
+  if rendered ~= nil then
+    rendered = math.max(0, math.floor(rendered))
+    if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+      return math.min(rendered, vim.api.nvim_buf_line_count(bufnr))
+    end
+    return rendered
+  end
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    return math.max(0, vim.api.nvim_buf_line_count(bufnr) - overlay_tail_spacer_lines())
+  end
+  return 0
+end
+
+local function sync_chat_tail_spacer_lines(bufnr, desired_count)
+  local previous_count = overlay_tail_spacer_lines()
+  desired_count = math.max(0, math.floor(tonumber(desired_count) or 0))
+  state.chat_tail_spacer_lines = desired_count
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
 
+  local content_end = rendered_content_line_count(bufnr)
+  local spacer_lines = {}
+  append_blank_lines(spacer_lines, desired_count)
+
+  vim.bo[bufnr].modifiable = true
+  vim.bo[bufnr].readonly = false
+  vim.api.nvim_buf_set_lines(bufnr, content_end, -1, false, spacer_lines)
+  vim.bo[bufnr].modifiable = false
+  vim.bo[bufnr].readonly = true
+  vim.bo[bufnr].modified = false
+  if previous_count ~= desired_count then
+    log(
+      string.format(
+        'reasoning overlay tail spacers updated previous=%d current=%d content_end=%d line_count=%d %s',
+        previous_count,
+        desired_count,
+        content_end,
+        vim.api.nvim_buf_line_count(bufnr),
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
+  end
+end
+
+chat_view_log_summary = function()
+  local winid = state.chat_winid
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return 'view=<invalid>'
+  end
+  local info = vim.fn.getwininfo(winid)
+  local view = info and info[1] or nil
+  if not view then
+    return 'view=<unknown>'
+  end
+  return string.format('top=%s bot=%s height=%s', tostring(view.topline), tostring(view.botline), tostring(view.height))
+end
+
+local function update_reasoning_overlay_now()
   local bufnr = state.chat_bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    -- log('reasoning overlay skipped chat buffer unavailable', vim.log.levels.DEBUG)
+    log(
+      string.format(
+        'reasoning overlay skipped chat buffer unavailable bufnr=%s winid=%s text_len=%d stored_lines=%d',
+        tostring(bufnr),
+        tostring(state.chat_winid),
+        #(state.reasoning_text or ''),
+        #(state.reasoning_lines or {})
+      ),
+      vim.log.levels.DEBUG
+    )
+    return
+  end
+
+  local had_overlay = #vim.api.nvim_buf_get_extmarks(bufnr, REASONING_NS, 0, -1, { limit = 1 }) > 0
+  clear_reasoning_overlay()
+
+  local enabled, max_lines = reasoning_config()
+  if state.history_loading then
+    log(
+      string.format(
+        'reasoning overlay skipped enabled=%s history_loading=%s text_len=%d stored_lines=%d %s',
+        tostring(enabled),
+        tostring(state.history_loading),
+        #(state.reasoning_text or ''),
+        #(state.reasoning_lines or {}),
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
     return
   end
 
   local task_lines = activity_overlay_lines(max_lines)
-  local reasoning_lines = M.reasoning_lines(max_lines)
+  local reasoning_lines = enabled and M.reasoning_lines(max_lines) or {}
   if #task_lines == 0 and #reasoning_lines == 0 then
-    -- log('reasoning overlay skipped no activity or reasoning lines available', vim.log.levels.DEBUG)
+    sync_chat_tail_spacer_lines(bufnr, 0)
+    if had_overlay then
+      M.release_overlay_gutter()
+    end
+    log(
+      string.format(
+        'reasoning overlay skipped no lines enabled=%s had_overlay=%s text_len=%d stored_lines=%d activity=%d rendered_reasoning=%d %s',
+        tostring(enabled),
+        tostring(had_overlay),
+        #(state.reasoning_text or ''),
+        #(state.reasoning_lines or {}),
+        #task_lines,
+        #reasoning_lines,
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
     return
   end
 
+  sync_chat_tail_spacer_lines(bufnr, state.chat_busy and OVERLAY_TAIL_SPACER_LINES or 0)
+  local padding = M.overlay_bottom_padding(#task_lines, #reasoning_lines)
+  M.reserve_overlay_gutter(#task_lines, #reasoning_lines)
   local anchor_row, anchor_above = overlay_anchor(bufnr)
-  vim.api.nvim_buf_set_extmark(bufnr, REASONING_NS, anchor_row, 0, {
+  local extmark_id = vim.api.nvim_buf_set_extmark(bufnr, REASONING_NS, anchor_row, 0, {
     virt_lines = reasoning_virtual_lines(task_lines, reasoning_lines),
     virt_lines_leftcol = true,
     virt_lines_above = anchor_above,
   })
-  log(string.format('reasoning overlay updated activity=%d reasoning=%d anchor_row=%d above=%s', #task_lines, #reasoning_lines, anchor_row, tostring(anchor_above)), vim.log.levels.DEBUG)
+  log(
+    string.format(
+      'reasoning overlay updated extmark=%s activity=%d reasoning=%d padding=%d anchor_row=%d above=%s text_len=%d stored_lines=%d %s',
+      tostring(extmark_id),
+      #task_lines,
+      #reasoning_lines,
+      padding,
+      anchor_row,
+      tostring(anchor_above),
+      #(state.reasoning_text or ''),
+      #(state.reasoning_lines or {}),
+      chat_view_log_summary()
+    ),
+    vim.log.levels.DEBUG
+  )
 end
 
 function M.refresh_reasoning_overlay(immediate)
   if immediate then
+    log(
+      string.format(
+        'reasoning overlay refresh immediate text_len=%d stored_lines=%d pending=%s %s',
+        #(state.reasoning_text or ''),
+        #(state.reasoning_lines or {}),
+        tostring(reasoning_refresh_pending),
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
     reasoning_timer:stop()
     reasoning_refresh_pending = false
     reasoning_last_refresh_ms = overlay_now_ms()
@@ -307,12 +451,34 @@ function M.refresh_reasoning_overlay(immediate)
   local now = overlay_now_ms()
   local elapsed = now - (reasoning_last_refresh_ms or 0)
   if not reasoning_refresh_pending and (reasoning_last_refresh_ms == 0 or elapsed >= REASONING_DEBOUNCE_MS) then
+    log(
+      string.format(
+        'reasoning overlay refresh scheduled now elapsed=%d text_len=%d stored_lines=%d %s',
+        elapsed,
+        #(state.reasoning_text or ''),
+        #(state.reasoning_lines or {}),
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
     reasoning_last_refresh_ms = now
     vim.schedule(update_reasoning_overlay_now)
     return
   end
 
   local delay = math.max(1, REASONING_DEBOUNCE_MS - elapsed)
+  log(
+    string.format(
+      'reasoning overlay refresh delayed delay=%d elapsed=%d pending=%s text_len=%d stored_lines=%d %s',
+      delay,
+      elapsed,
+      tostring(reasoning_refresh_pending),
+      #(state.reasoning_text or ''),
+      #(state.reasoning_lines or {}),
+      chat_view_log_summary()
+    ),
+    vim.log.levels.DEBUG
+  )
   reasoning_refresh_pending = true
   reasoning_timer:stop()
   reasoning_timer:start(
@@ -328,13 +494,26 @@ end
 
 function M.clear_reasoning_preview(reason)
   local had_reasoning = (state.reasoning_text or '') ~= '' or #(state.reasoning_lines or {}) > 0
+  local previous_key = state.reasoning_entry_key
+  local previous_text_len = #(state.reasoning_text or '')
+  local previous_line_count = #(state.reasoning_lines or {})
   state.reasoning_entry_key = nil
   state.reasoning_text = ''
   state.reasoning_lines = {}
   refresh_statuslines()
   M.refresh_reasoning_overlay(true)
   if had_reasoning then
-    log('reasoning preview cleared (' .. tostring(reason or 'unspecified') .. ')', vim.log.levels.DEBUG)
+    log(
+      string.format(
+        'reasoning preview cleared (%s) key=%s text_len=%d lines=%d %s',
+        tostring(reason or 'unspecified'),
+        tostring(previous_key or '<none>'),
+        previous_text_len,
+        previous_line_count,
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
   end
 end
 
@@ -351,11 +530,12 @@ function M.append_reasoning_delta(entry_key, delta)
   state.reasoning_lines = normalize_reasoning_lines(state.reasoning_text)
   log(
     string.format(
-      'reasoning delta appended key=%s chunk_len=%d total_len=%d lines=%d',
+      'reasoning delta appended key=%s chunk_len=%d total_len=%d lines=%d refresh_pending=%s',
       tostring(state.reasoning_entry_key or '<none>'),
       #delta,
       #(state.reasoning_text or ''),
-      #(state.reasoning_lines or {})
+      #(state.reasoning_lines or {}),
+      tostring(reasoning_refresh_pending)
     ),
     vim.log.levels.DEBUG
   )
@@ -1130,6 +1310,11 @@ end
 
 -- ── Scroll helpers ────────────────────────────────────────────────────────────
 
+local chat_text_height_from_topline
+local chat_view_metrics
+local chat_view_metrics_summary
+local target_topline_for_padding
+
 function M.chat_at_bottom()
   local winid = state.chat_winid
   local bufnr = state.chat_bufnr
@@ -1143,8 +1328,8 @@ function M.chat_at_bottom()
   if not info or not info[1] then
     return false
   end
-  local lc = vim.api.nvim_buf_line_count(bufnr)
-  return info[1].botline >= lc - 3
+  local metrics = chat_view_metrics(winid, bufnr, info[1].topline, 0)
+  return metrics.content_rows <= metrics.visible_height
 end
 
 local function with_programmatic_chat_scroll(callback)
@@ -1191,8 +1376,11 @@ function M.scroll_to_bottom()
     return
   end
   local lc = vim.api.nvim_buf_line_count(bufnr)
-  local win_height = vim.api.nvim_win_get_height(winid)
-  local topline = math.max(1, lc - win_height + 1)
+  local topline, target_metrics = target_topline_for_padding(winid, bufnr, 0, 1)
+  local raw_topline = M.overlay_bottom_topline(lc, vim.api.nvim_win_get_height(winid), 0)
+  if target_metrics and (target_metrics.wrapped_rows > 0 or raw_topline ~= topline) then
+    log(string.format('chat scroll_to_bottom target=%d raw_target=%d %s %s', topline, raw_topline, chat_view_metrics_summary(target_metrics), chat_view_log_summary()), vim.log.levels.DEBUG)
+  end
   set_chat_view(topline, lc)
 end
 
@@ -1203,6 +1391,133 @@ local function current_chat_view()
   end
   local info = vim.fn.getwininfo(winid)
   return info and info[1] or nil
+end
+
+chat_text_height_from_topline = function(winid, bufnr, topline)
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return 0
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return 0
+  end
+
+  local line_count = math.max(1, vim.api.nvim_buf_line_count(bufnr))
+  local start_row = math.max(0, math.min(line_count - 1, math.floor(tonumber(topline) or 1) - 1))
+  local info = vim.api.nvim_win_text_height(winid, {
+    start_row = start_row,
+    end_row = line_count - 1,
+  })
+  if type(info) ~= 'table' or type(info.all) ~= 'number' then
+    error('nvim_win_text_height returned invalid metrics')
+  end
+  return math.max(0, math.floor(info.all + (tonumber(info.fill) or 0)))
+end
+
+chat_view_metrics = function(winid, bufnr, topline, padding)
+  local line_count = math.max(1, vim.api.nvim_buf_line_count(bufnr))
+  local current_topline = math.max(1, math.min(math.floor(tonumber(topline) or 1), line_count))
+  local win_height = math.max(1, vim.api.nvim_win_get_height(winid))
+  padding = math.max(0, math.floor(tonumber(padding) or 0))
+  local visible_height = math.max(1, win_height - padding)
+  local buffer_rows = math.max(0, line_count - current_topline + 1)
+  local content_rows = chat_text_height_from_topline(winid, bufnr, current_topline)
+  return {
+    topline = current_topline,
+    line_count = line_count,
+    win_height = win_height,
+    padding = padding,
+    visible_height = visible_height,
+    content_rows = content_rows,
+    buffer_rows = buffer_rows,
+    spare_rows = win_height - content_rows,
+    wrapped_rows = math.max(0, content_rows - buffer_rows),
+  }
+end
+
+chat_view_metrics_summary = function(metrics)
+  if type(metrics) ~= 'table' then
+    return 'metrics=<nil>'
+  end
+  return string.format(
+    'content_rows=%d visible_rows=%d spare_rows=%d buffer_rows=%d wrapped_rows=%d',
+    math.floor(tonumber(metrics.content_rows) or 0),
+    math.floor(tonumber(metrics.visible_height) or 0),
+    math.floor(tonumber(metrics.spare_rows) or 0),
+    math.floor(tonumber(metrics.buffer_rows) or 0),
+    math.floor(tonumber(metrics.wrapped_rows) or 0)
+  )
+end
+
+target_topline_for_padding = function(winid, bufnr, padding, min_topline)
+  local line_count = math.max(1, vim.api.nvim_buf_line_count(bufnr))
+  local low = math.max(1, math.min(math.floor(tonumber(min_topline) or 1), line_count))
+  local low_metrics = chat_view_metrics(winid, bufnr, low, padding)
+  if low_metrics.content_rows <= low_metrics.visible_height then
+    return low, low_metrics
+  end
+
+  local best = line_count
+  local best_metrics = chat_view_metrics(winid, bufnr, best, padding)
+  local high = line_count
+  while low <= high do
+    local mid = math.floor((low + high) / 2)
+    local metrics = chat_view_metrics(winid, bufnr, mid, padding)
+    if metrics.content_rows <= metrics.visible_height then
+      best = mid
+      best_metrics = metrics
+      high = mid - 1
+    else
+      low = mid + 1
+    end
+  end
+  return best, best_metrics
+end
+
+function M.overlay_bottom_padding(task_line_count, reasoning_line_count)
+  local total = math.max(0, math.floor(tonumber(task_line_count) or 0) + math.floor(tonumber(reasoning_line_count) or 0))
+  if total <= 0 then
+    return 0
+  end
+
+  local winid = state.chat_winid
+  local win_height = (winid and vim.api.nvim_win_is_valid(winid)) and vim.api.nvim_win_get_height(winid) or 0
+  if win_height <= 1 then
+    return total
+  end
+  return math.max(1, math.min(win_height - 1, math.max(OVERLAY_BOTTOM_GUTTER_MIN_LINES, total)))
+end
+
+local function current_overlay_follow_state()
+  local overlay_active = state.chat_busy == true or type(state.overlay_tool_display) == 'table'
+  if not overlay_active then
+    return {
+      task_count = 0,
+      reasoning_count = 0,
+      padding = 0,
+      tail_spacers = 0,
+    }
+  end
+
+  local enabled, max_lines = reasoning_config()
+  local task_lines = activity_overlay_lines(max_lines)
+  local reasoning_lines = enabled and M.reasoning_lines(max_lines) or {}
+  return {
+    task_count = #task_lines,
+    reasoning_count = #reasoning_lines,
+    padding = M.overlay_bottom_padding(#task_lines, #reasoning_lines),
+    tail_spacers = overlay_tail_spacer_lines(),
+  }
+end
+
+function M.overlay_bottom_topline(line_count, win_height, padding)
+  line_count = math.max(1, math.floor(tonumber(line_count) or 1))
+  win_height = math.max(1, math.floor(tonumber(win_height) or 1))
+  padding = math.max(0, math.floor(tonumber(padding) or 0))
+  if padding <= 0 then
+    return math.max(1, line_count - win_height + 1)
+  end
+  local visible_height = math.max(1, win_height - padding)
+  return math.max(1, line_count - visible_height + 1)
 end
 
 local function auto_follow_active_conversation()
@@ -1226,6 +1541,151 @@ local function active_conversation_topline()
     end
   end
   return nil
+end
+
+function M.reserve_overlay_gutter(task_line_count, reasoning_line_count)
+  local winid = state.chat_winid
+  local bufnr = state.chat_bufnr
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  local view = current_chat_view()
+  if not view then
+    return
+  end
+
+  local padding = M.overlay_bottom_padding(task_line_count, reasoning_line_count)
+  if padding <= 0 then
+    return
+  end
+
+  local current_topline = math.max(1, math.floor(tonumber(view.topline) or 1))
+  local current_metrics = chat_view_metrics(winid, bufnr, current_topline, padding)
+  local raw_target_topline = M.overlay_bottom_topline(current_metrics.line_count, current_metrics.win_height, padding)
+  if current_metrics.content_rows <= current_metrics.visible_height then
+    log(
+      string.format(
+        'reasoning overlay gutter unchanged current=%d target=%d raw_target=%d padding=%d line_count=%d %s %s',
+        current_topline,
+        current_topline,
+        raw_target_topline,
+        padding,
+        current_metrics.line_count,
+        chat_view_metrics_summary(current_metrics),
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
+    return
+  end
+
+  local target_topline, target_metrics = target_topline_for_padding(winid, bufnr, padding, current_topline)
+  if target_topline <= current_topline and current_metrics.content_rows > current_metrics.visible_height then
+    log(
+      string.format(
+        'reasoning overlay gutter constrained current=%d target=%d raw_target=%d padding=%d line_count=%d current_%s target_%s %s',
+        current_topline,
+        target_topline,
+        raw_target_topline,
+        padding,
+        current_metrics.line_count,
+        chat_view_metrics_summary(current_metrics),
+        chat_view_metrics_summary(target_metrics),
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
+    return
+  end
+
+  local restore_view = state.overlay_gutter_restore_view
+  if restore_view and (restore_view.winid ~= winid or restore_view.bufnr ~= bufnr) then
+    state.overlay_gutter_restore_view = nil
+    restore_view = nil
+  end
+  if not restore_view and not auto_follow_active_conversation() and not M.chat_at_bottom() then
+    local cursor = vim.api.nvim_win_get_cursor(winid)
+    state.overlay_gutter_restore_view = {
+      winid = winid,
+      bufnr = bufnr,
+      topline = current_topline,
+      cursor_line = (cursor and cursor[1]) or current_topline,
+    }
+    log(
+      string.format(
+        'reasoning overlay gutter saved restore view top=%d cursor=%d %s',
+        state.overlay_gutter_restore_view.topline,
+        state.overlay_gutter_restore_view.cursor_line,
+        chat_view_log_summary()
+      ),
+      vim.log.levels.DEBUG
+    )
+  end
+
+  local step = math.max(1, math.floor(current_metrics.win_height / 2))
+  local next_topline = math.min(target_topline, current_topline + step)
+  local cursor_line = next_topline
+  log(
+    string.format(
+      'reasoning overlay gutter advanced current=%d target=%d next=%d raw_target=%d step=%d padding=%d line_count=%d current_%s target_%s %s',
+      current_topline,
+      target_topline,
+      next_topline,
+      raw_target_topline,
+      step,
+      padding,
+      current_metrics.line_count,
+      chat_view_metrics_summary(current_metrics),
+      chat_view_metrics_summary(target_metrics),
+      chat_view_log_summary()
+    ),
+    vim.log.levels.DEBUG
+  )
+  set_chat_view(next_topline, cursor_line)
+end
+
+function M.release_overlay_gutter()
+  local winid = state.chat_winid
+  local bufnr = state.chat_bufnr
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  if auto_follow_active_conversation() then
+    if state.overlay_gutter_restore_view then
+      log('reasoning overlay gutter dropped saved view because active conversation follow resumed', vim.log.levels.DEBUG)
+      state.overlay_gutter_restore_view = nil
+    end
+    log('reasoning overlay gutter released via active conversation follow', vim.log.levels.DEBUG)
+    M.follow_active_conversation(false)
+    return
+  end
+
+  local restore_view = state.overlay_gutter_restore_view
+  if restore_view then
+    state.overlay_gutter_restore_view = nil
+    if restore_view.winid == winid and restore_view.bufnr == bufnr then
+      log(
+        string.format('reasoning overlay gutter restored saved view top=%d cursor=%d %s', restore_view.topline, restore_view.cursor_line or restore_view.topline, chat_view_log_summary()),
+        vim.log.levels.DEBUG
+      )
+      set_chat_view(restore_view.topline, restore_view.cursor_line or restore_view.topline)
+      return
+    end
+    log('reasoning overlay gutter dropped stale saved view during release', vim.log.levels.DEBUG)
+  end
+
+  if M.chat_at_bottom() then
+    log('reasoning overlay gutter released via scroll_to_bottom', vim.log.levels.DEBUG)
+    M.scroll_to_bottom()
+  end
 end
 
 function M.follow_active_conversation(force)
@@ -1254,11 +1714,54 @@ function M.follow_active_conversation(force)
     return false
   end
 
+  local overlay_state = current_overlay_follow_state()
+  local topline = force and anchor_topline or math.max(anchor_topline, state.chat_follow_topline or anchor_topline)
   local win_height = math.max(1, vim.api.nvim_win_get_height(winid))
   local step = math.max(1, math.floor(win_height / 2))
-  local topline = force and anchor_topline or math.max(anchor_topline, state.chat_follow_topline or anchor_topline)
   local last_line = vim.api.nvim_buf_line_count(bufnr)
-  if last_line > (topline + win_height - 1) then
+  if overlay_state.padding > 0 or overlay_state.tail_spacers > 0 then
+    local current_metrics = chat_view_metrics(winid, bufnr, topline, overlay_state.padding)
+    step = math.max(1, math.floor(current_metrics.win_height / 2))
+    last_line = current_metrics.line_count
+    if current_metrics.content_rows > current_metrics.visible_height then
+      local target_topline, target_metrics = target_topline_for_padding(winid, bufnr, overlay_state.padding, topline)
+      local next_topline = math.min(target_topline, topline + step)
+      if next_topline > topline then
+        log(
+          string.format(
+            'conversation follow advanced current=%d target=%d next=%d step=%d padding=%d tail_spacers=%d activity=%d reasoning=%d current_%s target_%s %s',
+            topline,
+            target_topline,
+            next_topline,
+            step,
+            overlay_state.padding,
+            overlay_state.tail_spacers,
+            overlay_state.task_count,
+            overlay_state.reasoning_count,
+            chat_view_metrics_summary(current_metrics),
+            chat_view_metrics_summary(target_metrics),
+            chat_view_log_summary()
+          ),
+          vim.log.levels.DEBUG
+        )
+        topline = next_topline
+      end
+    else
+      log(
+        string.format(
+          'conversation follow unchanged current=%d padding=%d tail_spacers=%d activity=%d reasoning=%d %s %s',
+          topline,
+          overlay_state.padding,
+          overlay_state.tail_spacers,
+          overlay_state.task_count,
+          overlay_state.reasoning_count,
+          chat_view_metrics_summary(current_metrics),
+          chat_view_log_summary()
+        ),
+        vim.log.levels.DEBUG
+      )
+    end
+  elseif last_line > (topline + win_height - 1) then
     topline = math.min(last_line, topline + step)
   end
 
@@ -1282,6 +1785,11 @@ function M.handle_chat_window_scrolled(winid)
   local view = current_chat_view()
   if not view then
     return
+  end
+
+  if state.overlay_gutter_restore_view then
+    log(string.format('reasoning overlay gutter discarded saved view due to manual scroll new_top=%s new_bot=%s', tostring(view.topline), tostring(view.botline)), vim.log.levels.DEBUG)
+    state.overlay_gutter_restore_view = nil
   end
 
   if M.chat_at_bottom() then
@@ -1405,6 +1913,7 @@ function M.render_chat()
   -- replaced + re-highlighted.
   local frozen_entries = state._frozen_entry_count or 0
   local frozen_lines = state._frozen_line_count or 0
+  local tail_spacer_lines = overlay_tail_spacer_lines()
 
   -- Validate: if entries were removed or the buffer was externally truncated,
   -- fall back to a full render.
@@ -1470,6 +1979,7 @@ function M.render_chat()
   end
 
   local total_lines = frozen_lines + #lines
+  append_blank_lines(lines, tail_spacer_lines)
   -- When actively streaming, preserve stream_line_start so a pending
   -- stream_update replaces the correct region instead of appending after
   -- the full render's output — the root cause of live duplicate lines.
@@ -1489,6 +1999,7 @@ function M.render_chat()
   end
   -- Cache the total rendered line count so incremental updates can use it.
   state._rendered_line_count = total_lines
+  state.chat_tail_spacer_lines = tail_spacer_lines
 
   vim.bo[bufnr].modifiable = true
   vim.bo[bufnr].readonly = false
@@ -1577,7 +2088,7 @@ function M.stream_update(entry, idx)
       if not state.stream_line_start then
         -- First update for this entry: use cached line count or buffer line count
         -- to find where to start appending — avoids a full render_chat().
-        local total = state._rendered_line_count or vim.api.nvim_buf_line_count(bufnr)
+        local total = rendered_content_line_count(bufnr)
         if merge_assistant then
           total = merged_assistant_replace_start(bufnr, total)
         end
@@ -1597,6 +2108,7 @@ function M.stream_update(entry, idx)
       end
 
       local at_bottom = M.chat_at_bottom()
+      local content_end = rendered_content_line_count(bufnr)
       if e.kind == 'assistant' then
         log(
           string.format(
@@ -1613,11 +2125,12 @@ function M.stream_update(entry, idx)
       end
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
-      vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, -1, false, new_lines)
+      vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, content_end, false, new_lines)
       highlight_lines(bufnr, state.stream_line_start, state.stream_line_start + #new_lines)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
       vim.bo[bufnr].modified = false
+      state._rendered_line_count = state.stream_line_start + #new_lines
       local followed = auto_follow_active_conversation() and M.follow_active_conversation(false)
       if not followed and at_bottom then
         M.scroll_to_bottom()
@@ -1678,15 +2191,15 @@ function M.append_entry(kind, content, attachments, opts)
         new_lines = collapse_merged_assistant_lines(new_lines)
       end
       local at_bottom = M.chat_at_bottom()
-      local lc = vim.api.nvim_buf_line_count(bufnr)
-      local insert_start = lc
+      local content_end = rendered_content_line_count(bufnr)
+      local insert_start = content_end
       if merge_assistant then
-        insert_start = merged_assistant_replace_start(bufnr, lc)
+        insert_start = merged_assistant_replace_start(bufnr, content_end)
       end
       state.entry_row_index[insert_start] = idx
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
-      vim.api.nvim_buf_set_lines(bufnr, insert_start, -1, false, new_lines)
+      vim.api.nvim_buf_set_lines(bufnr, insert_start, content_end, false, new_lines)
       highlight_lines(bufnr, insert_start, insert_start + #new_lines)
       vim.bo[bufnr].modifiable = false
       vim.bo[bufnr].readonly = true
@@ -1792,11 +2305,14 @@ function M.clear_transcript()
   state.chat_follow_topline = nil
   state.chat_auto_scroll_enabled = true
   state.chat_scroll_guard = 0
+  state.chat_tail_spacer_lines = 0
+  state.overlay_gutter_restore_view = nil
   state.current_intent = nil
   state.context_tokens = nil
   state.context_limit = nil
   state.history_checkpoint_ids = nil
   state.history_pending_user_entries = {}
+  state._rendered_line_count = nil
   M.reset_frozen_render()
   M.clear_reasoning_preview()
   M.schedule_render()

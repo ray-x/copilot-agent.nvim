@@ -37,6 +37,14 @@ const (
 	defaultModel               = ""
 	defaultClientName          = "neovim-copilot-service"
 	defaultInputTimeout        = 15 * time.Minute
+	httpReadHeaderTimeout      = 10 * time.Second // Long enough for local clients while still rejecting stalled connections promptly.
+	httpShutdownTimeout        = 5 * time.Second  // Allow in-flight HTTP requests a brief grace period during service shutdown.
+	sseKeepAliveInterval       = 15 * time.Second // Keep reverse proxies and clients from treating idle event streams as dead.
+	sseSubscriberBufferSize    = 64               // Absorb short bursts of session events before dropping updates for slow subscribers.
+	asyncResultChannelSize     = 1                // Each pending prompt/permission only needs to hold a single terminal response.
+	permissionRequestIDPrefix  = "perm"
+	userInputRequestIDPrefix   = "input"
+	sessionIDPrefix            = "nvim"
 )
 
 type createSessionRequest struct {
@@ -316,12 +324,12 @@ func main() {
 
 	server := &http.Server{
 		Handler:           withCORS(loggingMiddleware(mux)),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("shutdown HTTP server: %v", err)
@@ -817,7 +825,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	keepAlive := time.NewTicker(15 * time.Second)
+	keepAlive := time.NewTicker(sseKeepAliveInterval)
 	defer keepAlive.Stop()
 
 	for {
@@ -1125,11 +1133,11 @@ func (m *managedSession) handlePermissionRequest(req copilot.PermissionRequest, 
 	case permissionModeInteractive:
 		pending := &pendingPermission{
 			view: pendingPermissionView{
-				ID:        fmt.Sprintf("perm-%d", time.Now().UnixNano()),
+				ID:        fmt.Sprintf("%s-%d", permissionRequestIDPrefix, time.Now().UnixNano()),
 				Request:   req,
 				CreatedAt: time.Now().UTC(),
 			},
-			resultCh: make(chan permissionResult, 1),
+			resultCh: make(chan permissionResult, asyncResultChannelSize),
 		}
 		m.pendingPermissionsMu.Lock()
 		m.pendingPermissions[pending.view.ID] = pending
@@ -1188,13 +1196,13 @@ func (m *managedSession) handleUserInputRequest(req copilot.UserInputRequest, in
 
 	pending := &pendingUserInput{
 		view: pendingUserInputView{
-			ID:            fmt.Sprintf("input-%d", time.Now().UnixNano()),
+			ID:            fmt.Sprintf("%s-%d", userInputRequestIDPrefix, time.Now().UnixNano()),
 			Question:      req.Question,
 			Choices:       req.Choices,
 			AllowFreeform: boolOrDefault(req.AllowFreeform, true),
 			CreatedAt:     time.Now().UTC(),
 		},
-		resultCh: make(chan userInputResult, 1),
+		resultCh: make(chan userInputResult, asyncResultChannelSize),
 	}
 
 	m.pendingInputsMu.Lock()
@@ -1541,7 +1549,7 @@ func (m *managedSession) pendingUserInputsSnapshot() []pendingUserInputView {
 }
 
 func (m *managedSession) subscribe() chan sseMessage {
-	ch := make(chan sseMessage, 64)
+	ch := make(chan sseMessage, sseSubscriberBufferSize)
 	m.subscribersMu.Lock()
 	m.subscribers[ch] = struct{}{}
 	m.subscribersMu.Unlock()
@@ -1911,5 +1919,5 @@ func isValidPermissionMode(value string) bool {
 }
 
 func newSessionID() string {
-	return fmt.Sprintf("nvim-%d", time.Now().UnixNano())
+	return fmt.Sprintf("%s-%d", sessionIDPrefix, time.Now().UnixNano())
 }

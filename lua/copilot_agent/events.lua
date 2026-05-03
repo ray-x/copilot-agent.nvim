@@ -52,7 +52,21 @@ local M = {}
 local active_prompt_id = nil
 local queued_prompt_requests = {}
 local queued_prompt_request_ids = {}
-local prompt_handoff_delay_ms = 20
+local PROMPT_HANDOFF_DELAY_MS = 20 -- Give the current picker one event-loop tick to close before showing the next queued prompt.
+local LOG_PREVIEW_MIN_CHARS = 16 -- Keep log previews readable even when callers request very small snippets.
+local DELTA_BOUNDARY_CONTEXT_CHARS = 24 -- Inspect roughly one short word of context on each side when debugging streamed joins.
+local DELTA_BOUNDARY_PREVIEW_CHARS = 40 -- Keep boundary diagnostics compact enough to fit on a single log line.
+local NEAR_PREFIX_MIN_CHARS = 24 -- Require a meaningful shared prefix before replacing an assistant message with a near-match payload.
+local NEAR_PREFIX_MATCH_RATIO = 0.35 -- Treat messages as near-prefix variants only when they share at least 35% of the shorter canonicalized text.
+local TRACE_LOG_MAX_CHARS = 3200 -- Large raw event traces are useful for debugging, but still need an upper bound for log files.
+local TRACE_LOG_DEPTH = 8 -- Deep enough to inspect nested SDK payloads without exploding trace output.
+local ERROR_LOG_MAX_CHARS = 1200 -- Error payloads need more context than routine logs, but should still stay concise.
+local REASONING_ID_MAX_CHARS = 32 -- Reasoning IDs are only diagnostic breadcrumbs, so a short fixed-width prefix is enough in logs.
+local DIFF_FLOAT_WIDTH_RATIO = 0.8 -- Use most of the editor width so diffs stay readable without fully covering the workspace.
+local DIFF_FLOAT_HEIGHT_RATIO = 0.7 -- Leave visible editor context above and below the proposed-change float.
+local FLOAT_VERTICAL_BORDER_LINES = 2 -- Account for the rounded-border float frame when sizing content buffers.
+local TURN_END_PROMPT_PREVIEW_CHARS = 200 -- Show enough of the prompt in turn-end logs to identify the completed request.
+local RECENT_ACTIVITY_LINE_MAX_CHARS = 120 -- Keep recent activity summaries compact enough for overlays and statusline-adjacent displays.
 local intentionally_stopped_event_jobs = {}
 local sanitize_permission_text
 local summarize_tool_activity
@@ -109,7 +123,7 @@ local function preview_log_text(text, max_len)
     return '<non-string>'
   end
   local preview = text:gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
-  max_len = math.max(16, math.floor(tonumber(max_len) or log_content_length))
+  max_len = math.max(LOG_PREVIEW_MIN_CHARS, math.floor(tonumber(max_len) or log_content_length))
   if #preview > max_len then
     return preview:sub(1, max_len - 1) .. '…'
   end
@@ -140,8 +154,8 @@ local function truncate_session_log_reasoning_id(text)
   if type(text) ~= 'string' then
     return text
   end
-  if #text > 32 then
-    return text:sub(1, 32)
+  if #text > REASONING_ID_MAX_CHARS then
+    return text:sub(1, REASONING_ID_MAX_CHARS)
   end
   return text
 end
@@ -210,31 +224,31 @@ local function log_session_event_payload(event_name, raw_data)
   local decoded = decode_json_silently(raw_data)
   if type(decoded) == 'table' then
     log_debug_trace(
-      'sse.event raw event=' .. tostring(event_name) .. ' payload=',
-      sanitize_session_log_value(decoded),
-      {
-        max_len = 3200,
-        depth = 8,
-      }
-    )
+        'sse.event raw event=' .. tostring(event_name) .. ' payload=',
+        sanitize_session_log_value(decoded),
+        {
+          max_len = TRACE_LOG_MAX_CHARS,
+          depth = TRACE_LOG_DEPTH,
+        }
+      )
     return
   end
 
   log(
-    string.format(
-      'sse.event raw event=%s string=%s',
-      tostring(event_name),
-      serialize_log_value(raw_data, { max_len = 3200 })
-    ),
-    vim.log.levels.DEBUG
-  )
+      string.format(
+        'sse.event raw event=%s string=%s',
+        tostring(event_name),
+        serialize_log_value(raw_data, { max_len = TRACE_LOG_MAX_CHARS })
+      ),
+      vim.log.levels.DEBUG
+    )
 end
 
 local function preview_delta_boundary(current, delta)
   current = type(current) == 'string' and current or ''
   delta = type(delta) == 'string' and delta or ''
-  local current_tail = current:sub(math.max(1, #current - 23), #current)
-  local delta_head = delta:sub(1, 24)
+  local current_tail = current:sub(math.max(1, #current - (DELTA_BOUNDARY_CONTEXT_CHARS - 1)), #current)
+  local delta_head = delta:sub(1, DELTA_BOUNDARY_CONTEXT_CHARS)
   local tail_last = current_tail:sub(-1)
   local head_first = delta_head:sub(1, 1)
   local suspicious_join = tail_last ~= ''
@@ -246,8 +260,8 @@ local function preview_delta_boundary(current, delta)
 
   return string.format(
     'tail=%s head=%s suspicious=%s',
-    preview_log_text(current_tail, 40),
-    preview_log_text(delta_head, 40),
+    preview_log_text(current_tail, DELTA_BOUNDARY_PREVIEW_CHARS),
+    preview_log_text(delta_head, DELTA_BOUNDARY_PREVIEW_CHARS),
     tostring(suspicious_join and true or false)
   )
 end
@@ -486,7 +500,8 @@ local function merge_assistant_message_content(current, incoming, ctx)
   end
   if canonical_current ~= '' and canonical_incoming ~= '' and #canonical_incoming >= #canonical_current then
     local shared_prefix = common_prefix_len(canonical_current, canonical_incoming)
-    local min_prefix = math.max(24, math.floor(math.min(#canonical_current, #canonical_incoming) * 0.35))
+    local min_prefix =
+      math.max(NEAR_PREFIX_MIN_CHARS, math.floor(math.min(#canonical_current, #canonical_incoming) * NEAR_PREFIX_MATCH_RATIO))
     if shared_prefix >= min_prefix then
       return finish('replace-canonical-near-prefix', incoming, { overlap = shared_prefix })
     end
@@ -897,8 +912,8 @@ local function remember_recent_activity_line(text)
   if not text then
     return
   end
-  if #text > 120 then
-    text = text:sub(1, 119) .. '…'
+  if #text > RECENT_ACTIVITY_LINE_MAX_CHARS then
+    text = text:sub(1, RECENT_ACTIVITY_LINE_MAX_CHARS - 1) .. '…'
   end
   if type(state.recent_activity_lines) ~= 'table' then
     state.recent_activity_lines = {}
@@ -1380,8 +1395,8 @@ end
 -- falls back to a plain diff buffer if the command is unavailable.
 local function show_diff_float(diff_text, after_close)
   local lines = vim.split(diff_text, '\n', { plain = true })
-  local width = math.min(math.floor(vim.o.columns * 0.8), log_content_length)
-  local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.7))
+  local width = math.min(math.floor(vim.o.columns * DIFF_FLOAT_WIDTH_RATIO), log_content_length)
+  local height = math.min(#lines + FLOAT_VERTICAL_BORDER_LINES, math.floor(vim.o.lines * DIFF_FLOAT_HEIGHT_RATIO))
   local win_opts = {
     relative = 'editor',
     width = width,
@@ -1654,7 +1669,7 @@ end
 local function defer_prompt(callback)
   vim.defer_fn(function()
     callback()
-  end, prompt_handoff_delay_ms)
+  end, PROMPT_HANDOFF_DELAY_MS)
 end
 
 local function answer_permission(session_id, request_id, approved, callback)
@@ -2015,7 +2030,7 @@ local function handle_host_event(event_name, payload)
           'host.permission_requested enqueued request_id=%s kind=%s detail=%s',
           tostring(req_id),
           tostring(kind),
-          serialize_log_value(perm, { max_len = 1200 })
+          serialize_log_value(perm, { max_len = ERROR_LOG_MAX_CHARS })
         ),
         vim.log.levels.DEBUG
       )
@@ -2414,6 +2429,34 @@ local function clear_reasoning_preview_on_assistant_content(content, reason)
   clear_reasoning_preview(reason)
 end
 
+local function preserve_reasoning_preview_on_late_turn_start()
+  local has_reasoning = (state.reasoning_text or '') ~= '' or #(state.reasoning_lines or {}) > 0
+  if not has_reasoning then
+    return false
+  end
+
+  local has_live_assistant = type(state.active_turn_assistant_index) == 'number'
+    or type(state.live_assistant_entry_index) == 'number'
+    or (type(state.active_turn_assistant_message_id) == 'string' and state.active_turn_assistant_message_id ~= '')
+  if not has_live_assistant then
+    return false
+  end
+
+  log(
+    string.format(
+      'assistant.turn_start preserved reasoning because live turn activity already exists key=%s active_index=%s live_index=%s message_id=%s text_len=%d lines=%d',
+      tostring(state.reasoning_entry_key or '<none>'),
+      tostring(state.active_turn_assistant_index or '<none>'),
+      tostring(state.live_assistant_entry_index or '<none>'),
+      tostring(state.active_turn_assistant_message_id or '<none>'),
+      #(state.reasoning_text or ''),
+      #(state.reasoning_lines or {})
+    ),
+    vim.log.levels.DEBUG
+  )
+  return true
+end
+
 local function handle_session_event(payload)
   local event_type = payload and payload.type or nil
   local data = payload and payload.data or {}
@@ -2565,7 +2608,7 @@ local function handle_session_event(payload)
             tostring(state.session_id or '<none>'),
             tostring(pending_turn.entry_index or '<none>'),
             tostring(pending_turn.assistant_message_id or '<none>'),
-            preview_log_text(pending_turn.prompt or '', 200)
+            preview_log_text(pending_turn.prompt or '', TURN_END_PROMPT_PREVIEW_CHARS)
           ),
           vim.log.levels.DEBUG
         )
@@ -2645,12 +2688,19 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.turn_start' then
-    clear_reasoning_preview('turn start')
+    local preserve_reasoning = preserve_reasoning_preview_on_late_turn_start()
+    if not preserve_reasoning then
+      clear_reasoning_preview('turn start')
+    end
     state.recent_activity_lines = {}
     state.recent_activity_items = {}
     state.recent_activity_tool_calls = {}
-    state.live_assistant_entry_index = nil
-    state.active_assistant_merge_group = nil
+    if not preserve_reasoning then
+      state.active_turn_assistant_index = nil
+      state.live_assistant_entry_index = nil
+      state.active_turn_assistant_message_id = nil
+      state.active_assistant_merge_group = nil
+    end
     state.active_tool = nil
     state.active_tool_run_id = nil
     state.active_tool_detail = nil
@@ -2940,7 +2990,7 @@ local function flush_sse_event()
         'sse.event decode failed event=%s error=%s data=%s',
         tostring(event_name),
         tostring(decode_err),
-        serialize_log_value(raw_data, { max_len = 3200 })
+        serialize_log_value(raw_data, { max_len = TRACE_LOG_MAX_CHARS })
       ),
       vim.log.levels.WARN
     )
@@ -3128,7 +3178,7 @@ function M.reload_session_history(session_id, callback)
         string.format(
           'session.history reload failed session_id=%s error=%s',
           tostring(session_id),
-          serialize_log_value(err, { max_len = 1200 })
+          serialize_log_value(err, { max_len = ERROR_LOG_MAX_CHARS })
         ),
         vim.log.levels.WARN
       )

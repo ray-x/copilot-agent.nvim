@@ -1035,6 +1035,39 @@ describe('model state sync', function()
     assert_eq('', reasoning.text)
   end)
 
+  it('keeps the reasoning preview when turn_start arrives after reasoning deltas', function()
+    agent.open_chat()
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-late-turn-start',
+        deltaContent = 'step one\nstep two',
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+
+    vim.wait(200)
+
+    extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local reasoning = agent.get_reasoning()
+    assert_true(reasoning.active)
+    assert_eq('step one\nstep two', reasoning.text)
+    assert.same({ 'step one', 'step two' }, reasoning.lines)
+  end)
+
   it('renders only the active shell command in chat virtual lines', function()
     agent.open_chat()
 

@@ -13,8 +13,11 @@ local truncate_session_summary = utils.truncate_session_summary
 local M = {}
 local _statusline_count_hl = '%#CopilotAgentStatuslineCount#'
 local _statusline_reset_hl = '%*'
-local _statusline_small_width = 100
-local _statusline_medium_width = 140
+local _statusline_small_width = 100 -- Collapse lower-priority statusline sections once the current window gets narrower than this.
+local _statusline_medium_width = 140 -- Re-enable medium-detail statusline sections once there is enough room to avoid truncation.
+local _intent_statusline_max_len = 30 -- Keep the intent label short enough to coexist with model, mode, and task indicators.
+local _intent_statusline_preview_chars = 27 -- Trim slightly below the hard cap so the prefixed icon and ellipsis never crowd adjacent statusline sections.
+local _reasoning_statusline_max_len = 32 -- Keep the rolling reasoning snippet short so it does not dominate the statusline.
 
 local _mode_icon = {
   ask = '💬',
@@ -111,8 +114,8 @@ end
 function M.statusline_intent()
   if state.current_intent and state.current_intent ~= '' then
     local text = state.current_intent
-    if #text > 30 then
-      text = text:sub(1, 27) .. '…'
+    if #text > _intent_statusline_max_len then
+      text = text:sub(1, _intent_statusline_preview_chars) .. '…'
     end
     return '📋' .. text
   end
@@ -130,7 +133,7 @@ function M.statusline_reasoning(max_len)
     text = '… ' .. text
   end
 
-  max_len = math.max(1, math.floor(tonumber(max_len) or 32))
+  max_len = math.max(1, math.floor(tonumber(max_len) or _reasoning_statusline_max_len))
   if #text > max_len then
     text = text:sub(1, max_len - 1) .. '…'
   end

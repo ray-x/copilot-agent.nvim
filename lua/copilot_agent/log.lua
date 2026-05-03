@@ -7,6 +7,12 @@ local module_path = type(source_path) == 'string' and vim.fn.fnamemodify(source_
 local plugin_root = module_path and vim.fn.fnamemodify(module_path, ':h:h:h') or nil
 
 local M = {}
+local MIN_SERIALIZED_LOG_LENGTH = 32 -- Even very small log previews should leave enough room for a useful snippet plus an ellipsis.
+local DEFAULT_SERIALIZED_LOG_LENGTH = 1600 -- Large enough for structured payload diagnostics without letting logs balloon indefinitely.
+local MIN_SERIALIZED_LOG_DEPTH = 1 -- vim.inspect needs at least one level to describe non-scalar payloads meaningfully.
+local DEFAULT_SERIALIZED_LOG_DEPTH = 6 -- Deep enough for nested request/response tables while still keeping debug logs readable.
+local LOG_CALLER_STACK_START = 3 -- Skip the logger helpers themselves when resolving the external call site.
+local LOG_CALLER_STACK_END = 12 -- Stop the stack walk before deep wrapper chains add unnecessary overhead.
 
 local _log_levels = {
   TRACE = vim.log.levels.TRACE,
@@ -42,8 +48,8 @@ end
 
 function M.serialize_log_value(value, opts)
   opts = opts or {}
-  local max_len = math.max(32, math.floor(tonumber(opts.max_len) or 1600))
-  local inspect_depth = math.max(1, math.floor(tonumber(opts.depth) or 6))
+  local max_len = math.max(MIN_SERIALIZED_LOG_LENGTH, math.floor(tonumber(opts.max_len) or DEFAULT_SERIALIZED_LOG_LENGTH))
+  local inspect_depth = math.max(MIN_SERIALIZED_LOG_DEPTH, math.floor(tonumber(opts.depth) or DEFAULT_SERIALIZED_LOG_DEPTH))
   local text
 
   if type(value) == 'string' then
@@ -74,7 +80,7 @@ local function format_log_source(path)
 end
 
 local function resolve_log_caller()
-  for level = 3, 12 do
+  for level = LOG_CALLER_STACK_START, LOG_CALLER_STACK_END do
     local info = debug.getinfo(level, 'Sln')
     if not info then
       break

@@ -10,6 +10,11 @@ local state = cfg.state
 local defaults = cfg.defaults
 
 local M = {}
+local NANOSECONDS_PER_MILLISECOND = 1e6 -- uv.hrtime() and libuv timespec values are reported in nanoseconds.
+local LOCK_DIRECTORY_MODE = 448 -- Decimal 0700: keep the spawn-lock directory private to the current user.
+local LOCK_WAIT_MIN_DELAY_MS = 25 -- Avoid busy-waiting when another Neovim instance is already starting the service.
+local LOCK_WAIT_PID_ENTROPY_PRIME = 131 -- Mix in a small prime so different PIDs spread their retry jitter more evenly.
+local SERVICE_OUTPUT_HISTORY_LIMIT = 20 -- Keep only the most recent startup lines for diagnostics without unbounded memory growth.
 
 local _root_markers = { '.git', 'go.mod', 'package.json', 'Cargo.toml', 'pyproject.toml', '.hg', '.svn' }
 
@@ -131,7 +136,7 @@ end
 
 local function now_ms()
   if uv and uv.hrtime then
-    return math.floor(uv.hrtime() / 1e6)
+    return math.floor(uv.hrtime() / NANOSECONDS_PER_MILLISECOND)
   end
   return os.time() * 1000
 end
@@ -182,7 +187,7 @@ local function lock_started_at_ms()
   if type(stat.mtime) == 'table' then
     local sec = stat.mtime.sec or stat.mtime.tv_sec or stat.mtime[1] or 0
     local nsec = stat.mtime.nsec or stat.mtime.tv_nsec or stat.mtime[2] or 0
-    return (sec * 1000) + math.floor(nsec / 1e6)
+    return (sec * 1000) + math.floor(nsec / NANOSECONDS_PER_MILLISECOND)
   end
   return nil
 end
@@ -213,7 +218,7 @@ local function release_spawn_lock()
 end
 
 local function try_acquire_spawn_lock(stale_after_ms)
-  local ok, err = uv.fs_mkdir(addr_lock_dir(), 448)
+  local ok, err = uv.fs_mkdir(addr_lock_dir(), LOCK_DIRECTORY_MODE)
   if ok then
     local write_ok, write_err = write_text_file(addr_lock_owner_file(), string.format('%d\n%d\n', now_ms(), vim.fn.getpid()))
     if not write_ok then
@@ -231,7 +236,7 @@ local function try_acquire_spawn_lock(stale_after_ms)
   local started_at_ms = lock_started_at_ms()
   if started_at_ms and (now_ms() - started_at_ms) > stale_after_ms then
     release_spawn_lock()
-    ok, err = uv.fs_mkdir(addr_lock_dir(), 448)
+    ok, err = uv.fs_mkdir(addr_lock_dir(), LOCK_DIRECTORY_MODE)
     if ok then
       local write_ok, write_err = write_text_file(addr_lock_owner_file(), string.format('%d\n%d\n', now_ms(), vim.fn.getpid()))
       if not write_ok then
@@ -250,9 +255,9 @@ local function try_acquire_spawn_lock(stale_after_ms)
 end
 
 local function lock_wait_delay_ms(interval_ms)
-  local base = math.max(25, math.floor(interval_ms / 2))
-  local span = math.max(25, interval_ms)
-  local entropy = ((uv and uv.hrtime and uv.hrtime()) or 0) + (vim.fn.getpid() * 131)
+  local base = math.max(LOCK_WAIT_MIN_DELAY_MS, math.floor(interval_ms / 2))
+  local span = math.max(LOCK_WAIT_MIN_DELAY_MS, interval_ms)
+  local entropy = ((uv and uv.hrtime and uv.hrtime()) or 0) + (vim.fn.getpid() * LOCK_WAIT_PID_ENTROPY_PRIME)
   return base + (entropy % span)
 end
 
@@ -271,7 +276,7 @@ function M.remember_service_output(data)
       table.insert(state.service_output, line)
     end
   end
-  while #state.service_output > 20 do
+  while #state.service_output > SERVICE_OUTPUT_HISTORY_LIMIT do
     table.remove(state.service_output, 1)
   end
 end

@@ -29,7 +29,14 @@ local request = http.request
 local split_lines = utils.split_lines
 
 local M = {}
-local search_label_max_len = 72
+local SEARCH_LABEL_MAX_LEN = 72 -- Long search hits should stay scannable inside vim.ui.select pickers.
+local RESULT_FLOAT_WIDTH_RATIO = 0.8 -- Result floats should use most of the editor width without becoming full-screen.
+local RESULT_FLOAT_MAX_WIDTH = 120 -- Cap result floats so long lines remain readable on very wide monitors.
+local RESULT_FLOAT_MIN_HEIGHT = 12 -- Keep short result windows tall enough to show title, borders, and a few lines of content.
+local RESULT_FLOAT_BORDER_LINES = 2 -- Reserve vertical space for the float border around markdown results.
+local RESULT_FLOAT_HEIGHT_RATIO = 0.8 -- Leave editor context visible above and below slash-command result windows.
+local SIDE_QUESTION_TIMEOUT_MS = 120000 -- Side-question sessions should fail fast rather than polling forever.
+local SIDE_QUESTION_POLL_INTERVAL_MS = 400 -- Poll often enough to feel responsive without hammering the local service.
 local working_directory = service.working_directory
 local mode_permission = {
   ask = 'interactive',
@@ -140,8 +147,9 @@ local function show_markdown_result(title, lines)
     normalized_lines = { '' }
   end
 
-  local width = math.min(math.floor(vim.o.columns * 0.8), 120)
-  local height = math.min(math.max(#normalized_lines + 2, 12), math.floor(vim.o.lines * 0.8))
+  local width = math.min(math.floor(vim.o.columns * RESULT_FLOAT_WIDTH_RATIO), RESULT_FLOAT_MAX_WIDTH)
+  local height =
+    math.min(math.max(#normalized_lines + RESULT_FLOAT_BORDER_LINES, RESULT_FLOAT_MIN_HEIGHT), math.floor(vim.o.lines * RESULT_FLOAT_HEIGHT_RATIO))
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, normalized_lines)
   vim.bo[buf].buftype = 'nofile'
@@ -314,10 +322,10 @@ local function rename_session(args)
 end
 
 local function truncate_label(text)
-  if #text <= search_label_max_len then
+  if #text <= SEARCH_LABEL_MAX_LEN then
     return text
   end
-  return text:sub(1, search_label_max_len - 1) .. '…'
+  return text:sub(1, SEARCH_LABEL_MAX_LEN - 1) .. '…'
 end
 
 local function jump_to_line(line)
@@ -988,7 +996,7 @@ local function ask_side_question(prompt, opts)
   notify('Running side question…', vim.log.levels.INFO)
 
   local side_session_id
-  local deadline = now_ms() + 120000
+  local deadline = now_ms() + SIDE_QUESTION_TIMEOUT_MS
 
   local function finish(answer, err)
     cleanup_temp_files(temp_files)
@@ -1030,7 +1038,7 @@ local function ask_side_question(prompt, opts)
         finish(nil, 'timed out waiting for side response')
         return
       end
-      vim.defer_fn(poll_messages, 400)
+      vim.defer_fn(poll_messages, SIDE_QUESTION_POLL_INTERVAL_MS)
     end, { auto_start = false })
   end
 

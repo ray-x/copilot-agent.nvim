@@ -10,6 +10,8 @@ local state = cfg.state
 
 local M = {}
 local deleted_checkpoint_ttl_seconds = 7 * 24 * 60 * 60
+local prompt_summary_max_chars = 60 -- Checkpoint commit titles should identify the prompt without becoming unwieldy in git history.
+local prompt_summary_ellipsis = '...'
 
 local function root_dir()
   return vim.fn.stdpath('state') .. '/copilot-agent/checkpoints'
@@ -217,8 +219,8 @@ local function prompt_summary(prompt)
   if text == '' then
     return 'checkpoint'
   end
-  if #text > 60 then
-    text = text:sub(1, 57) .. '...'
+  if #text > prompt_summary_max_chars then
+    text = text:sub(1, prompt_summary_max_chars - #prompt_summary_ellipsis) .. prompt_summary_ellipsis
   end
   return text:gsub('%s+', ' ')
 end

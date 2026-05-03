@@ -15,6 +15,7 @@ local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 local checkpoints = require('copilot_agent.checkpoints')
 local window = require('copilot_agent.window')
+local log_content_length = cfg.log_content_length
 
 local state = cfg.state
 local notify = cfg.notify
@@ -105,7 +106,7 @@ local function preview_log_text(text, max_len)
     return '<non-string>'
   end
   local preview = text:gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
-  max_len = math.max(16, math.floor(tonumber(max_len) or 120))
+  max_len = math.max(16, math.floor(tonumber(max_len) or log_content_length))
   if #preview > max_len then
     return preview:sub(1, max_len - 1) .. '…'
   end
@@ -125,8 +126,18 @@ local function truncate_session_log_content(text)
   if type(text) ~= 'string' then
     return text
   end
-  if #text > 120 then
-    return text:sub(1, 119) .. '…'
+  if #text > log_content_length then
+    return text:sub(1, log_content_length - 1) .. '…'
+  end
+  return text
+end
+
+local function truncate_session_log_reasoning_id(text)
+  if type(text) ~= 'string' then
+    return text
+  end
+  if #text > 32 then
+    return text:sub(1, 32)
   end
   return text
 end
@@ -153,6 +164,8 @@ local function sanitize_session_log_value(value, seen)
       if key_name ~= 'encryptedcontent' then
         if key_name == 'content' and type(item) == 'string' then
           sanitized[key] = truncate_session_log_content(item)
+        elseif (key_name == 'reasoningid' or key_name == 'reasoning_id') and type(item) == 'string' then
+          sanitized[key] = truncate_session_log_reasoning_id(item)
         else
           sanitized[key] = sanitize_session_log_value(item, seen)
         end
@@ -192,10 +205,14 @@ local function log_session_event_payload(event_name, raw_data)
 
   local decoded = decode_json_silently(raw_data)
   if type(decoded) == 'table' then
-    log_debug_trace('sse.event raw event=' .. tostring(event_name) .. ' payload=', sanitize_session_log_value(decoded), {
-      max_len = 3200,
-      depth = 8,
-    })
+    log_debug_trace(
+      'sse.event raw event=' .. tostring(event_name) .. ' payload=',
+      sanitize_session_log_value(decoded),
+      {
+        max_len = 3200,
+        depth = 8,
+      }
+    )
     return
   end
 
@@ -231,29 +248,18 @@ local function preview_delta_boundary(current, delta)
   )
 end
 
-local function merge_assistant_delta_content(current, delta, ctx)
+---@deprecated
+-- Legacy overlap-based assistant.message_delta stitcher retained only as a
+-- reference for prior behavior. Live delta rendering now uses direct append
+-- (`previous_content .. deltaContent`) in handle_session_event() to preserve
+-- the exact streamed payload from the SDK. Do not use this helper for new
+-- live transcript updates.
+local function merge_assistant_delta_content(current, delta)
   current = type(current) == 'string' and current or ''
   delta = type(delta) == 'string' and delta or ''
   local function finish(decision, result, extra)
     extra = extra or {}
-    -- log(
-    -- string.format(
-    -- 'assistant.message_delta merge decision=%s message_id=%s key=%s idx=%s current_len=%d delta_len=%d result_len=%d overlap=%s current=%s delta=%s result=%s',
-    -- tostring(decision),
-    -- tostring((ctx or {}).message_id or '<none>'),
-    -- tostring((ctx or {}).entry_key or '<none>'),
-    -- tostring((ctx or {}).entry_index or '<none>'),
-    -- #current,
-    -- #delta,
-    -- #(type(result) == 'string' and result or ''),
-    -- tostring(extra.overlap or '<none>'),
-    -- preview_log_text(current),
-    -- preview_log_text(delta),
-    -- preview_log_text(result)
-    -- ),
-    -- vim.log.levels.DEBUG
-    -- )
-    return result
+    return result, decision, extra
   end
 
   if delta == '' then
@@ -278,6 +284,13 @@ local function merge_assistant_delta_content(current, delta, ctx)
     local previous_char = current:sub(#current - 1, #current - 1)
     local next_char = delta:sub(2, 2)
     if overlap_char == '' then
+      return false
+    end
+
+    -- Preserve intentional indentation / fence / escape characters. The live
+    -- stitch path now uses direct append, and these remain excluded from the
+    -- diagnostic overlap comparator as well.
+    if overlap_char:match('%s') or overlap_char == '`' or overlap_char == '\\' then
       return false
     end
 
@@ -345,6 +358,35 @@ local function merge_assistant_message_content(current, incoming, ctx)
   local function split_message_lines(text)
     return vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
   end
+  local function is_blank_line(line)
+    return canonicalize(line or '') == ''
+  end
+  local function trim_blank_edges(lines)
+    local first = 1
+    local last = #lines
+    while first <= last and is_blank_line(lines[first]) do
+      first = first + 1
+    end
+    while last >= first and is_blank_line(lines[last]) do
+      last = last - 1
+    end
+    local trimmed = {}
+    for idx = first, last do
+      trimmed[#trimmed + 1] = lines[idx]
+    end
+    return trimmed
+  end
+  local function trim_leading_blank_lines(lines)
+    local first = 1
+    while first <= #lines and is_blank_line(lines[first]) do
+      first = first + 1
+    end
+    local trimmed = {}
+    for idx = first, #lines do
+      trimmed[#trimmed + 1] = lines[idx]
+    end
+    return trimmed
+  end
   local function common_prefix_len(left, right)
     local max_len = math.min(#left, #right)
     local shared = 0
@@ -389,9 +431,25 @@ local function merge_assistant_message_content(current, incoming, ctx)
     if vim.startswith(canonical_incoming, canonical_current) then
       return finish('replace-canonical-prefix-extension', incoming)
     end
+    if
+      ctx
+      and ctx.prefer_incoming_suffix_replacement == true
+      and #canonical_incoming < #canonical_current
+      and canonical_current:sub(-#canonical_incoming) == canonical_incoming
+    then
+      return finish('replace-live-canonical-suffix', incoming)
+    end
     if canonical_current:find(canonical_incoming, 1, true) then
       return finish('keep-canonical-substring', current)
     end
+  end
+  if
+    ctx
+    and ctx.prefer_incoming_suffix_replacement == true
+    and #incoming < #current
+    and current:sub(-#incoming) == incoming
+  then
+    return finish('replace-live-literal-suffix', incoming)
   end
   if current:find(incoming, 1, true) then
     return finish('keep-literal-substring', current)
@@ -400,11 +458,24 @@ local function merge_assistant_message_content(current, incoming, ctx)
   local incoming_lines = split_message_lines(incoming)
   local overlap = overlap_line_count(current_lines, incoming_lines)
   if overlap > 0 then
+    local overlap_lines = {}
+    local suffix_lines = {}
+    for idx = 1, overlap do
+      overlap_lines[#overlap_lines + 1] = incoming_lines[idx]
+    end
+    for idx = overlap + 1, #incoming_lines do
+      suffix_lines[#suffix_lines + 1] = incoming_lines[idx]
+    end
+    overlap_lines = trim_blank_edges(overlap_lines)
+    suffix_lines = trim_leading_blank_lines(suffix_lines)
     local merged = {}
     for idx = 1, #current_lines - overlap do
       merged[#merged + 1] = current_lines[idx]
     end
-    for _, line in ipairs(incoming_lines) do
+    for _, line in ipairs(overlap_lines) do
+      merged[#merged + 1] = line
+    end
+    for _, line in ipairs(suffix_lines) do
       merged[#merged + 1] = line
     end
     return finish('merge-line-overlap', table.concat(merged, '\n'), { overlap = overlap })
@@ -554,6 +625,94 @@ local function extract_shell_tool_detail(tool_name, data)
   return nil
 end
 
+local function remember_recent_activity_line(text)
+  text = sanitize_permission_text(text)
+  if not text then
+    return
+  end
+  if type(state.recent_activity_lines) ~= 'table' then
+    state.recent_activity_lines = {}
+  end
+  for _, existing in ipairs(state.recent_activity_lines) do
+    if existing == text then
+      return
+    end
+  end
+  state.recent_activity_lines[#state.recent_activity_lines + 1] = text
+end
+
+local function summarize_tool_activity(tool_name, data)
+  local tool = sanitize_permission_text(tool_name)
+  if not tool then
+    return nil
+  end
+
+  local normalized = tool:lower()
+  if normalized == 'report_intent' then
+    return nil
+  end
+
+  local detail = extract_shell_command_text(data)
+  if not detail then
+    if looks_like_shell_tool(tool) then
+      detail = state.pending_tool_detail
+    else
+      detail = sanitize_permission_text(data and (data.description or data.toolDescription or data.intention or data.summary))
+    end
+  end
+
+  local prefix
+  if looks_like_shell_tool(tool) then
+    prefix = 'Ran ' .. tool
+  elseif normalized == 'rg' or normalized == 'glob' or normalized:find('search', 1, true) then
+    prefix = 'Searched'
+  elseif normalized == 'view' or normalized == 'web_fetch' or normalized:find('get_file', 1, true) or normalized:find('read', 1, true) then
+    prefix = 'Read'
+  elseif normalized == 'apply_patch' then
+    prefix = 'Edited files'
+  elseif normalized == 'sql' then
+    prefix = detail and 'Queried SQL' or nil
+  else
+    prefix = detail and ('Used ' .. tool) or nil
+  end
+
+  if not prefix then
+    return nil
+  end
+  if detail and detail ~= '' and detail ~= tool then
+    return prefix .. ' — ' .. detail
+  end
+  return prefix
+end
+
+local function capture_turn_activity_summary(event_type, data)
+  if event_type == 'assistant.intent' then
+    remember_recent_activity_line(data.intent)
+    return
+  end
+
+  if event_type == 'tool.execution_start' then
+    remember_recent_activity_line(summarize_tool_activity(data.toolName, data))
+    return
+  end
+
+  if event_type == 'subagent.started' then
+    local title = first_non_empty(data.agentDisplayName, data.agentName, data.agentDescription)
+    if title then
+      remember_recent_activity_line('Started ' .. title)
+    end
+  end
+end
+
+local function flush_recent_activity_summary()
+  local lines = state.recent_activity_lines or {}
+  if #lines == 0 then
+    return
+  end
+  append_entry('activity', table.concat(lines, '\n'))
+  state.recent_activity_lines = {}
+end
+
 local function schedule_overlay_tool_clear(delay_ms, run_id)
   cancel_overlay_tool_schedule()
   local token = state.overlay_tool_schedule_token
@@ -629,7 +788,9 @@ local function reset_live_activity_state()
   state.recent_activity_lines = {}
   reset_overlay_tool_state()
   state.active_turn_assistant_index = nil
+  state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil
+  state.active_assistant_merge_group = nil
   state.current_intent = nil
   clear_reasoning_preview('live activity reset')
 end
@@ -665,7 +826,7 @@ end
 -- falls back to a plain diff buffer if the command is unavailable.
 local function show_diff_float(diff_text, after_close)
   local lines = vim.split(diff_text, '\n', { plain = true })
-  local width = math.min(math.floor(vim.o.columns * 0.8), 120)
+  local width = math.min(math.floor(vim.o.columns * 0.8), log_content_length)
   local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.7))
   local win_opts = {
     relative = 'editor',
@@ -1277,7 +1438,7 @@ local function handle_host_event(event_name, payload)
             'host.permission_requested auto-approved kind=%s request_id=%s detail=%s',
             tostring(kind),
             tostring(req_id),
-            serialize_log_value(perm, { max_len = 1200 })
+            serialize_log_value(perm, { max_len = log_content_length * 10 })
           ),
           vim.log.levels.DEBUG
         )
@@ -1665,6 +1826,7 @@ local function handle_session_event(payload)
     sanitize_session_log_value(data),
     { max_len = 2400, depth = 8 }
   )
+  capture_turn_activity_summary(event_type, data)
 
   if event_type == 'assistant.message_delta' then
     -- Only redraw statuslines on the busy state *transition* (false→true).
@@ -1688,12 +1850,12 @@ local function handle_session_event(payload)
     local entry, idx, key = ensure_assistant_entry(data.messageId)
     local delta = data.deltaContent or ''
 
+    -- Live assistant.message_delta display is append-only per the SDK event
+    -- contract. Preserve the exact streamed chunk order/content in the
+    -- transcript state and leave any final reconciliation to assistant.message.
     local previous_content = entry.content or ''
-    entry.content = merge_assistant_delta_content(previous_content, delta, {
-      message_id = data.messageId,
-      entry_key = key,
-      entry_index = idx,
-    })
+    entry._assistant_saw_delta = true
+    entry.content = previous_content .. delta
     log(
       string.format(
         'assistant.message_delta appended message_id=%s key=%s idx=%s result_len=%d boundary={%s} content=%s',
@@ -1744,8 +1906,10 @@ local function handle_session_event(payload)
         message_id = data.messageId,
         entry_key = key,
         entry_index = idx,
+        prefer_incoming_suffix_replacement = entry._assistant_saw_delta == true or had_stream_start,
       })
     end
+    entry._assistant_saw_delta = false
     if state.history_loading and first_message_for_entry then
       assign_history_checkpoint_id(data.messageId)
     elseif not state.history_loading then
@@ -1820,6 +1984,7 @@ local function handle_session_event(payload)
         })
       end
     end
+    flush_recent_activity_summary()
     reset_pending_assistant_entry()
     clear_reasoning_preview('turn end')
     state.stream_line_start = nil
@@ -1831,7 +1996,9 @@ local function handle_session_event(payload)
     state.active_tool_detail = nil
     state.pending_tool_detail = nil
     state.active_turn_assistant_index = nil
+    state.live_assistant_entry_index = nil
     state.active_turn_assistant_message_id = nil
+    state.active_assistant_merge_group = nil
     state.current_intent = nil
     refresh_statuslines()
     refresh_reasoning_overlay()
@@ -1877,6 +2044,9 @@ local function handle_session_event(payload)
 
   if event_type == 'assistant.turn_start' then
     clear_reasoning_preview('turn start')
+    state.recent_activity_lines = {}
+    state.live_assistant_entry_index = nil
+    state.active_assistant_merge_group = nil
     state.active_tool = nil
     state.active_tool_run_id = nil
     state.active_tool_detail = nil
@@ -2099,7 +2269,11 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'error' then
-    log('session.error payload=' .. serialize_log_value(data, { max_len = 2400 }), vim.log.levels.WARN)
+    log(
+      'session.error payload=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 2400, depth = 8 }),
+      vim.log.levels.WARN
+    )
+    flush_recent_activity_summary()
     reset_pending_assistant_entry()
     clear_reasoning_preview('error')
     state.stream_line_start = nil
@@ -2111,7 +2285,9 @@ local function handle_session_event(payload)
     state.active_tool_detail = nil
     state.pending_tool_detail = nil
     state.active_turn_assistant_index = nil
+    state.live_assistant_entry_index = nil
     state.active_turn_assistant_message_id = nil
+    state.active_assistant_merge_group = nil
     state.current_intent = nil
     refresh_statuslines()
     refresh_reasoning_overlay()
@@ -2120,7 +2296,10 @@ local function handle_session_event(payload)
   end
 
   log(
-    'session.event unhandled type=' .. tostring(event_type) .. ' data=' .. serialize_log_value(data, { max_len = 1600 }),
+    'session.event unhandled type='
+      .. tostring(event_type)
+      .. ' data='
+      .. serialize_log_value(sanitize_session_log_value(data), { max_len = 1600, depth = 8 }),
     vim.log.levels.DEBUG
   )
 end
@@ -2373,6 +2552,7 @@ M.remember_buffer_disk_state = remember_buffer_disk_state
 M.remember_open_buffer_disk_state = remember_open_buffer_disk_state
 M.forget_buffer_disk_state = forget_buffer_disk_state
 M.offer_diff_review = offer_diff_review
+M._deprecated_merge_assistant_delta_content = merge_assistant_delta_content
 
 --- List all uncommitted changed files and open vimdiff for the selected one.
 --- Shows a picker of files with unstaged/staged changes relative to HEAD.

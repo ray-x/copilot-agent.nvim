@@ -489,7 +489,10 @@ local function apply_snapshot(snapshot)
   state.overlay_tool_queue = {}
   state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
   state.active_turn_assistant_index = nil
+  state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil
+  state.active_assistant_merge_group = nil
+  state.assistant_merge_group_serial = 0
   state.current_intent = nil
   state.context_tokens = nil
   state.context_limit = nil

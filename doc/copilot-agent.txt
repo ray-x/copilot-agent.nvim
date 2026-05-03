@@ -166,6 +166,13 @@ optional — defaults are shown below: >lua
     Open the chat buffer. Creates a session if one does not exist.
     With "fullscreen" argument, opens in a new tab instead of a split.
 
+                                             *:CopilotAgentDashboard*
+:CopilotAgentDashboard
+    Open the Copilot Agent startup dashboard with a centered project view
+    plus shortcuts for the latest session, session picker, and model
+    picker, and a bottom prompt that reconnects to the latest session in
+    the current folder or creates a new one.
+
                                                   *:CopilotAgentAsk*
 :CopilotAgentAsk [prompt]
     Send [prompt] to the active session. If no argument is given, opens
@@ -621,6 +628,15 @@ chat.fullscreen ~
   Default: `false`
   When true, `:CopilotAgentChat` opens in a new tab by default.
   Can also be triggered per-invocation: `:CopilotAgentChat fullscreen`.
+
+dashboard.auto_open ~
+  Type: boolean
+  Default: `true`
+  When true, show the Copilot Agent dashboard on startup when Neovim opens
+  with an empty unnamed buffer. The dashboard centers the startup view,
+  shows the latest session for the current folder, includes shortcuts for
+  reconnecting or picking a session/model, and places a two-line prompt
+  at the bottom. Set false to disable the startup dashboard.
 
 ==============================================================================
 13. HTTP API                                      *copilot-agent-api*

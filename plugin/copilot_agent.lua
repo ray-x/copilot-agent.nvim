@@ -30,6 +30,10 @@ vim.api.nvim_create_user_command('CopilotAgentChatFocus', function()
   copilot_agent.focus_chat()
 end, { desc = 'Focus or switch to an open Copilot chat buffer' })
 
+vim.api.nvim_create_user_command('CopilotAgentDashboard', function()
+  copilot_agent.open_dashboard()
+end, { desc = 'Open the Copilot Agent startup dashboard' })
+
 vim.api.nvim_create_user_command('CopilotAgentNewSession', function()
   copilot_agent.new_session()
 end, { desc = 'Create a new Copilot Go session' })

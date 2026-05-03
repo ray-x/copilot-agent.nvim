@@ -21,6 +21,7 @@ local notify = cfg.notify
 local log = cfg.log
 
 local request = http.request
+local sync_request = http.sync_request
 
 local working_directory = service.working_directory
 
@@ -173,6 +174,21 @@ local function fetch_sorted_sessions(context, callback)
     end)
     callback(sessions, nil, response)
   end)
+end
+
+local function latest_matching_session(sessions, target_cwd)
+  local matching = {}
+  for _, session in ipairs(sessions or {}) do
+    if session_cwd_of(session) == target_cwd then
+      matching[#matching + 1] = session
+    end
+  end
+
+  table.sort(matching, function(a, b)
+    return session_sort_key(a) > session_sort_key(b)
+  end)
+
+  return matching[1]
 end
 
 -- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
@@ -373,6 +389,101 @@ function M.resume_session(session_id, callback, opts)
     if callback then
       callback(state.session_id, nil)
     end
+  end)
+end
+
+function M.latest_project_session_sync()
+  local wd = working_directory()
+  local response, err = sync_request('GET', '/sessions', nil)
+  if err or type(response) ~= 'table' then
+    return nil, err
+  end
+
+  local sessions = merge_sessions(response)
+  table.sort(sessions, function(a, b)
+    return session_sort_key(a) > session_sort_key(b)
+  end)
+  log_session_catalog('latest_project_session_sync', sessions, wd)
+  return latest_matching_session(sessions, wd), nil
+end
+
+local function reset_for_session_switch()
+  state.session_id = nil
+  state.session_name = nil
+  state.session_working_directory = nil
+  state.creating_session = true
+  M.discard_pending_attachments()
+  clear_transcript()
+  require('copilot_agent')._ensure_chat_window()
+end
+
+local function disconnect_current_session_for_project_attach(callback)
+  local previous_session_id = state.session_id
+  if not previous_session_id then
+    callback(nil)
+    return
+  end
+
+  reset_for_session_switch()
+  M.disconnect_session(previous_session_id, false, function(disconnect_err)
+    if disconnect_err then
+      append_entry('error', 'Failed to disconnect previous session: ' .. disconnect_err)
+      log('attach_latest_project_session_or_create disconnect failed: ' .. tostring(disconnect_err), vim.log.levels.ERROR)
+      callback(disconnect_err)
+      return
+    end
+    callback(nil)
+  end)
+end
+
+function M.attach_latest_project_session_or_create(callback)
+  callback = callback or function() end
+
+  local wd = working_directory()
+  local active_wd = state.session_working_directory
+  if state.session_id and active_wd == wd then
+    callback(state.session_id, nil)
+    return
+  end
+
+  log('attach_latest_project_session_or_create cwd=' .. tostring(wd), vim.log.levels.INFO)
+  fetch_sorted_sessions('attach_latest_project_session_or_create', function(sessions, err)
+    if err then
+      log('attach_latest_project_session_or_create list failed: ' .. tostring(err), vim.log.levels.WARN)
+      disconnect_current_session_for_project_attach(function(disconnect_err)
+        if disconnect_err then
+          callback(nil, disconnect_err)
+          return
+        end
+        create_session(callback)
+      end)
+      return
+    end
+
+    local latest = latest_matching_session(sessions, wd)
+    if latest then
+      disconnect_current_session_for_project_attach(function(disconnect_err)
+        if disconnect_err then
+          callback(nil, disconnect_err)
+          return
+        end
+        resume_known_session(latest, callback, {
+          resolve_pending = true,
+          append_message = 'Resuming most recent session ' .. formatted_session_label(latest.summary, latest.sessionId),
+          log_message = 'attach_latest_project_session_or_create resume ' .. formatted_session_label(latest.summary, latest.sessionId),
+        })
+      end)
+      return
+    end
+
+    log('attach_latest_project_session_or_create no matching session; creating new session', vim.log.levels.INFO)
+    disconnect_current_session_for_project_attach(function(disconnect_err)
+      if disconnect_err then
+        callback(nil, disconnect_err)
+        return
+      end
+      create_session(callback)
+    end)
   end)
 end
 

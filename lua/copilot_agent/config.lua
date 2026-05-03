@@ -16,6 +16,7 @@ local defaults = {
   auto_create_session = true,
   notify = true,
   file_log_level = 'WARN', -- DEBUG logs full HTTP/SSE payloads + transform decisions to stdpath('log')/copilot_agent.log
+  log_content_length = 1000, -- max content length to include in logs (0 for unlimited, default 1000)
   service = {
     auto_start = false,
     command = nil, -- nil = auto-detect installed binary, then fall back to 'go run .'
@@ -72,6 +73,10 @@ local defaults = {
     -- Set to false to always use the builtin floating diff window.
     diff_cmd = { 'delta' },
   },
+  dashboard = {
+    auto_open = true,
+    buf_name = 'CopilotAgentDashboard',
+  },
   session = {
     working_directory = nil,
     model = nil,
@@ -93,6 +98,10 @@ local state = {
   sse_event = { event = 'message', data = {} },
   entries = {},
   assistant_entries = {},
+  dashboard_bufnr = nil,
+  dashboard_winid = nil,
+  dashboard_prompt_bufnr = nil,
+  dashboard_prompt_winid = nil,
   chat_bufnr = nil,
   chat_winid = nil,
   input_bufnr = nil,
@@ -127,7 +136,10 @@ local state = {
   pending_assistant_entry_key = nil, -- stable placeholder key before the SDK assigns messageId
   pending_assistant_serial = 0, -- fallback sequence for placeholder assistant entries
   active_turn_assistant_index = nil, -- assistant transcript entry reused for the current live turn
+  live_assistant_entry_index = nil, -- assistant entry still bound to the current in-flight SDK turn
   active_turn_assistant_message_id = nil, -- latest messageId mapped to the active turn assistant entry
+  active_assistant_merge_group = nil, -- logical reply group for collapsing assistant transcript blocks
+  assistant_merge_group_serial = 0, -- fallback sequence for assistant merge groups without a pending turn
   -- Incremental streaming render
   render_pending = false, -- true when a debounced render is scheduled
   stream_line_start = nil, -- 0-based buf line where current streaming entry content begins
@@ -154,7 +166,7 @@ local state = {
   overlay_tool_queue = {}, -- queued shell activity items waiting for minimum display time
   overlay_tool_run_id = 0, -- incrementing id assigned to shell activity items
   overlay_tool_schedule_token = 0, -- invalidates pending delayed overlay transitions
-  recent_activity_lines = {}, -- recent tool/activity overlay lines kept after completion
+  recent_activity_lines = {}, -- deduped activity summary lines collected for the current turn
   current_intent = nil, -- latest intent string from assistant.intent event
   reasoning_entry_key = nil, -- assistant entry currently receiving reasoning deltas
   reasoning_text = '', -- raw reasoning delta text accumulated for the active turn
@@ -235,6 +247,7 @@ return {
   notify = logging.notify,
   log = logging.log,
   log_path = logging.log_path,
+  log_content_length = defaults.log_content_length,
   should_log = logging.should_log,
   serialize_log_value = logging.serialize_log_value,
   normalize_base_url = normalize_base_url,

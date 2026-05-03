@@ -18,6 +18,7 @@ local events = require('copilot_agent.events')
 local session = require('copilot_agent.session')
 local mdl = require('copilot_agent.model')
 local chat = require('copilot_agent.chat')
+local dashboard = require('copilot_agent.dashboard')
 local input = require('copilot_agent.input')
 local lsp = require('copilot_agent.lsp')
 
@@ -41,6 +42,14 @@ function M.focus_chat()
   chat.focus_chat()
 end
 
+function M.open_dashboard()
+  return dashboard.open()
+end
+
+function M.close_dashboard()
+  dashboard.close()
+end
+
 function M.setup(opts)
   state.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
   state.config.base_url = normalize_base_url(state.config.base_url)
@@ -61,8 +70,14 @@ function M.setup(opts)
   state.reasoning_entry_key = nil
   state.reasoning_text = ''
   state.reasoning_lines = {}
+  state.dashboard_winid = nil
+  state.dashboard_prompt_bufnr = nil
+  state.dashboard_prompt_winid = nil
   state.active_turn_assistant_index = nil
+  state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil
+  state.active_assistant_merge_group = nil
+  state.assistant_merge_group_serial = 0
 
   -- Default highlight groups for the chat buffer (link targets can be overridden
   -- by the user's colorscheme or config before calling setup()).
@@ -74,6 +89,10 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, 'CopilotAgentActivity', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentReasoning', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentStatuslineCount', { link = 'Number', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentDashboardHeader', { link = 'Title', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentDashboardArt', { link = '@text', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentDashboardKey', { link = 'Function', default = true })
+  vim.api.nvim_set_hl(0, 'CopilotAgentDashboardHint', { link = 'Comment', default = true })
   local ui_group = vim.api.nvim_create_augroup('CopilotAgentUI', { clear = true })
   vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized', 'WinScrolled' }, {
     group = ui_group,
@@ -83,6 +102,7 @@ function M.setup(opts)
         render.handle_chat_window_scrolled(tonumber(args.match))
       end
       render.refresh_reasoning_overlay(true)
+      dashboard.refresh()
     end,
   })
   vim.api.nvim_create_autocmd('FileChangedShell', {
@@ -113,6 +133,14 @@ function M.setup(opts)
       events.remember_buffer_disk_state(args.buf)
     end,
   })
+  -- start dashboard on VimEnter if enabled in config and there are no startup buffers (e.g. when Neovim is started with just a directory or no arguments).
+  -- vim.api.nvim_create_autocmd('VimEnter', {
+  -- group = ui_group,
+  -- once = true,
+  -- callback = function()
+  -- dashboard.maybe_open_on_startup()
+  -- end,
+  -- })
   vim.api.nvim_create_autocmd('BufWipeout', {
     group = ui_group,
     callback = function(args)

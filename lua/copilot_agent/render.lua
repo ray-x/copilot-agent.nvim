@@ -10,6 +10,7 @@ local utils = require('copilot_agent.utils')
 local state = cfg.state
 local log = cfg.log
 local normalize_base_url = cfg.normalize_base_url
+local max_log_content_length = cfg.log_content_length or 240
 
 local M = {}
 
@@ -85,7 +86,7 @@ local function preview_log_text(text, max_len)
     return '<non-string>'
   end
   local preview = text:gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
-  max_len = math.max(16, math.floor(tonumber(max_len) or 120))
+  max_len = math.max(16, math.floor(tonumber(max_len) or max_log_content_length))
   if #preview > max_len then
     return preview:sub(1, max_len - 1) .. '…'
   end
@@ -247,7 +248,7 @@ local function update_reasoning_overlay_now()
 
   local bufnr = state.chat_bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    log('reasoning overlay skipped chat buffer unavailable', vim.log.levels.DEBUG)
+    -- log('reasoning overlay skipped chat buffer unavailable', vim.log.levels.DEBUG)
     return
   end
 
@@ -432,27 +433,86 @@ local function active_turn_entry_index()
   return index
 end
 
+local function current_assistant_merge_group(create_if_missing)
+  local group = state.active_assistant_merge_group
+  if type(group) == 'string' and group ~= '' then
+    return group
+  end
+  if not create_if_missing then
+    return nil
+  end
+
+  local pending_turn = state.pending_checkpoint_turn
+  if pending_turn and pending_turn.session_id == state.session_id and pending_turn.entry_index then
+    group = string.format('turn:%s:%s', pending_turn.session_id, pending_turn.entry_index)
+  else
+    state.assistant_merge_group_serial = (tonumber(state.assistant_merge_group_serial) or 0) + 1
+    group = 'assistant-group:' .. tostring(state.assistant_merge_group_serial)
+  end
+
+  state.active_assistant_merge_group = group
+  return group
+end
+
+local function assistant_merge_group(entry)
+  if type(entry) ~= 'table' then
+    return nil
+  end
+  local group = entry._assistant_merge_group
+  if type(group) == 'string' and group ~= '' then
+    return group
+  end
+  return nil
+end
+
+local function bind_assistant_merge_group(index)
+  if type(index) ~= 'number' then
+    return nil
+  end
+  local entry = state.entries[index]
+  if not entry or entry.kind ~= 'assistant' then
+    return nil
+  end
+
+  local group = assistant_merge_group(entry)
+  if group then
+    state.active_assistant_merge_group = group
+    return group
+  end
+
+  group = current_assistant_merge_group(true)
+  if group then
+    entry._assistant_merge_group = group
+  end
+  return group
+end
+
+local function bind_live_assistant_entry(index)
+  if type(index) ~= 'number' then
+    return
+  end
+  local entry = state.entries[index]
+  if not entry or entry.kind ~= 'assistant' then
+    return
+  end
+  state.live_assistant_entry_index = index
+  bind_assistant_merge_group(index)
+end
+
 local function trailing_assistant_entry_index()
   if state.history_loading or state.chat_busy ~= true then
     return nil
   end
-  for idx = #state.entries, 1, -1 do
-    local entry = state.entries[idx]
-    if not entry then
-      return nil
-    end
-    if entry.kind == 'assistant' then
-      local trimmed = (entry.content or ''):match('^%s*(.-)%s*$')
-      if trimmed ~= '' then
-        return idx
-      end
-      return idx
-    end
-    if entry.kind ~= 'assistant' then
-      return nil
-    end
+  local index = state.live_assistant_entry_index
+  if type(index) ~= 'number' then
+    return nil
   end
-  return nil
+  local entry = state.entries[index]
+  if not entry or entry.kind ~= 'assistant' then
+    state.live_assistant_entry_index = nil
+    return nil
+  end
+  return index
 end
 
 local function bind_active_turn_message_id(index, message_id)
@@ -501,6 +561,11 @@ end
 -- ── Entry helpers ─────────────────────────────────────────────────────────────
 
 function M.should_merge_assistant(idx)
+  local current_entry = state.entries[idx]
+  if not current_entry or current_entry.kind ~= 'assistant' then
+    return false
+  end
+  local current_group = assistant_merge_group(current_entry)
   for i = idx - 1, 1, -1 do
     local e = state.entries[i]
     if not e then
@@ -508,6 +573,12 @@ function M.should_merge_assistant(idx)
     end
     if e.kind ~= 'assistant' then
       return false
+    end
+    local previous_group = assistant_merge_group(e)
+    if current_group or previous_group then
+      if current_group == nil or previous_group == nil or previous_group ~= current_group then
+        return false
+      end
     end
     -- Skip entries that are thinking-only or whitespace-only.
     local trimmed = (e.content or ''):match('^%s*(.-)%s*$')
@@ -783,6 +854,18 @@ local function normalize_content_lines(lines)
   return with_transitions
 end
 
+local function verbatim_content_lines(lines)
+  local preserved = {}
+  for _, line in ipairs(lines or {}) do
+    if type(line) == 'string' and line:match('^%s+$') then
+      preserved[#preserved + 1] = ''
+    else
+      preserved[#preserved + 1] = line
+    end
+  end
+  return preserved
+end
+
 -- entry_lines: format one entry into a list of display lines.
 -- align: when true (default), apply align_tables. Pass false during streaming
 --        to skip the O(n) table scan on every incremental update.
@@ -791,7 +874,13 @@ function M.entry_lines(entry, idx, align)
     align = true
   end
   local out = {}
-  if entry.kind == 'system' or entry.kind == 'error' then
+  if entry.kind == 'activity' then
+    out[#out + 1] = 'Activity:'
+    for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
+      out[#out + 1] = '  ' .. l
+    end
+    out[#out + 1] = ''
+  elseif entry.kind == 'system' or entry.kind == 'error' then
     out[#out + 1] = (entry.kind == 'error' and 'Error' or 'System') .. ':'
     for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
       out[#out + 1] = '  ' .. l
@@ -802,7 +891,7 @@ function M.entry_lines(entry, idx, align)
     local trimmed = (entry.content or ''):match('^%s*(.-)%s*$')
     if trimmed ~= '' then
       out[#out + 1] = 'Assistant:'
-      for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
+      for _, l in ipairs(verbatim_content_lines(split_lines(entry.content))) do
         out[#out + 1] = '  ' .. l
       end
       out[#out + 1] = ''
@@ -1018,6 +1107,8 @@ highlight_lines = function(bufnr, from_row, to_row)
       end
     elseif line == 'Assistant:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
+    elseif line == 'Activity:' or line == 'System:' then
+      vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentActivity', row, 0, -1)
     elseif line:match('^%s*Done%.$') then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
     end
@@ -1314,6 +1405,13 @@ function M.append_entry(kind, content, attachments, opts)
     entry.checkpoint_id = opts.checkpoint_id
   end
 
+  if kind == 'user' then
+    -- User messages always begin a fresh assistant turn, including when we are
+    -- rebuilding history. Clearing the active group here keeps replayed
+    -- assistant blocks aligned with their original turn boundaries.
+    state.active_assistant_merge_group = nil
+  end
+
   -- When the user sends a new prompt, freeze everything rendered so far so
   -- that subsequent render_chat() calls only rebuild the current conversation.
   if kind == 'user' and not state.history_loading then
@@ -1322,6 +1420,9 @@ function M.append_entry(kind, content, attachments, opts)
 
   table.insert(state.entries, entry)
   local idx = #state.entries
+  if kind == 'assistant' then
+    bind_assistant_merge_group(idx)
+  end
   if kind == 'user' and not state.history_loading then
     state.active_conversation_entry_index = idx
     state.chat_follow_topline = nil
@@ -1377,6 +1478,7 @@ function M.ensure_assistant_entry(message_id)
     local active_key = (type(message_id) == 'string' and message_id ~= '' and message_id)
       or state.active_turn_assistant_message_id
       or pending_assistant_entry_key()
+    bind_live_assistant_entry(active_index)
     return state.entries[active_index], active_index, active_key
   end
 
@@ -1386,6 +1488,7 @@ function M.ensure_assistant_entry(message_id)
     if adopted_index and state.entries[adopted_index] then
       state.active_turn_assistant_index = adopted_index
       state.active_turn_assistant_message_id = message_id
+      bind_live_assistant_entry(adopted_index)
       return state.entries[adopted_index], adopted_index, message_id
     end
   else
@@ -1399,6 +1502,7 @@ function M.ensure_assistant_entry(message_id)
       state.active_turn_assistant_message_id = message_id
     end
     state.active_turn_assistant_index = index
+    bind_live_assistant_entry(index)
     return state.entries[index], index, key
   end
 
@@ -1406,6 +1510,7 @@ function M.ensure_assistant_entry(message_id)
   if trailing_index and state.entries[trailing_index] then
     state.assistant_entries[key] = trailing_index
     state.active_turn_assistant_index = trailing_index
+    bind_live_assistant_entry(trailing_index)
     if type(message_id) == 'string' and message_id ~= '' then
       bind_active_turn_message_id(trailing_index, message_id)
       return state.entries[trailing_index], trailing_index, message_id
@@ -1423,6 +1528,7 @@ function M.ensure_assistant_entry(message_id)
   if type(message_id) == 'string' and message_id ~= '' then
     state.active_turn_assistant_message_id = message_id
   end
+  bind_live_assistant_entry(index)
   return state.entries[index], index, key
 end
 
@@ -1431,7 +1537,10 @@ function M.clear_transcript()
   state.assistant_entries = {}
   state.pending_assistant_entry_key = nil
   state.active_turn_assistant_index = nil
+  state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil
+  state.active_assistant_merge_group = nil
+  state.assistant_merge_group_serial = 0
   state.stream_line_start = nil
   state.entry_row_index = {}
   state.pending_checkpoint_turn = nil

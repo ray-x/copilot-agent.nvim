@@ -252,6 +252,9 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         diff_cmd = { 'delta' },          -- external diff viewer; false = builtin float
         diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; clean buffers auto-reload, conflicting modified buffers prompt before reload
       },
+      dashboard = {
+        auto_open = true,                -- show the Copilot Agent dashboard on empty startup
+      },
       notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
       file_log_level = "WARN",  -- DEBUG | INFO | WARN | ERROR; DEBUG logs HTTP/SSE payloads, plugin actions, and transform decisions to stdpath("log") .. "/copilot_agent.log"
     })
@@ -311,6 +314,7 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 | Command                          | Description                                                |
 | -------------------------------- | ---------------------------------------------------------- |
 | `:CopilotAgentInstall`           | Download pre-built binary for the current platform         |
+| `:CopilotAgentDashboard`         | Open the Copilot Agent startup dashboard                   |
 | `:CopilotAgentChat [fullscreen]` | Open the chat buffer; `fullscreen` opens in a new tab      |
 | `:CopilotAgentChatToggle`        | Toggle chat window (open if hidden, close if visible)      |
 | `:CopilotAgentChatFocus`         | Focus or switch to an open chat buffer                     |
@@ -328,6 +332,8 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 | `:CopilotAgentLsp`               | Start (or reuse) the LSP client for code actions           |
 | `:CopilotAgentPasteImage`        | Paste clipboard image as attachment                        |
 | `:CopilotAgentRetryInput`        | Re-show the last dismissed ask_user prompt                 |
+
+The dashboard opens automatically on startup when Neovim starts with an empty buffer. Set `dashboard.auto_open = false` to disable it. It centers the startup view, shows the most recent session for the current folder, exposes shortcuts for reconnecting to the last session, picking a session, or choosing a model, and opens a two-line prompt at the bottom that reconnects to that session or creates a new one on submit.
 
 ---
 

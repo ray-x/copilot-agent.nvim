@@ -229,8 +229,8 @@ describe('M.setup', function()
     local original_stdpath = vim.fn.stdpath
     local original_vim_system = vim.system
     local temp_log_dir = vim.fn.tempname()
-    local long_content = string.rep('A', 130)
-    local truncated_content = string.rep('A', 119) .. '…'
+    local reasoning_id = '1234567890abcdef1234567890abcdef-extra-tail'
+    local truncated_reasoning_id = '1234567890abcdef1234567890abcdef'
     vim.fn.mkdir(temp_log_dir, 'p')
     vim.fn.stdpath = function(kind)
       if kind == 'log' then
@@ -240,9 +240,13 @@ describe('M.setup', function()
     end
 
     agent.setup({ auto_create_session = false, notify = false, file_log_level = 'DEBUG' })
+    local cfg = require('copilot_agent.config')
     local http = require('copilot_agent.http')
     local events = require('copilot_agent.events')
     local encode_json = (vim.json and vim.json.encode) or vim.fn.json_encode
+    local max_content_len = cfg.log_content_length or 120
+    local long_content = string.rep('A', max_content_len + 10)
+    local truncated_content = string.rep('A', max_content_len - 1) .. '…'
 
     vim.system = function()
       return {
@@ -266,6 +270,7 @@ describe('M.setup', function()
             messageId = 'debug-turn',
             content = long_content,
             encryptedContent = 'top-secret',
+            reasoningId = reasoning_id,
           },
         }),
       },
@@ -282,8 +287,10 @@ describe('M.setup', function()
     assert_true(joined:find('sse.event raw event=session.event', 1, true) ~= nil)
     assert_true(joined:find('session.event received type=assistant.message', 1, true) ~= nil)
     assert_true(joined:find('content = "' .. truncated_content .. '"', 1, true) ~= nil)
+    assert_true(joined:find('reasoningId = "' .. truncated_reasoning_id .. '"', 1, true) ~= nil)
     assert_true(joined:find('encryptedContent', 1, true) == nil)
     assert_true(joined:find('top-secret', 1, true) == nil)
+    assert_true(joined:find(reasoning_id, 1, true) == nil)
   end)
 
   it('logs non-json session events as strings before decode failure handling', function()
@@ -400,6 +407,7 @@ describe('user commands', function()
     'CopilotAgentChat',
     'CopilotAgentChatToggle',
     'CopilotAgentChatFocus',
+    'CopilotAgentDashboard',
     'CopilotAgentNewSession',
     'CopilotAgentSwitchSession',
     'CopilotAgentDeleteSession',
@@ -416,6 +424,172 @@ describe('user commands', function()
       assert_true(command_exists(cmd), cmd .. ' should exist')
     end)
   end
+end)
+
+describe('dashboard', function()
+  local agent
+  local dashboard
+  local session_mod
+  local original_latest_project_session_sync
+
+  local function find_line_containing(lines, needle)
+    for _, line in ipairs(lines) do
+      if line:find(needle, 1, true) then
+        return line
+      end
+    end
+    return nil
+  end
+
+  before_each(function()
+    pcall(vim.cmd, 'tabonly | only')
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.dashboard'] = nil
+    agent = require('copilot_agent')
+    agent.setup({
+      auto_create_session = false,
+      dashboard = {
+        auto_open = false,
+      },
+      service = {
+        auto_start = false,
+      },
+    })
+    dashboard = require('copilot_agent.dashboard')
+    session_mod = require('copilot_agent.session')
+    original_latest_project_session_sync = session_mod.latest_project_session_sync
+    session_mod.latest_project_session_sync = function()
+      return {
+        sessionId = 'recent-session-id',
+        summary = 'Recent project session',
+        workingDirectory = vim.fn.getcwd(),
+      }, nil
+    end
+    vim.cmd('enew')
+    vim.api.nvim_buf_set_lines(0, 0, -1, false, { '' })
+    vim.bo[0].modified = false
+  end)
+
+  after_each(function()
+    if session_mod then
+      session_mod.latest_project_session_sync = original_latest_project_session_sync
+    end
+    dashboard.close()
+    pcall(vim.cmd, 'tabonly | only')
+  end)
+
+  it('opens a centered dashboard with the last project session and a prompt split', function()
+    local bufnr = agent.open_dashboard()
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local prompt_bufnr = agent.state.dashboard_prompt_bufnr
+    local title_line = find_line_containing(lines, 'Copilot Agent Dashboard')
+    local session_line = find_line_containing(lines, 'Last session: Recent project session [recent-session-id]')
+    local connect_line = find_line_containing(lines, '[l] Connect last session')
+    local switch_line = find_line_containing(lines, '[s] Select session')
+    local model_line = find_line_containing(lines, '[m] Select model')
+    local logo_lines = dashboard._logo_lines
+    local short_logo_line = logo_lines[1]
+    local wide_logo_line = logo_lines[1]
+    local logo_block_width = 0
+
+    assert_eq(bufnr, agent.state.dashboard_bufnr)
+    assert_eq('copilot-agent-dashboard', vim.bo[bufnr].filetype)
+    assert_eq('nofile', vim.bo[bufnr].buftype)
+    assert_eq('wipe', vim.bo[bufnr].bufhidden)
+    assert_eq('copilot-agent-dashboard-prompt', vim.bo[prompt_bufnr].filetype)
+    assert_true(vim.api.nvim_buf_get_name(prompt_bufnr):find('CopilotAgentDashboardPrompt', 1, true) ~= nil)
+    assert_eq(2, vim.api.nvim_win_get_height(agent.state.dashboard_prompt_winid))
+    assert_true(vim.wo[agent.state.dashboard_prompt_winid].winbar:find('Enter command', 1, true) ~= nil)
+    assert_eq(agent.state.dashboard_prompt_winid, vim.api.nvim_get_current_win())
+    assert_eq(true, vim.b[bufnr].minisessions_disable)
+    assert_eq(true, vim.b[prompt_bufnr].minisessions_disable)
+    assert_not_nil(find_line_containing(lines, short_logo_line))
+    assert_not_nil(title_line)
+    assert_not_nil(session_line)
+    assert_not_nil(connect_line)
+    assert_not_nil(switch_line)
+    assert_not_nil(model_line)
+    assert_true(find_line_containing(lines, 'Open chat') == nil)
+    assert_true(find_line_containing(lines, ':CopilotAgentAsk') == nil)
+
+    for _, logo_line in ipairs(logo_lines) do
+      local logo_line_width = vim.fn.strdisplaywidth(logo_line)
+      if logo_line_width > logo_block_width then
+        logo_block_width = logo_line_width
+        wide_logo_line = logo_line
+      end
+    end
+
+    local block_padding =
+      math.floor((vim.api.nvim_win_get_width(agent.state.dashboard_winid) - logo_block_width) / 2)
+    local rendered_short_logo_line = find_line_containing(lines, short_logo_line)
+    local rendered_wide_logo_line = find_line_containing(lines, wide_logo_line)
+
+    assert_eq(
+      string.rep(' ', block_padding) .. short_logo_line .. string.rep(' ', logo_block_width - vim.fn.strdisplaywidth(short_logo_line)),
+      rendered_short_logo_line
+    )
+    assert_eq(
+      string.rep(' ', block_padding) .. wide_logo_line .. string.rep(' ', logo_block_width - vim.fn.strdisplaywidth(wide_logo_line)),
+      rendered_wide_logo_line
+    )
+
+    local expected_padding =
+      math.floor((vim.api.nvim_win_get_width(agent.state.dashboard_winid) - vim.fn.strdisplaywidth('Copilot Agent Dashboard')) / 2)
+    local actual_padding = (title_line:find('%S') or 1) - 1
+    assert_eq(expected_padding, actual_padding)
+  end)
+
+  it('opens on startup when Neovim starts with an empty buffer', function()
+    agent.state.config.dashboard.auto_open = true
+
+    dashboard.maybe_open_on_startup()
+
+    local bufnr = agent.state.dashboard_bufnr
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert_eq(agent.state.dashboard_bufnr, bufnr)
+    assert_eq('copilot-agent-dashboard', vim.bo[bufnr].filetype)
+    assert_eq(agent.state.dashboard_prompt_winid, vim.api.nvim_get_current_win())
+    assert_not_nil(find_line_containing(lines, 'Use the prompt below to resume the latest session in this folder or create a new one.'))
+  end)
+
+  it('submitting the dashboard prompt hands off to chat in the current project session', function()
+    local original_attach_latest_project = session_mod.attach_latest_project_session_or_create
+    local original_open_chat = agent.open_chat
+    local original_ask = agent.ask
+    local original_execute_slash = agent.execute_slash_command
+    local calls = {}
+
+    session_mod.attach_latest_project_session_or_create = function(callback)
+      calls.attach = true
+      agent.state.session_id = 'project-session'
+      callback('project-session', nil)
+    end
+    agent.open_chat = function(opts)
+      calls.open_chat = opts
+    end
+    agent.ask = function(prompt)
+      calls.ask = prompt
+    end
+    agent.execute_slash_command = function(prompt)
+      calls.execute = prompt
+      return false
+    end
+
+    agent.open_dashboard()
+    dashboard._submit_prompt('Explain the latest changes')
+
+    session_mod.attach_latest_project_session_or_create = original_attach_latest_project
+    agent.open_chat = original_open_chat
+    agent.ask = original_ask
+    agent.execute_slash_command = original_execute_slash
+
+    assert_true(calls.attach == true)
+    assert_eq('Explain the latest changes', calls.execute)
+    assert_eq('Explain the latest changes', calls.ask)
+    assert_true(calls.open_chat.replace_current)
+    assert_false(agent.state.dashboard_prompt_winid ~= nil and vim.api.nvim_win_is_valid(agent.state.dashboard_prompt_winid))
+  end)
 end)
 
 describe('statusline API', function()
@@ -1157,6 +1331,76 @@ describe('model state sync', function()
     assert_true(joined:find('assistant.message received', 1, true) ~= nil)
     assert_true(joined:find('assistant.message merge decision=', 1, true) ~= nil)
     assert_true(joined:find('assistant stream update applying', 1, true) ~= nil)
+  end)
+
+  it('does not emit deprecated assistant.message_delta stitch diagnostics', function()
+    local original_stdpath = vim.fn.stdpath
+    local original_notify = vim.notify
+    local temp_log_dir = vim.fn.tempname()
+    local notifications = {}
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+    vim.notify = function(message, level)
+      notifications[#notifications + 1] = { message = message, level = level }
+    end
+
+    agent.setup({
+      auto_create_session = false,
+      notify = false,
+      file_log_level = 'INFO',
+      service = {
+        auto_start = true,
+      },
+    })
+    events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-log'
+    agent.open_chat()
+
+    local prompt_idx = render.append_entry('user', 'trace delta stitch')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-log',
+      prompt = 'trace delta stitch',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      id = 'delta-1',
+      parentId = nil,
+      timestamp = '2026-05-03T08:30:00Z',
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-log',
+        deltaContent = 'Repeated line.',
+      },
+    })
+    events.handle_session_event({
+      id = 'delta-2',
+      parentId = 'delta-1',
+      timestamp = '2026-05-03T08:30:01Z',
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-log',
+        deltaContent = 'Repeated line.',
+      },
+    })
+
+    vim.wait(250)
+
+    vim.fn.stdpath = original_stdpath
+    vim.notify = original_notify
+    local log_path = temp_log_dir .. '/copilot_agent.log'
+    local joined = ''
+    if vim.fn.filereadable(log_path) == 1 then
+      joined = table.concat(vim.fn.readfile(log_path), '\n')
+    end
+    assert_true(joined:find('assistant.message_delta stitch diverged from direct append', 1, true) == nil)
+    assert_eq(0, #notifications)
   end)
 
   it('preserves distinct assistant.message chunks when the same message id sends non-overlapping content', function()
@@ -3586,7 +3830,22 @@ describe('chat input behavior', function()
     assert_true(refresh_calls > 0)
   end)
 
-  it('compacts prose spacing while keeping lists and status lines visually separated', function()
+  it('shows the default empty-state message when the chat buffer has no messages', function()
+    local render = require('copilot_agent.render')
+    render.clear_transcript()
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    render.render_chat()
+
+    local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
+    assert.same({
+      'No messages yet.',
+      'Press i or <Enter> to open the input buffer.',
+      'Run :CopilotAgentAsk to send a prompt from the command line.',
+    }, { unpack(lines, 5, 7) })
+  end)
+
+  it('preserves assistant blank lines instead of compacting prose spacing', function()
     local render = require('copilot_agent.render')
     local lines = render.entry_lines({
       kind = 'assistant',
@@ -3604,19 +3863,17 @@ describe('chat input behavior', function()
     assert.same({
       'Assistant:',
       '  First sentence.',
-      '  Second sentence.',
       '  ',
+      '  Second sentence.',
       '  - item one',
       '  - item two',
-      '  ',
       '  After list.',
-      '  ',
       '  Done.',
       '',
     }, lines)
   end)
 
-  it('preserves fenced code blocks without inserting extra blank lines inside them', function()
+  it('preserves fenced code blocks without injecting extra blank lines around them', function()
     local render = require('copilot_agent.render')
     local lines = render.entry_lines({
       kind = 'assistant',
@@ -3634,14 +3891,27 @@ describe('chat input behavior', function()
     assert.same({
       'Assistant:',
       '  Before code.',
-      '  ',
       '  ```lua',
       '  # heading-like comment',
       '  - list-like line',
       '  print("hello")',
       '  ```',
-      '  ',
       '  After code.',
+      '',
+    }, lines)
+  end)
+
+  it('does not truncate long assistant lines in transcript rendering', function()
+    local render = require('copilot_agent.render')
+    local content = string.rep('Long assistant output segment. ', 80)
+    local lines = render.entry_lines({
+      kind = 'assistant',
+      content = content,
+    }, 1, false)
+
+    assert.same({
+      'Assistant:',
+      '  ' .. content,
       '',
     }, lines)
   end)
@@ -3755,6 +4025,57 @@ describe('chat input behavior', function()
     }, { unpack(lines, #lines - 2, #lines) })
   end)
 
+  it('replaces a delta-built live draft when assistant.message sends a shorter suffix snapshot', function()
+    local render = require('copilot_agent.render')
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    local prompt_idx = render.append_entry('user', 'debug live transcript')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'debug live transcript',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-1',
+        deltaContent = 'Still tracing the live log for duplicate assistant items.',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-1',
+        deltaContent = 'I found the merge helper issue.',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-1',
+        content = 'I found the merge helper issue.',
+      },
+    })
+
+    vim.wait(250)
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('I found the merge helper issue.', entry.content)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Assistant:',
+      '  I found the merge helper issue.',
+      '',
+    }, { unpack(lines, #lines - 2, #lines) })
+  end)
+
   it('reuses the trailing live assistant entry when turn tracking is briefly missing', function()
     local render = require('copilot_agent.render')
     local events = require('copilot_agent.events')
@@ -3811,6 +4132,193 @@ describe('chat input behavior', function()
     }, { unpack(lines, #lines - 2, #lines) })
   end)
 
+  it('starts a fresh assistant block after turn_end even when tool activity makes chat busy again', function()
+    local render = require('copilot_agent.render')
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    local prompt_idx = render.append_entry('user', 'check transcript state')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'check transcript state',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-first',
+        content = 'First turn summary.',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-second',
+        content = 'Second turn summary.',
+      },
+    })
+
+    vim.wait(250)
+
+    local assistant_entries = {}
+    for _, entry in ipairs(agent.state.entries) do
+      if entry.kind == 'assistant' then
+        assistant_entries[#assistant_entries + 1] = entry
+      end
+    end
+
+    assert_eq(2, #assistant_entries)
+    assert_eq('First turn summary.', assistant_entries[1].content)
+    assert_eq('Second turn summary.', assistant_entries[2].content)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Assistant:',
+      '  First turn summary.',
+      '',
+      'Assistant:',
+      '  Second turn summary.',
+      '',
+    }, { unpack(lines, #lines - 5, #lines) })
+  end)
+
+  it('starts streamed assistant output in a fresh block after assistant.turn_end', function()
+    local render = require('copilot_agent.render')
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    local prompt_idx = render.append_entry('user', 'inspect duplicate rendering')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'inspect duplicate rendering',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-first',
+        content = 'First turn summary.',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-second',
+        deltaContent = 'Second turn live reply.',
+      },
+    })
+
+    vim.wait(250)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Assistant:',
+      '  First turn summary.',
+      '',
+      'Assistant:',
+      '  Second turn live reply.',
+      '',
+    }, { unpack(lines, #lines - 5, #lines) })
+  end)
+
+  it('keeps a transcript activity summary between assistant turns', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-first',
+        content = 'I am investigating the mismatch now.',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.intent',
+      data = {
+        intent = 'Inspecting activity strings',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'rg',
+        arguments = { 'activity', 'lua/copilot_agent' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-second',
+        content = 'I found the activity summary hook.',
+      },
+    })
+
+    vim.wait(250)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Assistant:',
+      '  I am investigating the mismatch now.',
+      '',
+      'Activity:',
+      '  Inspecting activity strings',
+      '  Ran bash — rg activity lua/copilot_agent',
+      '',
+      'Assistant:',
+      '  I found the activity summary hook.',
+      '',
+    }, { unpack(lines, #lines - 9, #lines) })
+  end)
+
   it('preserves punctuation and blank-line deltas after real streamed content starts', function()
     local render = require('copilot_agent.render')
     local events = require('copilot_agent.events')
@@ -3856,7 +4364,7 @@ describe('chat input behavior', function()
     }, { unpack(lines, #lines - 4, #lines) })
   end)
 
-  it('does not append repeated full-line assistant.message_delta chunks twice', function()
+  it('appends repeated full-line assistant.message_delta chunks exactly as streamed', function()
     local render = require('copilot_agent.render')
     local events = require('copilot_agent.events')
     agent.state.session_id = 'session-123'
@@ -3889,13 +4397,56 @@ describe('chat input behavior', function()
 
     vim.wait(250)
 
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq(
+      'I am checking the request error path.I am checking the request error path.\nI am adding a focused regression.\nI am adding a focused regression.',
+      entry.content
+    )
+
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
       'Assistant:',
-      '  I am checking the request error path.',
+      '  I am checking the request error path.I am checking the request error path.',
+      '  I am adding a focused regression.',
       '  I am adding a focused regression.',
       '',
-    }, { unpack(lines, #lines - 3, #lines) })
+    }, { unpack(lines, #lines - 4, #lines) })
+  end)
+
+  it('does not collapse indentation spaces or fence backticks across assistant.message_delta chunks', function()
+    local render = require('copilot_agent.render')
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+
+    local prompt_idx = render.append_entry('user', 'check raw append')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'check raw append',
+      entry_index = prompt_idx,
+    }
+
+    local function delta(chunk)
+      events.handle_session_event({
+        type = 'assistant.message_delta',
+        data = {
+          messageId = 'assistant-1',
+          deltaContent = chunk,
+        },
+      })
+    end
+
+    delta('  ')
+    delta(' local value = 1')
+    delta('\n  ``')
+    delta('`\n\n')
+
+    vim.wait(250)
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('   local value = 1\n  ```\n\n', entry.content)
   end)
 
   it('prefers punctuation-refined assistant.message snapshots instead of appending near-duplicates', function()
@@ -4805,6 +5356,107 @@ describe('checkpoint id replay', function()
 
     assert_eq(nil, agent.state.entries[1].checkpoint_id)
     assert_eq(nil, agent.state.entries[3].checkpoint_id)
+  end)
+
+  it('preserves assistant block boundaries when session history is reloaded', function()
+    local callback_err
+    local callback_count
+
+    checkpoints.list = function()
+      return {}
+    end
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions/session-123/messages', path)
+      callback({
+        events = {
+          { type = 'assistant.turn_start', data = {} },
+          { type = 'assistant.message', data = { messageId = 'assistant-1', content = 'First rebuild note.' } },
+          { type = 'assistant.turn_end', data = {} },
+          { type = 'assistant.turn_start', data = {} },
+          { type = 'assistant.message', data = { messageId = 'assistant-2', content = 'Second rebuild note.' } },
+          { type = 'assistant.turn_end', data = {} },
+          { type = 'assistant.turn_start', data = {} },
+          { type = 'assistant.message', data = { messageId = 'assistant-3', content = 'Third rebuild note.' } },
+          { type = 'assistant.turn_end', data = {} },
+        },
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.events'] = nil
+    events = require('copilot_agent.events')
+    agent.open_chat()
+    events.reload_session_history('session-123', function(err, count)
+      callback_err = err
+      callback_count = count
+    end)
+
+    assert_eq(nil, callback_err)
+    assert_eq(9, callback_count)
+
+    local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
+    assert.same({
+      'Assistant:',
+      '  First rebuild note.',
+      '',
+      'Assistant:',
+      '  Second rebuild note.',
+      '',
+      'Assistant:',
+      '  Third rebuild note.',
+      '',
+    }, { unpack(lines, #lines - 8, #lines) })
+  end)
+
+  it('rebuilds transcript activity summaries when session history is reloaded', function()
+    local callback_err
+    local callback_count
+
+    checkpoints.list = function()
+      return {}
+    end
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions/session-123/messages', path)
+      callback({
+        events = {
+          { type = 'assistant.turn_start', data = {} },
+          { type = 'assistant.message', data = { messageId = 'assistant-1', content = 'First rebuild note.' } },
+          { type = 'assistant.intent', data = { intent = 'Inspecting activity strings' } },
+          { type = 'tool.execution_start', data = { toolName = 'bash', command = 'rg', arguments = { 'activity' } } },
+          { type = 'tool.execution_complete', data = {} },
+          { type = 'assistant.turn_end', data = {} },
+          { type = 'assistant.turn_start', data = {} },
+          { type = 'assistant.message', data = { messageId = 'assistant-2', content = 'Second rebuild note.' } },
+          { type = 'assistant.turn_end', data = {} },
+        },
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.events'] = nil
+    events = require('copilot_agent.events')
+    agent.open_chat()
+    events.reload_session_history('session-123', function(err, count)
+      callback_err = err
+      callback_count = count
+    end)
+
+    assert_eq(nil, callback_err)
+    assert_eq(9, callback_count)
+
+    local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
+    assert.same({
+      'Assistant:',
+      '  First rebuild note.',
+      '',
+      'Activity:',
+      '  Inspecting activity strings',
+      '  Ran bash — rg activity',
+      '',
+      'Assistant:',
+      '  Second rebuild note.',
+      '',
+    }, { unpack(lines, #lines - 9, #lines) })
   end)
 end)
 

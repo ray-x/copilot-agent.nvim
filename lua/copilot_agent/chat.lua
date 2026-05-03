@@ -355,7 +355,10 @@ end
 -- Open the chat window. Respects chat.fullscreen and chat.buf_name config.
 local function open_chat_win(bufnr, opts)
   local fullscreen = (opts and opts.fullscreen) or (state.config.chat and state.config.chat.fullscreen)
-  if fullscreen then
+  if opts and opts.replace_current then
+    vim.api.nvim_win_set_buf(0, bufnr)
+    state.chat_winid = vim.api.nvim_get_current_win()
+  elseif fullscreen then
     -- Full-screen: open in a new tab.
     vim.cmd('tabnew')
     vim.api.nvim_win_set_buf(0, bufnr)
@@ -849,7 +852,7 @@ function M.ask(prompt, opts)
   opts = opts or {}
   local text = prompt
   if text == nil or text == '' then
-    require('copilot_agent').open_chat()
+    require('copilot_agent').open_chat({ replace_current = opts.replace_current })
     require('copilot_agent.input').open_input_window()
     return
   end
@@ -873,7 +876,10 @@ function M.ask(prompt, opts)
     end
   end
 
-  require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
+  require('copilot_agent').open_chat({
+    activate_input_on_session_ready = false,
+    replace_current = opts.replace_current,
+  })
 
   local with_session = require('copilot_agent.session').with_session
   with_session(function(session_id, err)
@@ -885,7 +891,10 @@ function M.ask(prompt, opts)
     end
 
     local function dispatch_prompt()
-      require('copilot_agent').open_chat({ activate_input_on_session_ready = false })
+      require('copilot_agent').open_chat({
+        activate_input_on_session_ready = false,
+        replace_current = opts.replace_current,
+      })
       local entry_index = append_entry('user', text, opts.attachments and #opts.attachments > 0 and vim.deepcopy(opts.attachments) or nil)
       state.pending_checkpoint_turn = {
         session_id = session_id,
@@ -909,7 +918,9 @@ function M.ask(prompt, opts)
         if request_err then
           state.pending_checkpoint_turn = nil
           state.active_turn_assistant_index = nil
+          state.live_assistant_entry_index = nil
           state.active_turn_assistant_message_id = nil
+          state.active_assistant_merge_group = nil
           state.active_tool = nil
           state.active_tool_run_id = nil
           state.active_tool_detail = nil

@@ -83,6 +83,8 @@ local function help_lines()
     '  Output pane',
     '    q               Close chat window',
     '    <C-c>           Cancel current turn',
+    '    zA              Toggle Activity details',
+    '    gA              Open Activity details float',
     '    R               Refresh/re-render',
     '    ?               This help',
     '',
@@ -443,6 +445,14 @@ function M.ensure_chat_window(opts)
     reset_frozen_render()
     render_chat()
   end, { buffer = bufnr, silent = true })
+
+  vim.keymap.set('n', 'zA', function()
+    render.toggle_activity_entries()
+  end, { buffer = bufnr, silent = true, desc = 'Toggle Activity transcript details' })
+
+  vim.keymap.set('n', 'gA', function()
+    render.show_activity_details_under_cursor()
+  end, { buffer = bufnr, silent = true, desc = 'Open Activity details float' })
 
   for _, lhs in ipairs({ 'i', 'I', 'a', 'A', 'o', 'O', '<CR>' }) do
     vim.keymap.set('n', lhs, function()
@@ -929,6 +939,8 @@ function M.ask(prompt, opts)
           state.overlay_tool_queue = {}
           state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
           state.recent_activity_lines = {}
+          state.recent_activity_items = {}
+          state.recent_activity_tool_calls = {}
           state.current_intent = nil
           state.chat_busy = false
           refresh_statuslines()

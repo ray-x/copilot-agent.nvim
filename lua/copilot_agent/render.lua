@@ -7,14 +7,32 @@
 local uv = vim.uv or vim.loop
 local cfg = require('copilot_agent.config')
 local utils = require('copilot_agent.utils')
+local window = require('copilot_agent.window')
 local state = cfg.state
 local log = cfg.log
+local notify = cfg.notify
 local normalize_base_url = cfg.normalize_base_url
 local max_log_content_length = cfg.log_content_length or 240
 
 local M = {}
 
 local highlight_lines -- forward declaration; defined below
+local ACTIVITY_PREVIEW_MAX_WIDTH = 32
+local ACTIVITY_DETAIL_PREFIXES = {
+  'Ran ',
+  'Viewed ',
+  'Read ',
+  'Searched ',
+  'Queried ',
+  'Fetched ',
+  'Updated ',
+  'Added ',
+  'Deleted ',
+  'Moved ',
+  'Edited ',
+  'Used ',
+  'Started ',
+}
 
 local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
@@ -93,6 +111,34 @@ local function preview_log_text(text, max_len)
   return preview
 end
 
+local function truncate_display_text(text, max_width)
+  text = type(text) == 'string' and text or ''
+  max_width = math.max(1, math.floor(tonumber(max_width) or 1))
+  if vim.fn.strdisplaywidth(text) <= max_width then
+    return text
+  end
+  if max_width <= 1 then
+    return '…'
+  end
+
+  local out = {}
+  local width = 0
+  local char_count = vim.fn.strchars(text)
+  for idx = 1, char_count do
+    local s = vim.fn.strcharpart(text, idx - 1, 1)
+    local next_width = vim.fn.strdisplaywidth(table.concat(out) .. s .. '…')
+    if next_width > max_width then
+      break
+    end
+    out[#out + 1] = s
+    width = next_width
+  end
+  if #out == 0 or width > max_width then
+    return '…'
+  end
+  return table.concat(out) .. '…'
+end
+
 local function wrap_overlay_text(text, max_width)
   text = type(text) == 'string' and text:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
   if text == '' then
@@ -134,15 +180,7 @@ local function tool_is_displayable_in_overlay(name)
     return false
   end
   local normalized = vim.trim(name):lower()
-  if
-    normalized == 'bash'
-    or normalized == 'sh'
-    or normalized == 'zsh'
-    or normalized == 'fish'
-    or normalized == 'pwsh'
-    or normalized == 'powershell'
-    or normalized == 'cmd'
-  then
+  if normalized == 'bash' or normalized == 'sh' or normalized == 'zsh' or normalized == 'fish' or normalized == 'pwsh' or normalized == 'powershell' or normalized == 'cmd' then
     return true
   end
   return false
@@ -155,11 +193,7 @@ local function activity_overlay_lines(_)
   end
 
   local line = overlay_tool.tool
-  if
-    type(overlay_tool.detail) == 'string'
-    and overlay_tool.detail ~= ''
-    and overlay_tool.detail ~= overlay_tool.tool
-  then
+  if type(overlay_tool.detail) == 'string' and overlay_tool.detail ~= '' and overlay_tool.detail ~= overlay_tool.tool then
     line = line .. ' — ' .. overlay_tool.detail
   end
   line = type(line) == 'string' and line:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
@@ -235,14 +269,7 @@ local function update_reasoning_overlay_now()
 
   local enabled, max_lines = reasoning_config()
   if not enabled or state.history_loading then
-    log(
-      string.format(
-        'reasoning overlay skipped enabled=%s history_loading=%s',
-        tostring(enabled),
-        tostring(state.history_loading)
-      ),
-      vim.log.levels.DEBUG
-    )
+    log(string.format('reasoning overlay skipped enabled=%s history_loading=%s', tostring(enabled), tostring(state.history_loading)), vim.log.levels.DEBUG)
     return
   end
 
@@ -265,16 +292,7 @@ local function update_reasoning_overlay_now()
     virt_lines_leftcol = true,
     virt_lines_above = anchor_above,
   })
-  log(
-    string.format(
-      'reasoning overlay updated activity=%d reasoning=%d anchor_row=%d above=%s',
-      #task_lines,
-      #reasoning_lines,
-      anchor_row,
-      tostring(anchor_above)
-    ),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('reasoning overlay updated activity=%d reasoning=%d anchor_row=%d above=%s', #task_lines, #reasoning_lines, anchor_row, tostring(anchor_above)), vim.log.levels.DEBUG)
 end
 
 function M.refresh_reasoning_overlay(immediate)
@@ -390,8 +408,7 @@ local function pending_assistant_entry_key()
 
   local pending_turn = state.pending_checkpoint_turn
   if pending_turn and pending_turn.session_id == state.session_id and pending_turn.entry_index then
-    state.pending_assistant_entry_key =
-      string.format('pending:%s:%s', pending_turn.session_id, pending_turn.entry_index)
+    state.pending_assistant_entry_key = string.format('pending:%s:%s', pending_turn.session_id, pending_turn.entry_index)
     return state.pending_assistant_entry_key
   end
 
@@ -836,13 +853,7 @@ local function normalize_content_lines(lines)
     local next_item = normalized[idx + 1]
     local current_blocks_following = item.in_fence and item.fence_role ~= 'close'
     local next_blocks_spacing = next_item and next_item.in_fence and next_item.fence_role ~= 'close'
-    if
-      next_item
-      and not current_blocks_following
-      and not next_blocks_spacing
-      and next_item.kind ~= 'blank'
-      and needs_blank_after(item.kind, next_item.kind)
-    then
+    if next_item and not current_blocks_following and not next_blocks_spacing and next_item.kind ~= 'blank' and needs_blank_after(item.kind, next_item.kind) then
       with_transitions[#with_transitions + 1] = ''
     end
   end
@@ -866,6 +877,208 @@ local function verbatim_content_lines(lines)
   return preserved
 end
 
+local function activity_entries_visible()
+  return state.activity_entries_visible == true
+end
+
+local function is_activity_detail_line(line)
+  if type(line) ~= 'string' or line == '' then
+    return false
+  end
+  for _, prefix in ipairs(ACTIVITY_DETAIL_PREFIXES) do
+    if line:sub(1, #prefix) == prefix then
+      return true
+    end
+  end
+  return false
+end
+
+local function activity_preview_text(line)
+  if type(line) ~= 'string' or line == '' then
+    return ''
+  end
+  local detail = line:match('^[^—]+ — (.+)$')
+  return vim.trim(detail or line)
+end
+
+local function collapsed_activity_line(content)
+  local lines = normalize_content_lines(split_lines(content))
+  local count = 0
+  local preview_source
+  local fallback_line
+  for _, line in ipairs(lines) do
+    if type(line) == 'string' and line ~= '' then
+      count = count + 1
+      fallback_line = fallback_line or line
+      if not preview_source and is_activity_detail_line(line) then
+        preview_source = line
+      end
+    end
+  end
+
+  if count <= 0 then
+    return 'Activity: hidden'
+  end
+  local count_summary = count == 1 and '1 item hidden' or tostring(count) .. ' items hidden'
+  local preview = truncate_display_text(activity_preview_text(preview_source or fallback_line), ACTIVITY_PREVIEW_MAX_WIDTH)
+  if preview == '' then
+    return 'Activity: ' .. count_summary
+  end
+  return string.format('Activity: %s (%s)', preview, count_summary)
+end
+
+local function entry_index_at_row(row)
+  row = tonumber(row)
+  if not row or row < 0 then
+    return nil
+  end
+
+  local candidate_row
+  local candidate_idx
+  for start_row, idx in pairs(state.entry_row_index or {}) do
+    if type(start_row) == 'number' and type(idx) == 'number' and start_row <= row then
+      if candidate_row == nil or start_row > candidate_row then
+        candidate_row = start_row
+        candidate_idx = idx
+      end
+    end
+  end
+  return candidate_idx
+end
+
+local function normalize_activity_detail_text(text)
+  if type(text) ~= 'string' then
+    return nil
+  end
+  text = text:gsub('\r\n?', '\n')
+  if text == '' then
+    return nil
+  end
+  return text
+end
+
+local function append_markdown_heading(lines, heading)
+  if #lines > 0 and lines[#lines] ~= '' then
+    lines[#lines + 1] = ''
+  end
+  lines[#lines + 1] = heading
+end
+
+local function append_markdown_code_block(lines, heading, text)
+  text = normalize_activity_detail_text(text)
+  if not text then
+    return
+  end
+  append_markdown_heading(lines, heading)
+  for _, line in ipairs(split_lines(text)) do
+    lines[#lines + 1] = '    ' .. line
+  end
+end
+
+local function append_markdown_inspect_block(lines, heading, value)
+  if value == nil then
+    return
+  end
+  local ok, text = pcall(vim.inspect, value, { depth = 6 })
+  if not ok or type(text) ~= 'string' or text == '' then
+    return
+  end
+  append_markdown_heading(lines, heading)
+  for _, line in ipairs(split_lines(text)) do
+    lines[#lines + 1] = '    ' .. line
+  end
+end
+
+local function append_markdown_field(lines, label, value)
+  value = type(value) == 'string' and value or nil
+  if not value or value == '' then
+    return
+  end
+  lines[#lines + 1] = string.format('- **%s:** %s', label, value)
+end
+
+local function build_activity_details_lines(entry)
+  local lines = { '# Activity details' }
+  local summary = normalize_activity_detail_text(entry and entry.content or '')
+  if summary then
+    append_markdown_heading(lines, '## Turn summary')
+    for _, line in ipairs(split_lines(summary)) do
+      lines[#lines + 1] = '- ' .. line
+    end
+  end
+
+  local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
+  local tool_count = 0
+  for _, item in ipairs(items) do
+    if type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output or item.complete_data) then
+      tool_count = tool_count + 1
+      local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Tool ' .. tostring(tool_count))
+      append_markdown_heading(lines, string.format('## Tool %d — %s', tool_count, title))
+      append_markdown_field(lines, 'Tool', item.tool_name)
+      append_markdown_field(lines, 'Command', item.tool_detail)
+      append_markdown_field(lines, 'Tool call ID', item.tool_call_id)
+      if item.success ~= nil then
+        lines[#lines + 1] = string.format('- **Status:** %s', item.success and 'success' or 'failed')
+      end
+      if type(item.progress_messages) == 'table' and #item.progress_messages > 0 then
+        append_markdown_heading(lines, '### Progress')
+        for _, message in ipairs(item.progress_messages) do
+          lines[#lines + 1] = '- ' .. tostring(message)
+        end
+      end
+      append_markdown_code_block(lines, '### Error', item.error_message)
+      append_markdown_code_block(lines, item.output_text and '### Output' or '### Partial output', item.output_text or item.partial_output)
+      append_markdown_inspect_block(lines, '### Telemetry', item.tool_telemetry)
+    end
+  end
+
+  if summary == nil and tool_count == 0 then
+    lines[#lines + 1] = ''
+    lines[#lines + 1] = 'No activity details available.'
+  end
+  return lines
+end
+
+local function open_activity_details_float(entry)
+  local lines = build_activity_details_lines(entry)
+  local width = math.min(math.max(60, math.floor(vim.o.columns * 0.85)), 140)
+  local height = math.min(math.max(#lines + 2, 12), math.floor(vim.o.lines * 0.85))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].modifiable = false
+
+  local winid = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = height,
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = 'minimal',
+    border = 'rounded',
+    title = ' Activity details ',
+    title_pos = 'center',
+  })
+  window.protect_markdown_buffer(buf, winid)
+  window.set_window_syntax(winid, 'markdown')
+  vim.wo[winid].wrap = true
+  vim.wo[winid].linebreak = false
+
+  local function close()
+    if vim.api.nvim_win_is_valid(winid) then
+      vim.api.nvim_win_close(winid, true)
+    end
+  end
+
+  vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc><Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set({ 'n', 'i' }, '<C-c>', close, { buffer = buf, nowait = true })
+end
+
 -- entry_lines: format one entry into a list of display lines.
 -- align: when true (default), apply align_tables. Pass false during streaming
 --        to skip the O(n) table scan on every incremental update.
@@ -875,9 +1088,13 @@ function M.entry_lines(entry, idx, align)
   end
   local out = {}
   if entry.kind == 'activity' then
-    out[#out + 1] = 'Activity:'
-    for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
-      out[#out + 1] = '  ' .. l
+    if not activity_entries_visible() then
+      out[#out + 1] = collapsed_activity_line(entry.content)
+    else
+      out[#out + 1] = 'Activity:'
+      for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
+        out[#out + 1] = '  ' .. l
+      end
     end
     out[#out + 1] = ''
   elseif entry.kind == 'system' or entry.kind == 'error' then
@@ -1107,12 +1324,37 @@ highlight_lines = function(bufnr, from_row, to_row)
       end
     elseif line == 'Assistant:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
-    elseif line == 'Activity:' or line == 'System:' then
+    elseif line:match('^Activity:') or line == 'System:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentActivity', row, 0, -1)
     elseif line:match('^%s*Done%.$') then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
     end
   end
+end
+
+function M.toggle_activity_entries()
+  state.activity_entries_visible = not activity_entries_visible()
+  M.reset_frozen_render()
+  M.render_chat()
+  return state.activity_entries_visible
+end
+
+function M.show_activity_details_under_cursor(winid)
+  winid = winid or state.chat_winid
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return false
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(winid)
+  local entry_idx = entry_index_at_row((cursor and cursor[1] or 1) - 1)
+  local entry = entry_idx and state.entries[entry_idx] or nil
+  if not entry or entry.kind ~= 'activity' then
+    notify('Move the cursor onto an Activity block first', vim.log.levels.INFO)
+    return false
+  end
+
+  open_activity_details_float(entry)
+  return true
 end
 
 -- ── Full render ───────────────────────────────────────────────────────────────
@@ -1215,9 +1457,7 @@ function M.render_chat()
         end
         elines = collapse_merged_assistant_lines(elines)
       end
-      if entry.kind == 'user' then
-        state.entry_row_index[frozen_lines + #lines] = idx
-      end
+      state.entry_row_index[frozen_lines + #lines] = idx
       -- Track where the streaming assistant entry starts so stream_update
       -- can replace from the correct position after a full render.
       if entry.kind == 'assistant' and idx == state.active_turn_assistant_index then
@@ -1241,12 +1481,7 @@ function M.render_chat()
     stream_timer:stop()
     stream_pending = false
     log(
-      string.format(
-        'render_chat preserved streaming start idx=%s start=%d total_lines=%d',
-        tostring(state.active_turn_assistant_index or '<none>'),
-        state.stream_line_start,
-        total_lines
-      ),
+      string.format('render_chat preserved streaming start idx=%s start=%d total_lines=%d', tostring(state.active_turn_assistant_index or '<none>'), state.stream_line_start, total_lines),
       vim.log.levels.DEBUG
     )
   else
@@ -1404,6 +1639,9 @@ function M.append_entry(kind, content, attachments, opts)
   if type(opts.checkpoint_id) == 'string' and opts.checkpoint_id ~= '' then
     entry.checkpoint_id = opts.checkpoint_id
   end
+  if kind == 'activity' and type(opts.activity_items) == 'table' and #opts.activity_items > 0 then
+    entry.activity_items = vim.deepcopy(opts.activity_items)
+  end
 
   if kind == 'user' then
     -- User messages always begin a fresh assistant turn, including when we are
@@ -1445,9 +1683,7 @@ function M.append_entry(kind, content, attachments, opts)
       if merge_assistant then
         insert_start = merged_assistant_replace_start(bufnr, lc)
       end
-      if kind == 'user' then
-        state.entry_row_index[lc] = idx
-      end
+      state.entry_row_index[insert_start] = idx
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
       vim.api.nvim_buf_set_lines(bufnr, insert_start, -1, false, new_lines)
@@ -1475,9 +1711,7 @@ function M.ensure_assistant_entry(message_id)
   local active_index = active_turn_entry_index()
   if active_index then
     bind_active_turn_message_id(active_index, message_id)
-    local active_key = (type(message_id) == 'string' and message_id ~= '' and message_id)
-      or state.active_turn_assistant_message_id
-      or pending_assistant_entry_key()
+    local active_key = (type(message_id) == 'string' and message_id ~= '' and message_id) or state.active_turn_assistant_message_id or pending_assistant_entry_key()
     bind_live_assistant_entry(active_index)
     return state.entries[active_index], active_index, active_key
   end
@@ -1552,6 +1786,8 @@ function M.clear_transcript()
   state.overlay_tool_queue = {}
   state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
   state.recent_activity_lines = {}
+  state.recent_activity_items = {}
+  state.recent_activity_tool_calls = {}
   state.active_conversation_entry_index = nil
   state.chat_follow_topline = nil
   state.chat_auto_scroll_enabled = true

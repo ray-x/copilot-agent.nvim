@@ -53,16 +53,12 @@ local queued_prompt_request_ids = {}
 local prompt_handoff_delay_ms = 20
 local intentionally_stopped_event_jobs = {}
 local sanitize_permission_text
+local summarize_tool_activity
 
 local function preload_history_checkpoint_ids(session_id)
   local ids = {}
   for _, checkpoint in ipairs(checkpoints.list(session_id)) do
-    if
-      type(checkpoint.assistant_message_id) == 'string'
-      and checkpoint.assistant_message_id ~= ''
-      and type(checkpoint.id) == 'string'
-      and checkpoint.id ~= ''
-    then
+    if type(checkpoint.assistant_message_id) == 'string' and checkpoint.assistant_message_id ~= '' and type(checkpoint.id) == 'string' and checkpoint.id ~= '' then
       ids[checkpoint.assistant_message_id] = {
         id = checkpoint.id,
         prompt = checkpoint.prompt,
@@ -205,25 +201,14 @@ local function log_session_event_payload(event_name, raw_data)
 
   local decoded = decode_json_silently(raw_data)
   if type(decoded) == 'table' then
-    log_debug_trace(
-      'sse.event raw event=' .. tostring(event_name) .. ' payload=',
-      sanitize_session_log_value(decoded),
-      {
-        max_len = 3200,
-        depth = 8,
-      }
-    )
+    log_debug_trace('sse.event raw event=' .. tostring(event_name) .. ' payload=', sanitize_session_log_value(decoded), {
+      max_len = 3200,
+      depth = 8,
+    })
     return
   end
 
-  log(
-    string.format(
-      'sse.event raw event=%s string=%s',
-      tostring(event_name),
-      serialize_log_value(raw_data, { max_len = 3200 })
-    ),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('sse.event raw event=%s string=%s', tostring(event_name), serialize_log_value(raw_data, { max_len = 3200 })), vim.log.levels.DEBUG)
 end
 
 local function preview_delta_boundary(current, delta)
@@ -233,19 +218,9 @@ local function preview_delta_boundary(current, delta)
   local delta_head = delta:sub(1, 24)
   local tail_last = current_tail:sub(-1)
   local head_first = delta_head:sub(1, 1)
-  local suspicious_join = tail_last ~= ''
-    and head_first ~= ''
-    and tail_last:match('[%w%)]')
-    and head_first:match('[%w%(]')
-    and not tail_last:match('%s')
-    and not head_first:match('%s')
+  local suspicious_join = tail_last ~= '' and head_first ~= '' and tail_last:match('[%w%)]') and head_first:match('[%w%(]') and not tail_last:match('%s') and not head_first:match('%s')
 
-  return string.format(
-    'tail=%s head=%s suspicious=%s',
-    preview_log_text(current_tail, 40),
-    preview_log_text(delta_head, 40),
-    tostring(suspicious_join and true or false)
-  )
+  return string.format('tail=%s head=%s suspicious=%s', preview_log_text(current_tail, 40), preview_log_text(delta_head, 40), tostring(suspicious_join and true or false))
 end
 
 ---@deprecated
@@ -344,16 +319,7 @@ local function merge_assistant_message_content(current, incoming, ctx)
     return finish('replace-empty-or-thinking', incoming)
   end
   local function canonicalize(text)
-    return text
-      :gsub('\r\n?', '\n')
-      :gsub('’', "'")
-      :gsub('‘', "'")
-      :gsub('“', '"')
-      :gsub('”', '"')
-      :lower()
-      :gsub('[%p%c]+', ' ')
-      :gsub('%s+', ' ')
-      :match('^%s*(.-)%s*$')
+    return text:gsub('\r\n?', '\n'):gsub('’', "'"):gsub('‘', "'"):gsub('“', '"'):gsub('”', '"'):lower():gsub('[%p%c]+', ' '):gsub('%s+', ' '):match('^%s*(.-)%s*$')
   end
   local function split_message_lines(text)
     return vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
@@ -431,24 +397,14 @@ local function merge_assistant_message_content(current, incoming, ctx)
     if vim.startswith(canonical_incoming, canonical_current) then
       return finish('replace-canonical-prefix-extension', incoming)
     end
-    if
-      ctx
-      and ctx.prefer_incoming_suffix_replacement == true
-      and #canonical_incoming < #canonical_current
-      and canonical_current:sub(-#canonical_incoming) == canonical_incoming
-    then
+    if ctx and ctx.prefer_incoming_suffix_replacement == true and #canonical_incoming < #canonical_current and canonical_current:sub(-#canonical_incoming) == canonical_incoming then
       return finish('replace-live-canonical-suffix', incoming)
     end
     if canonical_current:find(canonical_incoming, 1, true) then
       return finish('keep-canonical-substring', current)
     end
   end
-  if
-    ctx
-    and ctx.prefer_incoming_suffix_replacement == true
-    and #incoming < #current
-    and current:sub(-#incoming) == incoming
-  then
+  if ctx and ctx.prefer_incoming_suffix_replacement == true and #incoming < #current and current:sub(-#incoming) == incoming then
     return finish('replace-live-literal-suffix', incoming)
   end
   if current:find(incoming, 1, true) then
@@ -496,13 +452,7 @@ local function looks_like_shell_tool(name)
     return false
   end
   name = vim.trim(name):lower()
-  return name == 'bash'
-    or name == 'sh'
-    or name == 'zsh'
-    or name == 'fish'
-    or name == 'pwsh'
-    or name == 'powershell'
-    or name == 'cmd'
+  return name == 'bash' or name == 'sh' or name == 'zsh' or name == 'fish' or name == 'pwsh' or name == 'powershell' or name == 'cmd'
 end
 
 local function overlay_now_ms()
@@ -568,10 +518,8 @@ local function extract_shell_command_text(data)
     end
     visited[value] = true
 
-    local command_with_args = assemble_command_with_args(
-      value.command or value.executable or value.program or value.cmd,
-      value.arguments or value.args or value.argv or value.commandArgs or value.command_args
-    )
+    local command_with_args =
+      assemble_command_with_args(value.command or value.executable or value.program or value.cmd, value.arguments or value.args or value.argv or value.commandArgs or value.command_args)
     if command_with_args then
       return command_with_args
     end
@@ -625,10 +573,276 @@ local function extract_shell_tool_detail(tool_name, data)
   return nil
 end
 
+local activity_nested_keys = {
+  'input',
+  'toolInput',
+  'tool_input',
+  'parameters',
+  'params',
+  'payload',
+  'request',
+  'call',
+  'invocation',
+  'details',
+  'metadata',
+  'options',
+}
+
+local function find_activity_value(value, depth, visited, extractor)
+  if type(value) ~= 'table' or depth > 4 or visited[value] then
+    return nil
+  end
+  visited[value] = true
+
+  local direct = extractor(value)
+  if direct ~= nil then
+    visited[value] = nil
+    return direct
+  end
+
+  for _, key in ipairs(activity_nested_keys) do
+    local nested = find_activity_value(value[key], depth + 1, visited, extractor)
+    if nested ~= nil then
+      visited[value] = nil
+      return nested
+    end
+  end
+
+  for _, nested_value in pairs(value) do
+    local nested = find_activity_value(nested_value, depth + 1, visited, extractor)
+    if nested ~= nil then
+      visited[value] = nil
+      return nested
+    end
+  end
+
+  visited[value] = nil
+  return nil
+end
+
+local function find_activity_string(data, keys)
+  return find_activity_value(data, 1, {}, function(tbl)
+    for _, key in ipairs(keys) do
+      local value = sanitize_permission_text(tbl[key])
+      if value then
+        return value
+      end
+    end
+    return nil
+  end)
+end
+
+local function find_activity_raw_string(data, predicate)
+  return find_activity_value(data, 1, {}, function(tbl)
+    for _, value in pairs(tbl) do
+      if type(value) == 'string' and predicate(value) then
+        return value
+      end
+    end
+    return nil
+  end)
+end
+
+local function normalize_activity_path(path)
+  path = sanitize_permission_text(path)
+  if not path then
+    return nil
+  end
+
+  local wd = working_directory()
+  if type(wd) == 'string' and wd ~= '' then
+    local root = vim.fn.fnamemodify(wd, ':p')
+    local prefix = root:sub(-1) == '/' and root or (root .. '/')
+    if vim.startswith(path, prefix) then
+      return path:sub(#prefix + 1)
+    end
+  end
+
+  return path
+end
+
+local function append_unique(items, value)
+  if type(value) ~= 'string' or value == '' then
+    return
+  end
+  for _, existing in ipairs(items) do
+    if existing == value then
+      return
+    end
+  end
+  items[#items + 1] = value
+end
+
+local function summarize_file_group(verb, items)
+  if #items == 0 then
+    return nil
+  end
+  if #items == 1 then
+    return verb .. ' ' .. items[1]
+  end
+  if #items <= 3 then
+    return verb .. ' ' .. table.concat(items, ', ')
+  end
+  return verb .. ' ' .. tostring(#items) .. ' files'
+end
+
+local function summarize_apply_patch_activity(data)
+  local patch = find_activity_raw_string(data, function(text)
+    return text:find('*** Begin Patch', 1, true) ~= nil
+  end)
+  if type(patch) ~= 'string' or patch == '' then
+    return 'Edited files'
+  end
+
+  local updated, added, deleted, moved = {}, {}, {}, {}
+  for line in patch:gmatch('[^\r\n]+') do
+    local path = line:match('^%*%*%* Update File: (.+)$')
+    if path then
+      append_unique(updated, normalize_activity_path(path))
+    end
+    path = line:match('^%*%*%* Add File: (.+)$')
+    if path then
+      append_unique(added, normalize_activity_path(path))
+    end
+    path = line:match('^%*%*%* Delete File: (.+)$')
+    if path then
+      append_unique(deleted, normalize_activity_path(path))
+    end
+    path = line:match('^%*%*%* Move to: (.+)$')
+    if path then
+      append_unique(moved, normalize_activity_path(path))
+    end
+  end
+
+  local parts = {}
+  local summary = summarize_file_group('Updated', updated)
+  if summary then
+    parts[#parts + 1] = summary
+  end
+  summary = summarize_file_group('Added', added)
+  if summary then
+    parts[#parts + 1] = summary
+  end
+  summary = summarize_file_group('Deleted', deleted)
+  if summary then
+    parts[#parts + 1] = summary
+  end
+  summary = summarize_file_group('Moved', moved)
+  if summary then
+    parts[#parts + 1] = summary
+  end
+
+  if #parts == 0 then
+    return 'Edited files'
+  end
+  return table.concat(parts, '; ')
+end
+
+local function summarize_view_activity(data)
+  local path = find_activity_string(data, { 'path', 'filePath', 'file', 'fileName', 'filename', 'targetPath' })
+  if not path then
+    return 'Viewed file'
+  end
+  return 'Viewed ' .. normalize_activity_path(path)
+end
+
+local function summarize_rg_activity(data)
+  local pattern = find_activity_string(data, { 'pattern', 'query', 'regex' })
+  if pattern and #pattern <= 48 and not pattern:find('%s%s+') then
+    return 'Searched for ' .. pattern
+  end
+
+  local path = find_activity_string(data, { 'path', 'paths' })
+  if path then
+    return 'Searched ' .. normalize_activity_path(path)
+  end
+  return 'Searched code'
+end
+
+local function summarize_sql_activity(data)
+  local description = find_activity_string(data, { 'description', 'summary' })
+  if description then
+    return description
+  end
+  local database = find_activity_string(data, { 'database' })
+  if database then
+    return 'Queried ' .. database
+  end
+  return 'Queried SQL'
+end
+
+local function summarize_shell_command_for_activity(data)
+  local structured = find_activity_value(data, 1, {}, function(tbl)
+    local command = sanitize_permission_text(tbl.command or tbl.executable or tbl.program or tbl.cmd)
+    if not command then
+      return nil
+    end
+
+    local parts = { command }
+    local arg_values = tbl.arguments or tbl.args or tbl.argv or tbl.commandArgs or tbl.command_args
+    if type(arg_values) == 'table' then
+      local total_len = #command
+      for _, value in ipairs(arg_values) do
+        local arg = sanitize_permission_text(value)
+        if arg then
+          if #parts >= 5 or total_len + #arg + 1 > 72 then
+            parts[#parts + 1] = '…'
+            break
+          end
+          parts[#parts + 1] = arg
+          total_len = total_len + #arg + 1
+        end
+      end
+    elseif type(arg_values) == 'string' then
+      local args = sanitize_permission_text(arg_values)
+      if args then
+        if #command + #args + 1 > 72 then
+          parts[#parts + 1] = '…'
+        else
+          parts[#parts + 1] = args
+        end
+      end
+    end
+    return table.concat(parts, ' ')
+  end)
+  if structured then
+    return structured
+  end
+
+  local full = find_activity_string(data, {
+    'fullCommandText',
+    'commandLine',
+    'commandText',
+    'shellCommand',
+    'rawCommand',
+    'raw_command',
+    'invocation',
+  })
+  if not full then
+    return nil
+  end
+
+  local raw = find_activity_raw_string(data, function(text)
+    return text == full or sanitize_permission_text(text) == full
+  end) or full
+  if raw:find('\n', 1, true) or #full > 96 or full:find('<<', 1, true) or full:find('*** Begin Patch', 1, true) then
+    local first = full:match('^([^%s]+)')
+    if first and first ~= '' then
+      return first .. ' script'
+    end
+    return 'shell script'
+  end
+
+  return full
+end
+
 local function remember_recent_activity_line(text)
   text = sanitize_permission_text(text)
   if not text then
     return
+  end
+  if #text > 120 then
+    text = text:sub(1, 119) .. '…'
   end
   if type(state.recent_activity_lines) ~= 'table' then
     state.recent_activity_lines = {}
@@ -641,7 +855,232 @@ local function remember_recent_activity_line(text)
   state.recent_activity_lines[#state.recent_activity_lines + 1] = text
 end
 
-local function summarize_tool_activity(tool_name, data)
+local function ensure_recent_activity_items()
+  if type(state.recent_activity_items) ~= 'table' then
+    state.recent_activity_items = {}
+  end
+  if type(state.recent_activity_tool_calls) ~= 'table' then
+    state.recent_activity_tool_calls = {}
+  end
+  return state.recent_activity_items, state.recent_activity_tool_calls
+end
+
+local function remember_recent_activity_item(item)
+  if type(item) ~= 'table' then
+    return nil, nil
+  end
+  local items, tool_calls = ensure_recent_activity_items()
+  items[#items + 1] = item
+  local idx = #items
+  local tool_call_id = type(item.tool_call_id) == 'string' and item.tool_call_id ~= '' and item.tool_call_id or nil
+  if tool_call_id then
+    tool_calls[tool_call_id] = idx
+  end
+  return item, idx
+end
+
+local function find_recent_tool_activity_item(tool_call_id)
+  local items = type(state.recent_activity_items) == 'table' and state.recent_activity_items or {}
+  local tool_calls = type(state.recent_activity_tool_calls) == 'table' and state.recent_activity_tool_calls or {}
+  local idx = type(tool_call_id) == 'string' and tool_call_id ~= '' and tool_calls[tool_call_id] or nil
+  if type(idx) == 'number' and type(items[idx]) == 'table' then
+    return items[idx], idx
+  end
+  for i = #items, 1, -1 do
+    local item = items[i]
+    if type(item) == 'table' and item.kind == 'tool' then
+      return item, i
+    end
+  end
+  return nil, nil
+end
+
+local function normalize_activity_output_text(text)
+  if type(text) ~= 'string' then
+    return nil
+  end
+  text = text:gsub('\r\n?', '\n')
+  if text == '' then
+    return nil
+  end
+  return text
+end
+
+local function append_unique_activity_output(parts, text)
+  text = normalize_activity_output_text(text)
+  if not text then
+    return
+  end
+  for _, existing in ipairs(parts) do
+    if existing == text then
+      return
+    end
+  end
+  parts[#parts + 1] = text
+end
+
+local function extract_tool_result_contents_text(contents)
+  if type(contents) ~= 'table' then
+    return nil
+  end
+
+  local parts = {}
+  for _, block in ipairs(contents) do
+    if type(block) == 'table' then
+      local block_type = block.type
+      if (block_type == 'text' or block_type == 'terminal') and type(block.text) == 'string' then
+        append_unique_activity_output(parts, block.text)
+      elseif block_type == 'resource' and type(block.resource) == 'table' and type(block.resource.text) == 'string' then
+        append_unique_activity_output(parts, block.resource.text)
+      end
+    end
+  end
+
+  if #parts == 0 then
+    return nil
+  end
+  return table.concat(parts, '\n\n')
+end
+
+local function extract_tool_execution_output_text(data)
+  data = type(data) == 'table' and data or {}
+  local result = type(data.result) == 'table' and data.result or nil
+  local parts = {}
+
+  if result then
+    append_unique_activity_output(parts, result.detailedContent)
+    if #parts == 0 then
+      append_unique_activity_output(parts, extract_tool_result_contents_text(result.contents))
+    end
+    if #parts == 0 then
+      append_unique_activity_output(parts, result.content)
+    end
+  end
+
+  if #parts == 0 and type(data.error) == 'table' then
+    append_unique_activity_output(parts, data.error.message)
+  end
+
+  if #parts == 0 then
+    return nil
+  end
+  return table.concat(parts, '\n\n')
+end
+
+local function fallback_tool_activity_summary(tool_name, detail)
+  local tool = sanitize_permission_text(tool_name)
+  detail = sanitize_permission_text(detail)
+
+  if tool and looks_like_shell_tool(tool) then
+    if detail and detail:match(' script$') then
+      return 'Ran ' .. detail
+    end
+    if detail and detail ~= '' and detail ~= tool then
+      return 'Ran ' .. tool .. ' — ' .. detail
+    end
+    return 'Ran ' .. tool
+  end
+
+  if tool and detail and detail ~= '' and detail ~= tool then
+    return 'Used ' .. tool .. ' — ' .. detail
+  end
+  if tool then
+    return 'Used ' .. tool
+  end
+  if detail then
+    return detail
+  end
+  return 'Tool activity'
+end
+
+local function ensure_recent_tool_activity_item(tool_call_id, tool_name, detail)
+  local item, idx = find_recent_tool_activity_item(tool_call_id)
+  if item then
+    return item, idx
+  end
+  return remember_recent_activity_item({
+    kind = 'tool',
+    summary = fallback_tool_activity_summary(tool_name, detail),
+    tool_name = sanitize_permission_text(tool_name),
+    tool_call_id = sanitize_permission_text(tool_call_id),
+    tool_detail = sanitize_permission_text(detail),
+    progress_messages = {},
+  })
+end
+
+local function capture_tool_execution_start(data)
+  data = type(data) == 'table' and data or {}
+  local detail = extract_shell_tool_detail(data.toolName, data)
+  local summary = summarize_tool_activity(data.toolName, data) or fallback_tool_activity_summary(data.toolName, detail)
+  local tool_call_id = sanitize_permission_text(data.toolCallId)
+
+  remember_recent_activity_line(summary)
+
+  local item, idx = find_recent_tool_activity_item(tool_call_id)
+  if not item or (tool_call_id and item.tool_call_id ~= tool_call_id) then
+    remember_recent_activity_item({
+      kind = 'tool',
+      summary = summary,
+      tool_name = sanitize_permission_text(data.toolName),
+      tool_call_id = tool_call_id,
+      tool_detail = detail,
+      start_data = vim.deepcopy(data),
+      progress_messages = {},
+    })
+    return
+  end
+
+  item.kind = 'tool'
+  item.summary = summary
+  item.tool_name = sanitize_permission_text(data.toolName)
+  item.tool_call_id = tool_call_id or item.tool_call_id
+  item.tool_detail = detail or item.tool_detail
+  item.start_data = vim.deepcopy(data)
+  item.progress_messages = item.progress_messages or {}
+  if tool_call_id then
+    ensure_recent_activity_items()
+    state.recent_activity_tool_calls[tool_call_id] = idx
+  end
+end
+
+local function capture_tool_execution_partial_result(data)
+  data = type(data) == 'table' and data or {}
+  local item = ensure_recent_tool_activity_item(data.toolCallId, state.active_tool, state.active_tool_detail)
+  local partial = normalize_activity_output_text(data.partialOutput)
+  if not item or not partial then
+    return
+  end
+  item.partial_output = (item.partial_output or '') .. partial
+  if type(item.output_text) ~= 'string' or item.output_text == '' then
+    item.output_text = item.partial_output
+  end
+end
+
+local function capture_tool_execution_progress(data)
+  data = type(data) == 'table' and data or {}
+  local item = ensure_recent_tool_activity_item(data.toolCallId, state.active_tool, state.active_tool_detail)
+  local message = sanitize_permission_text(data.progressMessage)
+  if not item or not message then
+    return
+  end
+  item.progress_messages = item.progress_messages or {}
+  append_unique(item.progress_messages, message)
+end
+
+local function capture_tool_execution_complete(data)
+  data = type(data) == 'table' and data or {}
+  local item = ensure_recent_tool_activity_item(data.toolCallId, state.active_tool, state.active_tool_detail)
+  if not item then
+    return
+  end
+  item.complete_data = vim.deepcopy(data)
+  item.success = data.success == true
+  item.error_message = type(data.error) == 'table' and normalize_activity_output_text(data.error.message) or nil
+  item.tool_telemetry = type(data.toolTelemetry) == 'table' and vim.deepcopy(data.toolTelemetry) or nil
+  item.output_text = extract_tool_execution_output_text(data) or item.output_text or item.partial_output
+end
+
+summarize_tool_activity = function(tool_name, data)
   local tool = sanitize_permission_text(tool_name)
   if not tool then
     return nil
@@ -652,65 +1091,124 @@ local function summarize_tool_activity(tool_name, data)
     return nil
   end
 
-  local detail = extract_shell_command_text(data)
-  if not detail then
-    if looks_like_shell_tool(tool) then
-      detail = state.pending_tool_detail
-    else
-      detail = sanitize_permission_text(data and (data.description or data.toolDescription or data.intention or data.summary))
-    end
+  if normalized == 'apply_patch' then
+    return summarize_apply_patch_activity(data)
   end
 
-  local prefix
   if looks_like_shell_tool(tool) then
-    prefix = 'Ran ' .. tool
-  elseif normalized == 'rg' or normalized == 'glob' or normalized:find('search', 1, true) then
-    prefix = 'Searched'
-  elseif normalized == 'view' or normalized == 'web_fetch' or normalized:find('get_file', 1, true) or normalized:find('read', 1, true) then
-    prefix = 'Read'
-  elseif normalized == 'apply_patch' then
-    prefix = 'Edited files'
-  elseif normalized == 'sql' then
-    prefix = detail and 'Queried SQL' or nil
-  else
-    prefix = detail and ('Used ' .. tool) or nil
+    local detail = summarize_shell_command_for_activity(data) or state.pending_tool_detail
+    if detail and detail:match(' script$') then
+      return 'Ran ' .. detail
+    end
+    if detail and detail ~= '' and detail ~= tool then
+      return 'Ran ' .. tool .. ' — ' .. detail
+    end
+    return 'Ran ' .. tool
   end
 
-  if not prefix then
-    return nil
+  if normalized == 'view' then
+    return summarize_view_activity(data)
   end
+
+  if normalized == 'rg' or normalized == 'glob' or normalized:find('search', 1, true) then
+    return summarize_rg_activity(data)
+  end
+
+  if normalized == 'sql' then
+    return summarize_sql_activity(data)
+  end
+
+  if normalized == 'web_fetch' then
+    local url = find_activity_string(data, { 'url' })
+    if url then
+      return 'Fetched ' .. url
+    end
+    return 'Fetched web page'
+  end
+
+  if normalized == 'view' or normalized:find('read', 1, true) or normalized:find('get_file', 1, true) then
+    local path = find_activity_string(data, { 'path', 'filePath', 'file', 'fileName', 'filename', 'targetPath' })
+    if path then
+      return 'Read ' .. normalize_activity_path(path)
+    end
+    return 'Read file'
+  end
+
+  local detail = find_activity_string(data, { 'description', 'toolDescription', 'intention', 'summary' })
   if detail and detail ~= '' and detail ~= tool then
-    return prefix .. ' — ' .. detail
+    return 'Used ' .. tool .. ' — ' .. detail
   end
-  return prefix
+  return 'Used ' .. tool
 end
 
 local function capture_turn_activity_summary(event_type, data)
   if event_type == 'assistant.intent' then
-    remember_recent_activity_line(data.intent)
+    local summary = sanitize_permission_text(data.intent)
+    remember_recent_activity_line(summary)
+    if summary then
+      remember_recent_activity_item({
+        kind = 'intent',
+        summary = summary,
+        data = vim.deepcopy(data),
+      })
+    end
     return
   end
 
   if event_type == 'tool.execution_start' then
-    remember_recent_activity_line(summarize_tool_activity(data.toolName, data))
+    capture_tool_execution_start(data)
+    return
+  end
+
+  if event_type == 'tool.execution_partial_result' then
+    capture_tool_execution_partial_result(data)
+    return
+  end
+
+  if event_type == 'tool.execution_progress' then
+    capture_tool_execution_progress(data)
+    return
+  end
+
+  if event_type == 'tool.execution_complete' then
+    capture_tool_execution_complete(data)
     return
   end
 
   if event_type == 'subagent.started' then
     local title = first_non_empty(data.agentDisplayName, data.agentName, data.agentDescription)
     if title then
-      remember_recent_activity_line('Started ' .. title)
+      local summary = 'Started ' .. title
+      remember_recent_activity_line(summary)
+      remember_recent_activity_item({
+        kind = 'subagent',
+        summary = summary,
+        data = vim.deepcopy(data),
+      })
     end
   end
 end
 
 local function flush_recent_activity_summary()
   local lines = state.recent_activity_lines or {}
-  if #lines == 0 then
-    return
+  local items = state.recent_activity_items or {}
+
+  if #lines == 0 and #items > 0 then
+    for _, item in ipairs(items) do
+      remember_recent_activity_line(item.summary)
+    end
+    lines = state.recent_activity_lines or {}
   end
-  append_entry('activity', table.concat(lines, '\n'))
+
+  if #lines > 0 then
+    append_entry('activity', table.concat(lines, '\n'), nil, {
+      activity_items = items,
+    })
+  end
+
   state.recent_activity_lines = {}
+  state.recent_activity_items = {}
+  state.recent_activity_tool_calls = {}
 end
 
 local function schedule_overlay_tool_clear(delay_ms, run_id)
@@ -1104,17 +1602,11 @@ local function defer_prompt(callback)
 end
 
 local function answer_permission(session_id, request_id, approved, callback)
-  request(
-    'POST',
-    '/sessions/' .. session_id .. '/permission/' .. request_id,
-    { approved = approved },
-    callback
-      or function(_, err)
-        if err then
-          notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
-        end
-      end
-  )
+  request('POST', '/sessions/' .. session_id .. '/permission/' .. request_id, { approved = approved }, callback or function(_, err)
+    if err then
+      notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+    end
+  end)
 end
 
 local function sync_model_state(model, reasoning_effort)
@@ -1419,52 +1911,23 @@ local function handle_host_event(event_name, payload)
       local sid = state.session_id
       local event_session_id = data.sessionId
       if type(event_session_id) == 'string' and sid and event_session_id ~= sid then
-        log(
-          string.format(
-            'host.permission_requested ignored event_session_id=%s active_session_id=%s',
-            tostring(event_session_id),
-            tostring(sid)
-          ),
-          vim.log.levels.DEBUG
-        )
+        log(string.format('host.permission_requested ignored event_session_id=%s active_session_id=%s', tostring(event_session_id), tostring(sid)), vim.log.levels.DEBUG)
         return
       end
-      local auto_allowed = (kind == 'read' or kind == 'write')
-          and approvals.directory_allowed(perm.path or perm.fileName)
-        or approvals.tool_allowed(perm)
+      local auto_allowed = (kind == 'read' or kind == 'write') and approvals.directory_allowed(perm.path or perm.fileName) or approvals.tool_allowed(perm)
       if auto_allowed and sid then
         log(
-          string.format(
-            'host.permission_requested auto-approved kind=%s request_id=%s detail=%s',
-            tostring(kind),
-            tostring(req_id),
-            serialize_log_value(perm, { max_len = log_content_length * 10 })
-          ),
+          string.format('host.permission_requested auto-approved kind=%s request_id=%s detail=%s', tostring(kind), tostring(req_id), serialize_log_value(perm, { max_len = log_content_length * 10 })),
           vim.log.levels.DEBUG
         )
         answer_permission(sid, req_id, true)
         return
       end
       if not enqueue_prompt('permission', payload) then
-        log(
-          string.format(
-            'host.permission_requested dropped duplicate request_id=%s kind=%s',
-            tostring(req_id),
-            tostring(kind)
-          ),
-          vim.log.levels.DEBUG
-        )
+        log(string.format('host.permission_requested dropped duplicate request_id=%s kind=%s', tostring(req_id), tostring(kind)), vim.log.levels.DEBUG)
         return
       end
-      log(
-        string.format(
-          'host.permission_requested enqueued request_id=%s kind=%s detail=%s',
-          tostring(req_id),
-          tostring(kind),
-          serialize_log_value(perm, { max_len = 1200 })
-        ),
-        vim.log.levels.DEBUG
-      )
+      log(string.format('host.permission_requested enqueued request_id=%s kind=%s detail=%s', tostring(req_id), tostring(kind), serialize_log_value(perm, { max_len = 1200 })), vim.log.levels.DEBUG)
       vim.schedule(show_next_prompt)
     end
     -- Auto-approved/rejected decisions are reflected in the statusline; no notify needed.
@@ -1748,9 +2211,7 @@ local function is_expected_reload_attention(err)
     return false
   end
 
-  return message == 'buffer has unsaved changes'
-    or message:find('E37:', 1, true) ~= nil
-    or message:find('No write since last change', 1, true) ~= nil
+  return message == 'buffer has unsaved changes' or message:find('E37:', 1, true) ~= nil or message:find('No write since last change', 1, true) ~= nil
 end
 
 local function reload_attention_level(err)
@@ -1782,12 +2243,7 @@ local function check_open_buffers_for_external_changes(opts)
                 local summary, reload_err = reload_buffer_from_disk(bufnr, path, { force = true })
                 if reload_err then
                   notify(
-                    'External reload needs attention: '
-                      .. vim.fn.fnamemodify(path, ':t')
-                      .. ' ('
-                      .. tostring(summary or 'content updated')
-                      .. '); '
-                      .. tostring(sanitize_reload_error(reload_err)),
+                    'External reload needs attention: ' .. vim.fn.fnamemodify(path, ':t') .. ' (' .. tostring(summary or 'content updated') .. '); ' .. tostring(sanitize_reload_error(reload_err)),
                     reload_attention_level(reload_err)
                   )
                 end
@@ -1821,11 +2277,7 @@ end
 local function handle_session_event(payload)
   local event_type = payload and payload.type or nil
   local data = payload and payload.data or {}
-  log_debug_trace(
-    'session.event received type=' .. tostring(event_type) .. ' data=',
-    sanitize_session_log_value(data),
-    { max_len = 2400, depth = 8 }
-  )
+  log_debug_trace('session.event received type=' .. tostring(event_type) .. ' data=', sanitize_session_log_value(data), { max_len = 2400, depth = 8 })
   capture_turn_activity_summary(event_type, data)
 
   if event_type == 'assistant.message_delta' then
@@ -1838,13 +2290,7 @@ local function handle_session_event(payload)
       refresh_statuslines()
     end
     local pending_turn = state.pending_checkpoint_turn
-    if
-      not state.history_loading
-      and pending_turn
-      and pending_turn.session_id == state.session_id
-      and type(data.messageId) == 'string'
-      and data.messageId ~= ''
-    then
+    if not state.history_loading and pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
       pending_turn.assistant_message_id = data.messageId
     end
     local entry, idx, key = ensure_assistant_entry(data.messageId)
@@ -1889,10 +2335,7 @@ local function handle_session_event(payload)
         }
       end
     else
-      log(
-        string.format('user.message ignored during live session message_id=%s', tostring(data.messageId or '<none>')),
-        vim.log.levels.DEBUG
-      )
+      log(string.format('user.message ignored during live session message_id=%s', tostring(data.messageId or '<none>')), vim.log.levels.DEBUG)
     end
     return
   end
@@ -1914,12 +2357,7 @@ local function handle_session_event(payload)
       assign_history_checkpoint_id(data.messageId)
     elseif not state.history_loading then
       local pending_turn = state.pending_checkpoint_turn
-      if
-        pending_turn
-        and pending_turn.session_id == state.session_id
-        and type(data.messageId) == 'string'
-        and data.messageId ~= ''
-      then
+      if pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
         pending_turn.assistant_message_id = data.messageId
       end
     end
@@ -1944,13 +2382,12 @@ local function handle_session_event(payload)
       or event_type == 'subagent.failed'
       or event_type == 'assistant.intent'
       or event_type == 'tool.execution_start'
+      or event_type == 'tool.execution_partial_result'
+      or event_type == 'tool.execution_progress'
       or event_type == 'tool.execution_complete'
       or event_type == 'assistant.reasoning_delta'
     then
-      log(
-        string.format('session.event skipped during history replay type=%s', tostring(event_type)),
-        vim.log.levels.DEBUG
-      )
+      log(string.format('session.event skipped during history replay type=%s', tostring(event_type)), vim.log.levels.DEBUG)
       return
     end
   end
@@ -1991,6 +2428,8 @@ local function handle_session_event(payload)
     state.chat_busy = false
     complete_overlay_tool(state.active_tool_run_id)
     state.recent_activity_lines = {}
+    state.recent_activity_items = {}
+    state.recent_activity_tool_calls = {}
     state.active_tool = nil
     state.active_tool_run_id = nil
     state.active_tool_detail = nil
@@ -2045,6 +2484,8 @@ local function handle_session_event(payload)
   if event_type == 'assistant.turn_start' then
     clear_reasoning_preview('turn start')
     state.recent_activity_lines = {}
+    state.recent_activity_items = {}
+    state.recent_activity_tool_calls = {}
     state.live_assistant_entry_index = nil
     state.active_assistant_merge_group = nil
     state.active_tool = nil
@@ -2076,19 +2517,21 @@ local function handle_session_event(payload)
     return
   end
 
+  if event_type == 'tool.execution_partial_result' then
+    return
+  end
+
+  if event_type == 'tool.execution_progress' then
+    return
+  end
+
   if event_type == 'tool.execution_complete' then
-    log(
-      string.format(
-        'tool.execution_complete tool=%s payload=%s',
-        tostring(state.active_tool or data.toolName or '<none>'),
-        serialize_log_value(data, { max_len = 1600 })
-      ),
-      vim.log.levels.DEBUG
-    )
+    log(string.format('tool.execution_complete tool=%s payload=%s', tostring(state.active_tool or data.toolName or '<none>'), serialize_log_value(data, { max_len = 1600 })), vim.log.levels.DEBUG)
     complete_overlay_tool(state.active_tool_run_id)
     state.active_tool = nil
     state.active_tool_run_id = nil
     state.active_tool_detail = nil
+    state.pending_tool_detail = nil
     refresh_statuslines()
     refresh_reasoning_overlay()
     return
@@ -2131,10 +2574,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.streaming_delta' then
-    log(
-      'assistant.streaming_delta ignored payload=' .. serialize_log_value(data, { max_len = 1600 }),
-      vim.log.levels.DEBUG
-    )
+    log('assistant.streaming_delta ignored payload=' .. serialize_log_value(data, { max_len = 1600 }), vim.log.levels.DEBUG)
     return
   end
 
@@ -2142,10 +2582,7 @@ local function handle_session_event(payload)
     local kind = data.kind or {}
     local key = first_non_empty(kind.agentId, kind.entryId)
     if not key then
-      log(
-        'system.notification ignored without key payload=' .. serialize_log_value(data, { max_len = 1600 }),
-        vim.log.levels.DEBUG
-      )
+      log('system.notification ignored without key payload=' .. serialize_log_value(data, { max_len = 1600 }), vim.log.levels.DEBUG)
       return
     end
 
@@ -2177,10 +2614,7 @@ local function handle_session_event(payload)
     local op = data.operation or 'update'
     local rel_path = data.path or ''
     if rel_path == '' then
-      log(
-        'session.workspace_file_changed ignored without path payload=' .. serialize_log_value(data, { max_len = 1600 }),
-        vim.log.levels.DEBUG
-      )
+      log('session.workspace_file_changed ignored without path payload=' .. serialize_log_value(data, { max_len = 1600 }), vim.log.levels.DEBUG)
       return
     end
 
@@ -2217,48 +2651,25 @@ local function handle_session_event(payload)
         end
         if reload_err then
           log(
-            string.format(
-              'workspace change update reload skipped path=%s summary=%s error=%s',
-              rel_path,
-              tostring(summary or '<none>'),
-              tostring(sanitize_reload_error(reload_err))
-            ),
+            string.format('workspace change update reload skipped path=%s summary=%s error=%s', rel_path, tostring(summary or '<none>'), tostring(sanitize_reload_error(reload_err))),
             reload_attention_level(reload_err)
           )
           if reload_err ~= 'user declined reload' then
             notify(
-              'Agent updated on disk: '
-                .. rel_path
-                .. ' ('
-                .. tostring(summary or 'content updated')
-                .. '); reload skipped: '
-                .. tostring(sanitize_reload_error(reload_err)),
+              'Agent updated on disk: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. '); reload skipped: ' .. tostring(sanitize_reload_error(reload_err)),
               reload_attention_level(reload_err)
             )
           end
         else
-          log(
-            string.format(
-              'workspace change update reloaded path=%s summary=%s',
-              rel_path,
-              tostring(summary or '<none>')
-            ),
-            vim.log.levels.DEBUG
-          )
-          notify(
-            'Agent reloaded: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. ')',
-            vim.log.levels.INFO
-          )
+          log(string.format('workspace change update reloaded path=%s summary=%s', rel_path, tostring(summary or '<none>')), vim.log.levels.DEBUG)
+          notify('Agent reloaded: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. ')', vim.log.levels.INFO)
         end
         -- Offer diff review if the file is tracked by git.
         if state.config.chat.diff_review ~= false and not reload_err then
           offer_diff_review(abs_path, rel_path)
         end
       else
-        log(
-          string.format('workspace change update without open buffer path=%s abs=%s', rel_path, abs_path),
-          vim.log.levels.DEBUG
-        )
+        log(string.format('workspace change update without open buffer path=%s abs=%s', rel_path, abs_path), vim.log.levels.DEBUG)
         notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
       end
       check_open_buffers_for_external_changes({ skip_path = abs_path })
@@ -2269,10 +2680,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'error' then
-    log(
-      'session.error payload=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 2400, depth = 8 }),
-      vim.log.levels.WARN
-    )
+    log('session.error payload=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 2400, depth = 8 }), vim.log.levels.WARN)
     flush_recent_activity_summary()
     reset_pending_assistant_entry()
     clear_reasoning_preview('error')
@@ -2280,6 +2688,8 @@ local function handle_session_event(payload)
     state.chat_busy = false
     complete_overlay_tool(state.active_tool_run_id)
     state.recent_activity_lines = {}
+    state.recent_activity_items = {}
+    state.recent_activity_tool_calls = {}
     state.active_tool = nil
     state.active_tool_run_id = nil
     state.active_tool_detail = nil
@@ -2295,13 +2705,7 @@ local function handle_session_event(payload)
     return
   end
 
-  log(
-    'session.event unhandled type='
-      .. tostring(event_type)
-      .. ' data='
-      .. serialize_log_value(sanitize_session_log_value(data), { max_len = 1600, depth = 8 }),
-    vim.log.levels.DEBUG
-  )
+  log('session.event unhandled type=' .. tostring(event_type) .. ' data=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 1600, depth = 8 }), vim.log.levels.DEBUG)
 end
 
 local function flush_sse_event()
@@ -2316,15 +2720,7 @@ local function flush_sse_event()
   log_session_event_payload(event_name, raw_data)
   local payload, decode_err = decode_json(raw_data, { log = false })
   if not payload then
-    log(
-      string.format(
-        'sse.event decode failed event=%s error=%s data=%s',
-        tostring(event_name),
-        tostring(decode_err),
-        serialize_log_value(raw_data, { max_len = 3200 })
-      ),
-      vim.log.levels.WARN
-    )
+    log(string.format('sse.event decode failed event=%s error=%s data=%s', tostring(event_name), tostring(decode_err), serialize_log_value(raw_data, { max_len = 3200 })), vim.log.levels.WARN)
     append_entry('error', 'Failed to decode event ' .. event_name .. ': ' .. tostring(decode_err or raw_data))
     return
   end
@@ -2400,14 +2796,7 @@ function M.start_event_stream(session_id)
     'Accept: text/event-stream',
     build_url(string.format('/sessions/%s/events?history=true', session_id)),
   }
-  log(
-    string.format(
-      'sse.stream start session_id=%s url=%s',
-      tostring(session_id or '<none>'),
-      build_url(string.format('/sessions/%s/events?history=true', session_id))
-    ),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('sse.stream start session_id=%s url=%s', tostring(session_id or '<none>'), build_url(string.format('/sessions/%s/events?history=true', session_id))), vim.log.levels.DEBUG)
 
   -- Batch incoming SSE chunks to avoid flooding the Neovim event loop.
   -- on_stdout fires for every curl output chunk (potentially hundreds/sec);
@@ -2477,17 +2866,11 @@ function M.start_event_stream(session_id)
     end)
     state.history_loading = false
     state.history_pending_user_entries = {}
-    log(
-      string.format('sse.stream failed to start session_id=%s', tostring(session_id or '<none>')),
-      vim.log.levels.WARN
-    )
+    log(string.format('sse.stream failed to start session_id=%s', tostring(session_id or '<none>')), vim.log.levels.WARN)
     append_entry('error', 'failed to start event stream')
     return
   end
-  log(
-    string.format('sse.stream started session_id=%s job_id=%s', tostring(session_id or '<none>'), tostring(job_id)),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('sse.stream started session_id=%s job_id=%s', tostring(session_id or '<none>'), tostring(job_id)), vim.log.levels.DEBUG)
   state.events_job_id = job_id
 end
 
@@ -2505,14 +2888,7 @@ function M.reload_session_history(session_id, callback)
   preload_history_checkpoint_ids(session_id)
   request('GET', string.format('/sessions/%s/messages', session_id), nil, function(response, err)
     if err then
-      log(
-        string.format(
-          'session.history reload failed session_id=%s error=%s',
-          tostring(session_id),
-          serialize_log_value(err, { max_len = 1200 })
-        ),
-        vim.log.levels.WARN
-      )
+      log(string.format('session.history reload failed session_id=%s error=%s', tostring(session_id), serialize_log_value(err, { max_len = 1200 })), vim.log.levels.WARN)
       state.history_loading = false
       state.history_checkpoint_ids = nil
       state.history_pending_user_entries = {}
@@ -2524,14 +2900,7 @@ function M.reload_session_history(session_id, callback)
       handle_session_event(event)
     end
 
-    log(
-      string.format(
-        'session.history reloaded session_id=%s event_count=%d',
-        tostring(session_id),
-        #((response and response.events) or {})
-      ),
-      vim.log.levels.DEBUG
-    )
+    log(string.format('session.history reloaded session_id=%s event_count=%d', tostring(session_id), #((response and response.events) or {})), vim.log.levels.DEBUG)
 
     state.history_loading = false
     state.history_checkpoint_ids = nil

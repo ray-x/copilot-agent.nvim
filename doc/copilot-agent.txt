@@ -256,6 +256,8 @@ Normal and insert mode (unless noted):
   <Tab>               Trigger completion (@file or /slash-command)
   <C-p> / <M-p>       Previous prompt from history
   <C-n> / <M-n>       Next prompt from history
+  zA (normal)         Toggle collapsed Activity transcript blocks
+  gA (normal)         Open Activity details float for the block under the cursor
   ? (normal)          Show help with keybindings and session commands
 
 ------------------------------------------------------------------------------

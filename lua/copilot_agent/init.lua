@@ -65,6 +65,9 @@ function M.setup(opts)
   state.overlay_tool_queue = {}
   state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
   state.recent_activity_lines = {}
+  state.recent_activity_items = {}
+  state.recent_activity_tool_calls = {}
+  state.activity_entries_visible = false
   state.current_intent = nil
   state.background_tasks = {}
   state.reasoning_entry_key = nil

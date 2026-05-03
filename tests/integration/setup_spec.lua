@@ -520,22 +520,14 @@ describe('dashboard', function()
       end
     end
 
-    local block_padding =
-      math.floor((vim.api.nvim_win_get_width(agent.state.dashboard_winid) - logo_block_width) / 2)
+    local block_padding = math.floor((vim.api.nvim_win_get_width(agent.state.dashboard_winid) - logo_block_width) / 2)
     local rendered_short_logo_line = find_line_containing(lines, short_logo_line)
     local rendered_wide_logo_line = find_line_containing(lines, wide_logo_line)
 
-    assert_eq(
-      string.rep(' ', block_padding) .. short_logo_line .. string.rep(' ', logo_block_width - vim.fn.strdisplaywidth(short_logo_line)),
-      rendered_short_logo_line
-    )
-    assert_eq(
-      string.rep(' ', block_padding) .. wide_logo_line .. string.rep(' ', logo_block_width - vim.fn.strdisplaywidth(wide_logo_line)),
-      rendered_wide_logo_line
-    )
+    assert_eq(string.rep(' ', block_padding) .. short_logo_line .. string.rep(' ', logo_block_width - vim.fn.strdisplaywidth(short_logo_line)), rendered_short_logo_line)
+    assert_eq(string.rep(' ', block_padding) .. wide_logo_line .. string.rep(' ', logo_block_width - vim.fn.strdisplaywidth(wide_logo_line)), rendered_wide_logo_line)
 
-    local expected_padding =
-      math.floor((vim.api.nvim_win_get_width(agent.state.dashboard_winid) - vim.fn.strdisplaywidth('Copilot Agent Dashboard')) / 2)
+    local expected_padding = math.floor((vim.api.nvim_win_get_width(agent.state.dashboard_winid) - vim.fn.strdisplaywidth('Copilot Agent Dashboard')) / 2)
     local actual_padding = (title_line:find('%S') or 1) - 1
     assert_eq(expected_padding, actual_padding)
   end)
@@ -1435,10 +1427,7 @@ describe('model state sync', function()
     agent.state.session_id = 'session-merge-replace'
     agent.open_chat()
 
-    local stable_prefix = string.rep(
-      'All five improvements are implemented. Here is a stable streamed prefix that should match the final payload. ',
-      3
-    )
+    local stable_prefix = string.rep('All five improvements are implemented. Here is a stable streamed prefix that should match the final payload. ', 3)
     local streamed = stable_prefix .. 'The activity lines are paded with spaces.'
     local final = stable_prefix .. 'The activity lines are padded with spaces.\n\nFinal line.'
 
@@ -4309,14 +4298,340 @@ describe('chat input behavior', function()
       'Assistant:',
       '  I am investigating the mismatch now.',
       '',
-      'Activity:',
-      '  Inspecting activity strings',
-      '  Ran bash — rg activity lua/copilot_agent',
+      'Activity: rg activity lua/copilot_agent (2 items hidden)',
       '',
       'Assistant:',
       '  I found the activity summary hook.',
       '',
-    }, { unpack(lines, #lines - 9, #lines) })
+    }, { unpack(lines, #lines - 7, #lines) })
+  end)
+
+  it('toggles collapsed activity transcript blocks with zA in the chat buffer', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.intent',
+      data = {
+        intent = 'Inspecting activity strings',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'rg',
+        arguments = { 'activity', 'lua/copilot_agent' },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+
+    local normal_maps = vim.api.nvim_buf_get_keymap(bufnr, 'n')
+    local has_toggle = false
+    for _, map in ipairs(normal_maps) do
+      if map.lhs == 'zA' then
+        has_toggle = true
+        break
+      end
+    end
+    assert_true(has_toggle)
+
+    local joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
+    assert_true(joined:find('Activity: rg activity lua/copilot_agent (2 items hidden)', 1, true) ~= nil)
+    assert_true(joined:find('Ran bash — rg activity lua/copilot_agent', 1, true) == nil)
+
+    assert_true(render.toggle_activity_entries())
+    joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
+    assert_true(joined:find('Activity:\n  Inspecting activity strings\n  Ran bash — rg activity lua/copilot_agent', 1, true) ~= nil)
+
+    assert_false(render.toggle_activity_entries())
+    joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
+    assert_true(joined:find('Activity: rg activity lua/copilot_agent (2 items hidden)', 1, true) ~= nil)
+  end)
+
+  it('captures tool execution output details in activity transcript entries', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        toolCallId = 'tool-123',
+        command = 'git',
+        arguments = { 'diff', '--stat' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_partial_result',
+      data = {
+        toolCallId = 'tool-123',
+        partialOutput = 'partial line 1\n',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_progress',
+      data = {
+        toolCallId = 'tool-123',
+        progressMessage = 'Collecting diff output',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {
+        success = true,
+        toolCallId = 'tool-123',
+        result = {
+          content = 'diff summary',
+          detailedContent = 'full diff output\nsecond line',
+        },
+        toolTelemetry = {
+          filesChanged = 3,
+        },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('activity', entry.kind)
+    assert_eq('Ran bash — git diff --stat', entry.content)
+    assert.same({
+      kind = 'tool',
+      summary = 'Ran bash — git diff --stat',
+      tool_name = 'bash',
+      tool_call_id = 'tool-123',
+      tool_detail = 'git diff --stat',
+      start_data = {
+        toolName = 'bash',
+        toolCallId = 'tool-123',
+        command = 'git',
+        arguments = { 'diff', '--stat' },
+      },
+      progress_messages = { 'Collecting diff output' },
+      partial_output = 'partial line 1\n',
+      complete_data = {
+        success = true,
+        toolCallId = 'tool-123',
+        result = {
+          content = 'diff summary',
+          detailedContent = 'full diff output\nsecond line',
+        },
+        toolTelemetry = {
+          filesChanged = 3,
+        },
+      },
+      success = true,
+      tool_telemetry = {
+        filesChanged = 3,
+      },
+      output_text = 'full diff output\nsecond line',
+    }, entry.activity_items[1])
+  end)
+
+  it('opens a floating activity details viewer for the activity block under the cursor', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local chat_bufnr = agent.state.chat_bufnr
+    local chat_winid = agent.state.chat_winid
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        toolCallId = 'tool-789',
+        command = 'git',
+        arguments = { 'diff', '--stat' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_progress',
+      data = {
+        toolCallId = 'tool-789',
+        progressMessage = 'Collecting diff output',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {
+        success = true,
+        toolCallId = 'tool-789',
+        result = {
+          detailedContent = 'full diff output\nsecond line',
+        },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+
+    local activity_idx = #agent.state.entries
+    local activity_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == activity_idx then
+        activity_row = row
+        break
+      end
+    end
+    assert_not_nil(activity_row)
+
+    local normal_maps = vim.api.nvim_buf_get_keymap(chat_bufnr, 'n')
+    local has_viewer = false
+    for _, map in ipairs(normal_maps) do
+      if map.lhs == 'gA' then
+        has_viewer = true
+        break
+      end
+    end
+    assert_true(has_viewer)
+
+    local original_open_win = vim.api.nvim_open_win
+    local viewer_buf
+    local viewer_title
+    vim.api.nvim_open_win = function(buf, enter, config)
+      local winid = original_open_win(buf, enter, config)
+      if buf ~= chat_bufnr then
+        viewer_buf = buf
+        viewer_title = config.title
+      end
+      return winid
+    end
+
+    vim.api.nvim_win_set_cursor(chat_winid, { activity_row + 1, 0 })
+    local opened = render.show_activity_details_under_cursor(chat_winid)
+    vim.api.nvim_open_win = original_open_win
+
+    assert_true(opened)
+    assert_not_nil(viewer_buf)
+    assert_eq(' Activity details ', viewer_title)
+    local lines = vim.api.nvim_buf_get_lines(viewer_buf, 0, -1, false)
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('# Activity details', 1, true) ~= nil)
+    assert_true(joined:find('## Tool 1 — Ran bash — git diff --stat', 1, true) ~= nil)
+    assert_true(joined:find('Collecting diff output', 1, true) ~= nil)
+    assert_true(joined:find('full diff output', 1, true) ~= nil)
+    assert_true(joined:find('second line', 1, true) ~= nil)
+  end)
+
+  it('summarizes apply_patch activity by changed file instead of raw patch text', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-first',
+        content = 'Applying the update now.',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'apply_patch',
+        input = table.concat({
+          '*** Begin Patch',
+          '*** Update File: /Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/events.lua',
+          '@@',
+          '-old line',
+          '+new line',
+          '*** End Patch',
+        }, '\n'),
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+    assert_true(render.toggle_activity_entries())
+
+    local joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
+    assert_true(joined:find('Updated lua/copilot_agent/events.lua', 1, true) ~= nil)
+    assert_true(joined:find('*** Begin Patch', 1, true) == nil)
+    assert_true(joined:find('-old line', 1, true) == nil)
+    assert_true(joined:find('+new line', 1, true) == nil)
+  end)
+
+  it('summarizes multiline shell scripts instead of showing the full script body', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        fullCommandText = table.concat({
+          "python - <<'PY'",
+          'print("hello from inline script")',
+          'PY',
+        }, '\n'),
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+    assert_true(render.toggle_activity_entries())
+
+    local joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
+    assert_true(joined:find('Ran python script', 1, true) ~= nil)
+    assert_true(joined:find('hello from inline script', 1, true) == nil)
+    assert_true(joined:find("<<'PY'", 1, true) == nil)
   end)
 
   it('preserves punctuation and blank-line deltas after real streamed content starts', function()
@@ -4398,10 +4713,7 @@ describe('chat input behavior', function()
     vim.wait(250)
 
     local entry = agent.state.entries[#agent.state.entries]
-    assert_eq(
-      'I am checking the request error path.I am checking the request error path.\nI am adding a focused regression.\nI am adding a focused regression.',
-      entry.content
-    )
+    assert_eq('I am checking the request error path.I am checking the request error path.\nI am adding a focused regression.\nI am adding a focused regression.', entry.content)
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
@@ -5449,14 +5761,96 @@ describe('checkpoint id replay', function()
       'Assistant:',
       '  First rebuild note.',
       '',
-      'Activity:',
-      '  Inspecting activity strings',
-      '  Ran bash — rg activity',
+      'Activity: rg activity (2 items hidden)',
       '',
       'Assistant:',
       '  Second rebuild note.',
       '',
-    }, { unpack(lines, #lines - 9, #lines) })
+    }, { unpack(lines, #lines - 7, #lines) })
+  end)
+
+  it('rebuilds tool execution output details when session history is reloaded', function()
+    local callback_err
+    local callback_count
+
+    checkpoints.list = function()
+      return {}
+    end
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions/session-123/messages', path)
+      callback({
+        events = {
+          { type = 'assistant.turn_start', data = {} },
+          {
+            type = 'tool.execution_start',
+            data = {
+              toolName = 'bash',
+              toolCallId = 'tool-456',
+              command = 'rg',
+              arguments = { 'activity', 'lua' },
+            },
+          },
+          {
+            type = 'tool.execution_complete',
+            data = {
+              success = true,
+              toolCallId = 'tool-456',
+              result = {
+                content = 'rg summary',
+                contents = {
+                  { type = 'terminal', text = 'lua/copilot_agent/events.lua:1:match' },
+                  { type = 'text', text = '1 match found' },
+                },
+              },
+            },
+          },
+          { type = 'assistant.turn_end', data = {} },
+        },
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.events'] = nil
+    events = require('copilot_agent.events')
+    agent.open_chat()
+    events.reload_session_history('session-123', function(err, count)
+      callback_err = err
+      callback_count = count
+    end)
+
+    assert_eq(nil, callback_err)
+    assert_eq(4, callback_count)
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('activity', entry.kind)
+    assert_eq('Ran bash — rg activity lua', entry.content)
+    assert.same({
+      kind = 'tool',
+      summary = 'Ran bash — rg activity lua',
+      tool_name = 'bash',
+      tool_call_id = 'tool-456',
+      tool_detail = 'rg activity lua',
+      start_data = {
+        toolName = 'bash',
+        toolCallId = 'tool-456',
+        command = 'rg',
+        arguments = { 'activity', 'lua' },
+      },
+      progress_messages = {},
+      complete_data = {
+        success = true,
+        toolCallId = 'tool-456',
+        result = {
+          content = 'rg summary',
+          contents = {
+            { type = 'terminal', text = 'lua/copilot_agent/events.lua:1:match' },
+            { type = 'text', text = '1 match found' },
+          },
+        },
+      },
+      success = true,
+      output_text = 'lua/copilot_agent/events.lua:1:match\n\n1 match found',
+    }, entry.activity_items[1])
   end)
 end)
 

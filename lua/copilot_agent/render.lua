@@ -2053,6 +2053,7 @@ function M.render_chat()
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
+  window.sync_chat_markdown_conceal(state.chat_winid)
 
   local at_bottom = M.chat_at_bottom()
   state._spinner_line = nil
@@ -2274,6 +2275,7 @@ function M.stream_update(entry, idx)
           vim.log.levels.DEBUG
         )
       end
+      window.sync_chat_markdown_conceal(state.chat_winid)
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
       vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, content_end, false, new_lines)
@@ -2335,6 +2337,7 @@ function M.append_entry(kind, content, attachments, opts)
   -- Try incremental append instead of full re-render.
   local bufnr = state.chat_bufnr
   if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    window.sync_chat_markdown_conceal(state.chat_winid)
     local new_lines = M.entry_lines(entry, idx)
     if #new_lines > 0 then
       local merge_assistant = kind == 'assistant' and M.should_merge_assistant(idx)

@@ -311,6 +311,24 @@ local function merge_assistant_delta_content(current, delta)
   return finish('append-raw-delta', current .. delta)
 end
 
+-- Reconcile the final assistant.message snapshot with the live draft that was
+-- built from raw assistant.message_delta appends.
+--
+-- Important:
+-- - This helper is intentionally for assistant.message only.
+-- - Do not route assistant.message_delta through these heuristics; repeated or
+--   overlapping-looking substrings may be legitimate streamed output.
+-- - Some branches below are intentionally conservative repairs for known final
+--   snapshot patterns (punctuation cleanup, shorter authoritative suffixes,
+--   line-overlap snapshots). Applied too broadly, the same rules could hide
+--   genuine repetition from the model.
+--
+-- Future work:
+-- - Revisit or remove the more aggressive canonical/substring heuristics after
+--   the live render path is fully hardened and we have enough trace-backed
+--   evidence about the SDK's final assistant.message payload shapes.
+-- - Keep the regression coverage around repeated text, suffix replacement, and
+--   blank-line overlap up to date before simplifying this function.
 local function merge_assistant_message_content(current, incoming, ctx)
   current = type(current) == 'string' and current or ''
   incoming = type(incoming) == 'string' and incoming or ''
@@ -416,6 +434,9 @@ local function merge_assistant_message_content(current, incoming, ctx)
   if incoming:sub(1, #current) == current then
     return finish('replace-prefix-extension', incoming)
   end
+  -- TODO: Narrow these canonicalized comparisons if future SDK traces show
+  -- final assistant.message snapshots are stricter than the current observed
+  -- mix of punctuation-only edits, suffix snapshots, and line-overlap updates.
   if canonical_current ~= '' and canonical_incoming ~= '' then
     if vim.startswith(canonical_incoming, canonical_current) then
       return finish('replace-canonical-prefix-extension', incoming)
@@ -1957,6 +1978,59 @@ show_next_prompt = function()
   end
 end
 
+local function live_turn_cleanup_needed()
+  return state.chat_busy == true
+    or state.pending_checkpoint_turn ~= nil
+    or state.stream_line_start ~= nil
+    or type(state.active_turn_assistant_index) == 'number'
+    or type(state.live_assistant_entry_index) == 'number'
+    or (type(state.active_turn_assistant_message_id) == 'string' and state.active_turn_assistant_message_id ~= '')
+    or (type(state.active_assistant_merge_group) == 'string' and state.active_assistant_merge_group ~= '')
+    or (type(state.reasoning_entry_key) == 'string' and state.reasoning_entry_key ~= '')
+    or (state.reasoning_text or '') ~= ''
+    or #(state.reasoning_lines or {}) > 0
+    or state.active_tool ~= nil
+    or state.active_tool_run_id ~= nil
+    or state.active_tool_detail ~= nil
+    or state.pending_tool_detail ~= nil
+    or state.current_intent ~= nil
+    or #((state.recent_activity_lines) or {}) > 0
+    or #((state.recent_activity_items) or {}) > 0
+end
+
+local function clear_live_turn_state(reason, opts)
+  opts = opts or {}
+  local had_live_state = live_turn_cleanup_needed()
+
+  if opts.flush_activity ~= false then
+    flush_recent_activity_summary()
+  end
+  reset_pending_assistant_entry()
+  if opts.clear_pending_checkpoint_turn then
+    state.pending_checkpoint_turn = nil
+  end
+  clear_reasoning_preview(reason)
+  state.stream_line_start = nil
+  state.chat_busy = false
+  complete_overlay_tool(state.active_tool_run_id)
+  state.recent_activity_lines = {}
+  state.recent_activity_items = {}
+  state.recent_activity_tool_calls = {}
+  state.active_tool = nil
+  state.active_tool_run_id = nil
+  state.active_tool_detail = nil
+  state.pending_tool_detail = nil
+  state.active_turn_assistant_index = nil
+  state.live_assistant_entry_index = nil
+  state.active_turn_assistant_message_id = nil
+  state.active_assistant_merge_group = nil
+  state.current_intent = nil
+  window.sync_chat_markdown_conceal(state.chat_winid)
+  refresh_statuslines()
+  refresh_reasoning_overlay()
+  return had_live_state
+end
+
 local function handle_host_event(event_name, payload)
   log_debug_trace('host.event received event=' .. tostring(event_name) .. ' payload=', payload, { max_len = 2400 })
   if event_name == 'host.user_input_requested' then
@@ -1992,6 +2066,16 @@ local function handle_host_event(event_name, payload)
     reset_prompt_state()
     refresh_statuslines()
     append_entry('system', 'Session disconnected')
+  elseif event_name == 'host.turn_aborted' then
+    local sid = state.session_id
+    local event_session_id = data.sessionId
+    if type(event_session_id) == 'string' and sid and event_session_id ~= sid then
+      log(string.format('host.turn_aborted ignored event_session_id=%s active_session_id=%s', tostring(event_session_id), tostring(sid)), vim.log.levels.DEBUG)
+      return
+    end
+    if clear_live_turn_state('turn aborted', { clear_pending_checkpoint_turn = true }) then
+      append_entry('system', 'Turn cancelled')
+    end
   elseif event_name == 'host.permission_requested' then
     -- In interactive mode, Go sends a request object with an ID; ask the user.
     local req = data.request or {}
@@ -2462,6 +2546,7 @@ local function handle_session_event(payload)
     entry._assistant_saw_delta = true
     entry.content = previous_content .. delta
     clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+    window.sync_chat_markdown_conceal(state.chat_winid)
     log(
       string.format(
         'assistant.message_delta appended message_id=%s key=%s idx=%s result_len=%d boundary={%s} content=%s',
@@ -2582,26 +2667,7 @@ local function handle_session_event(payload)
         })
       end
     end
-    flush_recent_activity_summary()
-    reset_pending_assistant_entry()
-    clear_reasoning_preview('turn end')
-    state.stream_line_start = nil
-    state.chat_busy = false
-    complete_overlay_tool(state.active_tool_run_id)
-    state.recent_activity_lines = {}
-    state.recent_activity_items = {}
-    state.recent_activity_tool_calls = {}
-    state.active_tool = nil
-    state.active_tool_run_id = nil
-    state.active_tool_detail = nil
-    state.pending_tool_detail = nil
-    state.active_turn_assistant_index = nil
-    state.live_assistant_entry_index = nil
-    state.active_turn_assistant_message_id = nil
-    state.active_assistant_merge_group = nil
-    state.current_intent = nil
-    refresh_statuslines()
-    refresh_reasoning_overlay()
+    clear_live_turn_state('turn end')
     render_chat() -- immediate full render on turn completion
     schedule_open_buffer_refresh()
     return
@@ -2873,26 +2939,7 @@ local function handle_session_event(payload)
 
   if event_type == 'error' then
     log('session.error payload=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 2400, depth = 8 }), vim.log.levels.WARN)
-    flush_recent_activity_summary()
-    reset_pending_assistant_entry()
-    clear_reasoning_preview('error')
-    state.stream_line_start = nil
-    state.chat_busy = false
-    complete_overlay_tool(state.active_tool_run_id)
-    state.recent_activity_lines = {}
-    state.recent_activity_items = {}
-    state.recent_activity_tool_calls = {}
-    state.active_tool = nil
-    state.active_tool_run_id = nil
-    state.active_tool_detail = nil
-    state.pending_tool_detail = nil
-    state.active_turn_assistant_index = nil
-    state.live_assistant_entry_index = nil
-    state.active_turn_assistant_message_id = nil
-    state.active_assistant_merge_group = nil
-    state.current_intent = nil
-    refresh_statuslines()
-    refresh_reasoning_overlay()
+    clear_live_turn_state('error', { clear_pending_checkpoint_turn = true })
     append_entry('error', vim.inspect(data))
     return
   end

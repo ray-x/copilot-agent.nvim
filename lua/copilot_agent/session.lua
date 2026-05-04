@@ -29,7 +29,6 @@ local refresh_statuslines = sl.refresh_statuslines
 
 local append_entry = render.append_entry
 local clear_transcript = render.clear_transcript
-local schedule_render = render.schedule_render
 
 local stop_event_stream = events.stop_event_stream
 local start_event_stream = events.start_event_stream
@@ -1138,15 +1137,13 @@ function M.cancel()
     notify('No active session to cancel', vim.log.levels.WARN)
     return
   end
-  request('POST', '/sessions/' .. state.session_id .. '/abort', {}, function(_, err)
+  local session_id = state.session_id
+  request('POST', '/sessions/' .. session_id .. '/abort', {}, function(_, err)
     if err then
       append_entry('error', 'Cancel failed: ' .. err)
       return
     end
-    state.chat_busy = false
-    refresh_statuslines()
-    append_entry('system', 'Turn cancelled')
-    schedule_render()
+    log('cancel request acknowledged for session ' .. tostring(session_id), vim.log.levels.DEBUG)
   end)
 end
 

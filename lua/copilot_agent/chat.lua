@@ -36,6 +36,8 @@ local function attach_chat_markdown(winid)
   if vim.wo[winid].conceallevel == 0 then
     vim.wo[winid].conceallevel = 2
   end
+  state.chat_default_conceallevel = vim.wo[winid].conceallevel
+  win.sync_chat_markdown_conceal(winid)
 end
 
 local function help_lines()
@@ -386,6 +388,8 @@ function M.ensure_chat_window(opts)
   if state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr) then
     local chat_winid = M.find_chat_window()
     if chat_winid then
+      state.chat_winid = chat_winid
+      attach_chat_markdown(chat_winid)
       vim.api.nvim_set_current_win(chat_winid)
       state._chat_was_open = true
       return state.chat_bufnr

@@ -90,4 +90,29 @@ function M.protect_markdown_buffer(bufnr, winid)
   end)
 end
 
+local function chat_streaming_active()
+  if state.chat_busy ~= true then
+    return false
+  end
+  return type(state.active_turn_assistant_index) == 'number' or type(state.live_assistant_entry_index) == 'number'
+end
+
+function M.sync_chat_markdown_conceal(winid)
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+
+  local restore_level = state.chat_default_conceallevel
+  if type(restore_level) ~= 'number' then
+    restore_level = vim.wo[winid].conceallevel
+    state.chat_default_conceallevel = restore_level
+  end
+  restore_level = math.max(0, math.floor(restore_level))
+
+  local target = chat_streaming_active() and 0 or restore_level
+  if vim.wo[winid].conceallevel ~= target then
+    vim.wo[winid].conceallevel = target
+  end
+end
+
 return M

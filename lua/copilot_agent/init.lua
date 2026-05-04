@@ -72,6 +72,7 @@ function M.setup(opts)
   state.background_tasks = {}
   state.overlay_gutter_restore_view = nil
   state.chat_tail_spacer_lines = 0
+  state.chat_default_conceallevel = nil
   state._rendered_line_count = nil
   state.reasoning_entry_key = nil
   state.reasoning_text = ''

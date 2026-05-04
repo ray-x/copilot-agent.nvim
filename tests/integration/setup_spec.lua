@@ -1084,6 +1084,43 @@ describe('model state sync', function()
     assert_eq(0, #reasoning.lines)
   end)
 
+  it('clears the reasoning preview when the host aborts the current turn', function()
+    agent.state.session_id = 'session-123'
+    agent.open_chat()
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-aborted-turn',
+        deltaContent = 'step one\nstep two',
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+    assert_true(agent.get_reasoning().active)
+
+    events.handle_host_event('host.turn_aborted', {
+      data = {
+        sessionId = 'session-123',
+      },
+    })
+
+    vim.wait(200)
+
+    extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(0, #extmarks)
+    assert_false(agent.get_reasoning().active)
+    assert_eq('', agent.get_reasoning().text)
+    assert_false(agent.state.chat_busy)
+
+    local lines = table.concat(vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false), '\n')
+    assert_true(lines:find('Turn cancelled', 1, true) ~= nil)
+  end)
+
   it('renders a rolling reasoning preview in chat virtual lines', function()
     agent.open_chat()
 
@@ -4659,6 +4696,44 @@ describe('chat input behavior', function()
     end)
 
     assert_eq('markdown', syntax)
+  end)
+
+  it('temporarily disables chat markdown conceal while assistant text is streaming', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+
+    local winid = agent.state.chat_winid
+    local restore_level = agent.state.chat_default_conceallevel
+    assert_true(type(restore_level) == 'number' and restore_level > 0)
+    assert_eq(restore_level, vim.wo[winid].conceallevel)
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-inline-code',
+        deltaContent = '  - row0: `[sky][sky][sky][sky][Wup-tri]',
+      },
+    })
+
+    assert_true(vim.wait(1000, function()
+      return vim.wo[winid].conceallevel == 0
+    end))
+
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    assert_true(vim.wait(1000, function()
+      return vim.wo[winid].conceallevel == restore_level
+    end))
   end)
 
   it('keeps treesitter enabled for the chat scratch buffer', function()

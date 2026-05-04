@@ -232,14 +232,7 @@ local function add_prefix_highlight(bufnr, row, line, prefix)
   if not start_col then
     return
   end
-  vim.api.nvim_buf_add_highlight(
-    bufnr,
-    DASHBOARD_NS,
-    'CopilotAgentDashboardKey',
-    row,
-    start_col - 1,
-    start_col - 1 + #prefix
-  )
+  vim.api.nvim_buf_add_highlight(bufnr, DASHBOARD_NS, 'CopilotAgentDashboardKey', row, start_col - 1, start_col - 1 + #prefix)
 end
 
 local function add_bracket_key_highlight(bufnr, row, line)

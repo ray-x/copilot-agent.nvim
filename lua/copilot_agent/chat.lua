@@ -76,7 +76,7 @@ local function help_lines()
     '    Type / + <Tab>  Browse command completion',
     '    Examples        /model  /new  /resume  /diff  /lsp create',
     '',
-  '  Review / recovery',
+    '  Review / recovery',
     '    :CopilotAgentDiff      Review file differences between checkpoints',
     '    /search <text>         Find transcript matches',
     '    /undo, /rewind [vNNN]  Restore from session checkpoints',

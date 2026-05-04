@@ -2331,15 +2331,15 @@ function M.stream_update(entry, idx)
   state._stream_idx = idx
   if stream_pending then
     if entry.kind == 'assistant' then
-      -- log(
-      -- string.format(
-      -- 'assistant stream update coalesced idx=%s content_len=%d content=%s',
-      -- tostring(idx or '<none>'),
-      -- #((entry and entry.content) or ''),
-      -- preview_log_text((entry and entry.content) or '')
-      -- ),
-      -- vim.log.levels.DEBUG
-      -- )
+      log(
+        string.format(
+          'assistant stream update coalesced idx=%s content_len=%d content=%s',
+          tostring(idx or '<none>'),
+          #((entry and entry.content) or ''),
+          preview_log_text((entry and entry.content) or '')
+        ),
+        vim.log.levels.TRACE
+      )
     end
     return
   end

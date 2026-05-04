@@ -731,16 +731,36 @@ local function normalize_activity_path(path)
     return nil
   end
 
+  local normalized = path:gsub('\\', '/')
+
   local wd = working_directory()
   if type(wd) == 'string' and wd ~= '' then
-    local root = vim.fn.fnamemodify(wd, ':p')
+    local root = vim.fn.fnamemodify(wd, ':p'):gsub('\\', '/')
     local prefix = root:sub(-1) == '/' and root or (root .. '/')
-    if vim.startswith(path, prefix) then
-      return path:sub(#prefix + 1)
+    if vim.startswith(normalized, prefix) then
+      return normalized:sub(#prefix + 1)
+    end
+
+    local root_name = vim.fn.fnamemodify(root:gsub('/+$', ''), ':t')
+    if type(root_name) == 'string' and root_name ~= '' and root_name ~= '/' then
+      local marker = '/' .. root_name .. '/'
+      local match_index
+      local search_from = 1
+      while true do
+        local found = normalized:find(marker, search_from, true)
+        if not found then
+          break
+        end
+        match_index = found
+        search_from = found + 1
+      end
+      if match_index then
+        return normalized:sub(match_index + #marker)
+      end
     end
   end
 
-  return path
+  return normalized
 end
 
 local function append_unique(items, value)
@@ -1995,8 +2015,8 @@ local function live_turn_cleanup_needed()
     or state.active_tool_detail ~= nil
     or state.pending_tool_detail ~= nil
     or state.current_intent ~= nil
-    or #((state.recent_activity_lines) or {}) > 0
-    or #((state.recent_activity_items) or {}) > 0
+    or #(state.recent_activity_lines or {}) > 0
+    or #(state.recent_activity_items or {}) > 0
 end
 
 local function clear_live_turn_state(reason, opts)
@@ -3341,10 +3361,7 @@ local function review_diff()
         return type(path) == 'string' and path ~= ''
       end, changed)
       if #changed == 0 then
-        notify(
-          string.format('No file differences between checkpoints %s and %s', older_choice.checkpoint.id, newer_choice.checkpoint.id),
-          vim.log.levels.INFO
-        )
+        notify(string.format('No file differences between checkpoints %s and %s', older_choice.checkpoint.id, newer_choice.checkpoint.id), vim.log.levels.INFO)
         return
       end
 

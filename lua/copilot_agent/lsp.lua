@@ -461,8 +461,7 @@ function M.create_config()
 
   if vim.tbl_isempty(eligible) then
     notify_message(
-      'No project LSP clients with definitionProvider + referencesProvider were found under ' .. root
-        .. '. Open a project file with an attached language server first.',
+      'No project LSP clients with definitionProvider + referencesProvider were found under ' .. root .. '. Open a project file with an attached language server first.',
       vim.log.levels.WARN
     )
     return false
@@ -493,9 +492,12 @@ function M.create_config()
     #eligible,
     #eligible == 1 and '' or 's',
     relative_path(path, root),
-    table.concat(vim.tbl_map(function(client)
-      return client.key
-    end, eligible), ', ')
+    table.concat(
+      vim.tbl_map(function(client)
+        return client.key
+      end, eligible),
+      ', '
+    )
   )
   if not vim.tbl_isempty(skipped) then
     message = message .. '\nSkipped clients without command or file-extension data: ' .. table.concat(skipped, ', ')
@@ -529,13 +531,7 @@ function M.status_message()
     lines[#lines + 1] = '    - none with definitionProvider + referencesProvider'
   else
     for _, client in ipairs(project_clients) do
-      lines[#lines + 1] = string.format(
-        '    - %s (id=%s, cmd=%s, root=%s)',
-        client.name,
-        tostring(client.id),
-        command_label(client.command, client.args),
-        client.root_dir or '<none>'
-      )
+      lines[#lines + 1] = string.format('    - %s (id=%s, cmd=%s, root=%s)', client.name, tostring(client.id), command_label(client.command, client.args), client.root_dir or '<none>')
     end
   end
 
@@ -544,12 +540,7 @@ function M.status_message()
     lines[#lines + 1] = '    - copilot-agent inactive'
   else
     for _, client in ipairs(helper_clients) do
-      lines[#lines + 1] = string.format(
-        '    - %s (id=%s, root=%s)',
-        client.name or HELPER_CLIENT_NAME,
-        tostring(client.id),
-        client_root_dir(client) or '<none>'
-      )
+      lines[#lines + 1] = string.format('    - %s (id=%s, root=%s)', client.name or HELPER_CLIENT_NAME, tostring(client.id), client_root_dir(client) or '<none>')
     end
   end
 
@@ -631,16 +622,15 @@ function M.test()
       failures = failures + 1
     end
 
-    lines[#lines + 1] = string.format(
-      '  - %s: executable=%s, active=%s',
-      key,
-      executable_ok and 'yes' or 'no',
-      active_ok and 'yes' or 'no'
-    )
+    lines[#lines + 1] = string.format('  - %s: executable=%s, active=%s', key, executable_ok and 'yes' or 'no', active_ok and 'yes' or 'no')
     if active_ok then
-      lines[#lines + 1] = '      matched clients: ' .. table.concat(vim.tbl_map(function(client)
-        return string.format('%s(id=%s)', client.name, tostring(client.id))
-      end, matched), ', ')
+      lines[#lines + 1] = '      matched clients: '
+        .. table.concat(
+          vim.tbl_map(function(client)
+            return string.format('%s(id=%s)', client.name, tostring(client.id))
+          end, matched),
+          ', '
+        )
     end
   end
 

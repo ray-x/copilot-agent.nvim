@@ -148,8 +148,7 @@ local function show_markdown_result(title, lines)
   end
 
   local width = math.min(math.floor(vim.o.columns * RESULT_FLOAT_WIDTH_RATIO), RESULT_FLOAT_MAX_WIDTH)
-  local height =
-    math.min(math.max(#normalized_lines + RESULT_FLOAT_BORDER_LINES, RESULT_FLOAT_MIN_HEIGHT), math.floor(vim.o.lines * RESULT_FLOAT_HEIGHT_RATIO))
+  local height = math.min(math.max(#normalized_lines + RESULT_FLOAT_BORDER_LINES, RESULT_FLOAT_MIN_HEIGHT), math.floor(vim.o.lines * RESULT_FLOAT_HEIGHT_RATIO))
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, normalized_lines)
   vim.bo[buf].buftype = 'nofile'

@@ -25,17 +25,7 @@ local function log_http_request(mode, method, path, body)
   if not should_log(vim.log.levels.DEBUG) then
     return
   end
-  log(
-    string.format(
-      'http.%s request method=%s path=%s url=%s body=%s',
-      mode,
-      tostring(method),
-      tostring(path),
-      M.build_url(path),
-      serialize_log_value(body)
-    ),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('http.%s request method=%s path=%s url=%s body=%s', mode, tostring(method), tostring(path), M.build_url(path), serialize_log_value(body)), vim.log.levels.DEBUG)
 end
 
 local function log_http_response(mode, method, path, status, exit_code, payload, err)
@@ -84,18 +74,12 @@ function M.decode_json(raw, opts)
   local ok, decoded = pcall(decoder, raw)
   if ok then
     if opts.log ~= false and should_log(vim.log.levels.DEBUG) then
-      log(
-        string.format('json.decode ok type=%s raw=%s', type(decoded), serialize_log_value(raw, { max_len = 1000 })),
-        vim.log.levels.DEBUG
-      )
+      log(string.format('json.decode ok type=%s raw=%s', type(decoded), serialize_log_value(raw, { max_len = 1000 })), vim.log.levels.DEBUG)
     end
     return decoded
   end
   if opts.log ~= false then
-    log(
-      string.format('json.decode failed error=%s raw=%s', tostring(decoded), serialize_log_value(raw, { max_len = 1000 })),
-      vim.log.levels.WARN
-    )
+    log(string.format('json.decode failed error=%s raw=%s', tostring(decoded), serialize_log_value(raw, { max_len = 1000 })), vim.log.levels.WARN)
   end
   return nil, decoded
 end
@@ -112,10 +96,7 @@ function M.encode_json(value)
 
   local encoded = encoder(value)
   if should_log(vim.log.levels.DEBUG) then
-    log(
-      string.format('json.encode value=%s encoded=%s', serialize_log_value(value), serialize_log_value(encoded, { max_len = 1000 })),
-      vim.log.levels.DEBUG
-    )
+    log(string.format('json.encode value=%s encoded=%s', serialize_log_value(value), serialize_log_value(encoded, { max_len = 1000 })), vim.log.levels.DEBUG)
   end
   return encoded
 end
@@ -296,35 +277,18 @@ function M.request(method, path, body, callback, opts)
   M.raw_request(method, path, body, function(payload, err, status)
     if err and opts.auto_start ~= false and is_connection_error(err) then
       log(
-        string.format(
-          'http.request retry method=%s path=%s status=%s reason=%s',
-          tostring(method),
-          tostring(path),
-          tostring(status or '<none>'),
-          serialize_log_value(err, { max_len = 600 })
-        ),
+        string.format('http.request retry method=%s path=%s status=%s reason=%s', tostring(method), tostring(path), tostring(status or '<none>'), serialize_log_value(err, { max_len = 600 })),
         vim.log.levels.WARN
       )
       -- Lazy-require to break http↔service circular dependency.
       local service = require('copilot_agent.service')
       service.ensure_service_running(function(start_err)
         if start_err then
-          log(
-            string.format(
-              'http.request retry failed method=%s path=%s startup_error=%s',
-              tostring(method),
-              tostring(path),
-              serialize_log_value(start_err, { max_len = 600 })
-            ),
-            vim.log.levels.WARN
-          )
+          log(string.format('http.request retry failed method=%s path=%s startup_error=%s', tostring(method), tostring(path), serialize_log_value(start_err, { max_len = 600 })), vim.log.levels.WARN)
           callback(nil, err .. '\n' .. start_err, status)
           return
         end
-        log(
-          string.format('http.request retrying method=%s path=%s after service start', tostring(method), tostring(path)),
-          vim.log.levels.DEBUG
-        )
+        log(string.format('http.request retrying method=%s path=%s after service start', tostring(method), tostring(path)), vim.log.levels.DEBUG)
         M.raw_request(method, path, body, callback)
       end)
       return

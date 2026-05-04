@@ -85,7 +85,7 @@ local defaults = {
     buf_name = 'CopilotAgentDashboard',
   },
   statusline = {
-    enabled = false, -- When true, the plugin manages local chat/input statuslines; leave false to keep your own statusline.
+    enabled = true, -- When true, the plugin manages local chat/input statuslines; leave false to keep your own statusline.
     -- Toggle individual statusline segments. You can also provide a list like
     -- { 'mode', 'busy', 'session' } to include only those components.
     components = {
@@ -175,6 +175,7 @@ local state = {
   chat_follow_topline = nil, -- last auto-managed topline for current conversation follow mode
   chat_auto_scroll_enabled = true, -- false after the user scrolls away from the live conversation; re-enabled at bottom
   chat_scroll_guard = 0, -- suppresses WinScrolled reactions for programmatic transcript scrolling
+  chat_default_conceallevel = nil, -- markdown conceallevel to restore once live assistant streaming settles
   chat_tail_spacer_lines = 0, -- real blank lines kept after transcript content while live overlay text is visible
   overlay_gutter_restore_view = nil, -- saved manual chat view to restore after temporary overlay gutter scrolling
   pending_checkpoint_turn = nil, -- active turn waiting for a completed-turn checkpoint label

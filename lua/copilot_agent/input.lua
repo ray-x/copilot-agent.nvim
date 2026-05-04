@@ -531,6 +531,67 @@ local function cancel_existing_input_window()
   end)
 end
 
+local function active_input_cursor_context()
+  local bufnr = state.input_bufnr
+  local winid = state.input_winid
+  if not (bufnr and winid and vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_win_is_valid(winid)) then
+    return nil
+  end
+  if vim.api.nvim_win_get_buf(winid) ~= bufnr then
+    return nil
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(winid)
+  local row, col = cursor[1], cursor[2]
+  local line = vim.api.nvim_buf_get_lines(bufnr, row - 1, row, false)[1] or ''
+  local prompt_col = row == 1 and #vim.fn.prompt_getprompt(bufnr) or 0
+
+  return {
+    bufnr = bufnr,
+    winid = winid,
+    row = row,
+    col = col,
+    line = line,
+    prompt_col = prompt_col,
+  }
+end
+
+local function replace_input_segment(ctx, start_col, end_col)
+  start_col = math.max(ctx.prompt_col, math.floor(tonumber(start_col) or ctx.col))
+  end_col = math.max(start_col, math.min(ctx.col, math.floor(tonumber(end_col) or ctx.col)))
+  if end_col <= start_col then
+    return
+  end
+
+  local updated = ctx.line:sub(1, start_col) .. ctx.line:sub(end_col + 1)
+  vim.api.nvim_buf_set_lines(ctx.bufnr, ctx.row - 1, ctx.row, false, { updated })
+  vim.api.nvim_win_set_cursor(ctx.winid, { ctx.row, start_col })
+end
+
+local function delete_input_to_prompt_start()
+  local ctx = active_input_cursor_context()
+  if not ctx or ctx.col <= ctx.prompt_col then
+    return
+  end
+  replace_input_segment(ctx, ctx.prompt_col, ctx.col)
+end
+
+local function delete_input_previous_word()
+  local ctx = active_input_cursor_context()
+  if not ctx or ctx.col <= ctx.prompt_col then
+    return
+  end
+
+  local idx = ctx.col
+  while idx > ctx.prompt_col and ctx.line:sub(idx, idx):match('%s') do
+    idx = idx - 1
+  end
+  while idx > ctx.prompt_col and not ctx.line:sub(idx, idx):match('%s') do
+    idx = idx - 1
+  end
+  replace_input_segment(ctx, idx, ctx.col)
+end
+
 local _mode_permission = {
   ask = 'interactive',
   plan = 'interactive',
@@ -675,6 +736,8 @@ local function create_input_buffer()
   vim.keymap.set('n', 'q', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('n', '<Esc>', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('i', '<Esc>', '<Esc>', { buffer = bufnr, silent = true, desc = 'Switch to normal mode' })
+  vim.keymap.set('i', '<C-w>', delete_input_previous_word, { buffer = bufnr, silent = true, desc = 'Delete previous input word (keep prompt prefix)' })
+  vim.keymap.set('i', '<C-u>', delete_input_to_prompt_start, { buffer = bufnr, silent = true, desc = 'Delete input to prompt start' })
   -- <C-t> in input also refreshes the prompt prefix and returns to insert mode.
   vim.keymap.set({ 'n', 'i' }, '<C-t>', function()
     local idx = 1
@@ -925,5 +988,7 @@ M._discovered_mcp_names = discovered_mcp_names
 M._discovered_model_ids = discovered_model_ids
 M._discovered_session_items = discovered_session_items
 M._confirm_completion_or_submit = confirm_completion_or_submit
+M._delete_input_previous_word = delete_input_previous_word
+M._delete_input_to_prompt_start = delete_input_to_prompt_start
 
 return M

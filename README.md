@@ -379,6 +379,8 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<Tab>`           | Trigger completion (`@file` or `/command`)                                                   |
 | `@<path>`         | Attach a file by path (autocomplete from working directory)                                  |
 | `/<cmd>`          | Run a built-in slash command (autocomplete with `<Tab>`)                                     |
+| `<C-w>` (insert)  | Delete previous word in the prompt while keeping the mode prefix (`ask❯`/`plan❯`/`agent❯`) intact |
+| `<C-u>` (insert)  | Delete from prompt start to cursor while keeping the mode prefix (`ask❯`/`plan❯`/`agent❯`) intact |
 | `<C-p>` / `<M-p>` | Previous prompt from history                                                                 |
 | `<C-n>` / `<M-n>` | Next prompt from history                                                                     |
 | `<C-c>` (output)  | Cancel current turn                                                                          |

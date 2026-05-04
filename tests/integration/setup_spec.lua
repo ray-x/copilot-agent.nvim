@@ -4548,6 +4548,75 @@ describe('chat input behavior', function()
     assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
   end)
 
+  it('registers insert-mode Ctrl-W and Ctrl-U keymaps in the input buffer', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local insert_maps = vim.api.nvim_buf_get_keymap(agent.state.input_bufnr, 'i')
+    local has_ctrl_w = false
+    local has_ctrl_u = false
+    for _, map in ipairs(insert_maps) do
+      if map.lhs == '<C-W>' then
+        has_ctrl_w = true
+      elseif map.lhs == '<C-U>' then
+        has_ctrl_u = true
+      end
+    end
+
+    assert_true(has_ctrl_w)
+    assert_true(has_ctrl_u)
+  end)
+
+  it('deletes previous input word with Ctrl-W without removing the prompt prefix', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local bufnr = agent.state.input_bufnr
+    local winid = agent.state.input_winid
+    local prefix = vim.fn.prompt_getprompt(bufnr)
+    vim.api.nvim_set_current_win(winid)
+
+    local sentence = prefix .. 'alpha beta gamma'
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { sentence })
+    vim.api.nvim_win_set_cursor(winid, { 1, #sentence })
+    input._delete_input_previous_word()
+
+    assert_eq(prefix .. 'alpha beta ', vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)[1])
+    assert_eq(#(prefix .. 'alpha beta '), vim.api.nvim_win_get_cursor(winid)[2])
+
+    local short = prefix .. 'x'
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { short })
+    vim.api.nvim_win_set_cursor(winid, { 1, #short })
+    input._delete_input_previous_word()
+    assert_eq(prefix, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)[1])
+
+    vim.api.nvim_win_set_cursor(winid, { 1, #prefix })
+    input._delete_input_previous_word()
+    assert_eq(prefix, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)[1])
+  end)
+
+  it('deletes to prompt boundary with Ctrl-U while keeping the prompt prefix intact', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local bufnr = agent.state.input_bufnr
+    local winid = agent.state.input_winid
+    local prefix = vim.fn.prompt_getprompt(bufnr)
+    vim.api.nvim_set_current_win(winid)
+
+    local line = prefix .. 'alpha beta'
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(winid, { 1, #prefix + 5 })
+    input._delete_input_to_prompt_start()
+
+    assert_eq(prefix .. ' beta', vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)[1])
+    assert_eq(#prefix, vim.api.nvim_win_get_cursor(winid)[2])
+
+    vim.api.nvim_win_set_cursor(winid, { 1, #prefix })
+    input._delete_input_to_prompt_start()
+    assert_eq(prefix .. ' beta', vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)[1])
+  end)
+
   it('uses markdown filetype for the input prompt buffer', function()
     agent.open_chat()
     input.open_input_window()

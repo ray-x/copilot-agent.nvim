@@ -158,6 +158,10 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = vim.api.nvim_create_augroup('CopilotAgentCleanup', { clear = true }),
     callback = function()
+      local ok, logger = pcall(require, 'copilot_agent.log')
+      if ok and type(logger.flush_pending) == 'function' then
+        logger.flush_pending()
+      end
       session.discard_pending_attachments()
     end,
   })

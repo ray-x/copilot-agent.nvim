@@ -69,6 +69,17 @@ local function expected_local_session_id(prefix, seconds)
   return string.format('%s-%s', prefix, os.date('%Y-%m-%dT%H:%M:%S', seconds))
 end
 
+local function expected_short_local_session_id(prefix, seconds)
+  return string.format('%s-%s', prefix, os.date('%y-%m-%d', seconds))
+end
+
+local function flush_log_file_queue()
+  local ok, logger = pcall(require, 'copilot_agent.log')
+  if ok and type(logger.flush_pending) == 'function' then
+    logger.flush_pending()
+  end
+end
+
 --------------------------------------------------------------------------------
 -- Tests
 --------------------------------------------------------------------------------
@@ -168,6 +179,7 @@ describe('M.setup', function()
     require('copilot_agent.config').notify('logger smoke test', vim.log.levels.WARN)
 
     vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     assert_true(#lines > 0)
     assert_true(lines[#lines]:find('logger smoke test', 1, true) ~= nil)
@@ -190,6 +202,7 @@ describe('M.setup', function()
     cfg.log('warn should be written', vim.log.levels.WARN)
 
     vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     assert_eq(1, #lines)
     assert_true(lines[1]:find('warn should be written', 1, true) ~= nil)
@@ -211,6 +224,7 @@ describe('M.setup', function()
     cfg.log('info should be written', vim.log.levels.INFO)
 
     vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     assert_eq(1, #lines)
     assert_true(lines[1]:find('info should be written', 1, true) ~= nil)
@@ -232,6 +246,7 @@ describe('M.setup', function()
     cfg.log('trace should be written', vim.log.levels.TRACE or vim.log.levels.DEBUG)
 
     vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     assert_eq(1, #lines)
     assert_true(lines[1]:find('trace should be written', 1, true) ~= nil)
@@ -254,10 +269,77 @@ describe('M.setup', function()
     cfg.log('caller metadata smoke test', vim.log.levels.DEBUG)
 
     vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     assert_eq(1, #lines)
     assert_true(lines[1]:find('tests/integration/setup_spec.lua:' .. expected_line, 1, true) ~= nil)
     assert_true(lines[1]:find('caller metadata smoke test', 1, true) ~= nil)
+  end)
+
+  it('flushes batched logs immediately when max_entries is reached', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({
+      auto_create_session = false,
+      notify = false,
+      file_log_level = 'INFO',
+      file_log_batch = {
+        enabled = true,
+        flush_interval_ms = 2000,
+        max_entries = 2,
+      },
+    })
+    local cfg = require('copilot_agent.config')
+    cfg.log('batch max one', vim.log.levels.INFO)
+    cfg.log('batch max two', vim.log.levels.INFO)
+
+    vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    local joined = table.concat(lines, '\n')
+    assert_eq(2, #lines)
+    assert_true(joined:find('batch max one', 1, true) ~= nil)
+    assert_true(joined:find('batch max two', 1, true) ~= nil)
+  end)
+
+  it('flushes batched logs on flush interval when max_entries is not reached', function()
+    local original_stdpath = vim.fn.stdpath
+    local temp_log_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_log_dir, 'p')
+    vim.fn.stdpath = function(kind)
+      if kind == 'log' then
+        return temp_log_dir
+      end
+      return original_stdpath(kind)
+    end
+
+    agent.setup({
+      auto_create_session = false,
+      notify = false,
+      file_log_level = 'INFO',
+      file_log_batch = {
+        enabled = true,
+        flush_interval_ms = 80,
+        max_entries = 20,
+      },
+    })
+    local cfg = require('copilot_agent.config')
+    cfg.log('batch interval one', vim.log.levels.INFO)
+    vim.wait(220)
+
+    vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
+    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
+    assert_eq(1, #lines)
+    assert_true(lines[1]:find('batch interval one', 1, true) ~= nil)
   end)
 
   it('logs HTTP actions and sanitized session events when TRACE file logging is enabled', function()
@@ -315,6 +397,7 @@ describe('M.setup', function()
     vim.system = original_vim_system
     vim.fn.stdpath = original_stdpath
 
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     local joined = table.concat(lines, '\n')
     assert_true(joined:find('http.sync request method=POST path=/debug-log', 1, true) ~= nil)
@@ -352,6 +435,7 @@ describe('M.setup', function()
 
     vim.fn.stdpath = original_stdpath
 
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     local joined = table.concat(lines, '\n')
     assert_true(joined:find('sse.event raw event=session.event string=plain text session event', 1, true) ~= nil)
@@ -393,6 +477,7 @@ describe('M.setup', function()
 
     vim.fn.stdpath = original_stdpath
 
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     local joined = table.concat(lines, '\n')
     assert_true(joined:find('host.event received event=host.session_attached', 1, true) == nil)
@@ -671,6 +756,9 @@ describe('statusline API', function()
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
+      statusline = {
+        enabled = true,
+      },
       chat = {
         reasoning = {
           enabled = true,
@@ -733,7 +821,9 @@ describe('statusline API', function()
 
   it('chat and input statuslines show responsive session labels and formatted ids', function()
     local statusline = require('copilot_agent.statusline')
+    local original_laststatus = vim.o.laststatus
     local expected_id = '#' .. expected_local_session_id('nvim', 1717245296):gsub('T', ' ', 1)
+    local expected_short_id = '#' .. expected_short_local_session_id('nvim', 1717245296)
     local chat_winid = vim.api.nvim_get_current_win()
     local original_get_width = vim.api.nvim_win_get_width
     local widths = {}
@@ -744,6 +834,7 @@ describe('statusline API', function()
     agent.state.input_winid = input_winid
     agent.state.session_id = 'nvim-1717245296789000000'
     agent.state.session_name = nil
+    vim.o.laststatus = 1
     widths[chat_winid] = 200
     widths[input_winid] = 200
     vim.api.nvim_win_get_width = function(winid)
@@ -767,7 +858,7 @@ describe('statusline API', function()
 
     widths[chat_winid] = 80
     statusline.refresh_chat_statusline()
-    assert_true(vim.wo[chat_winid].statusline:find('session: [' .. expected_id .. ']', 1, true) ~= nil)
+    assert_true(vim.wo[chat_winid].statusline:find('session: [' .. expected_short_id .. ']', 1, true) ~= nil)
     assert_true(vim.wo[chat_winid].statusline:find('session: [abcdefghijklmnop', 1, true) == nil)
 
     agent.state.current_model = 'claude-opus-4.7'
@@ -789,6 +880,90 @@ describe('statusline API', function()
     assert_true(vim.wo[chat_winid].statusline:find('session: [uuid session name #123e4567]', 1, true) ~= nil)
 
     vim.api.nvim_win_get_width = original_get_width
+    vim.o.laststatus = original_laststatus
+  end)
+end)
+
+describe('statusline plugin config', function()
+  after_each(function()
+    pcall(vim.cmd, 'tabonly | only')
+  end)
+
+  it('does not override local statuslines when plugin statusline is disabled', function()
+    package.loaded['copilot_agent'] = nil
+    local agent = require('copilot_agent')
+    agent.setup({
+      auto_create_session = false,
+      service = {
+        auto_start = true,
+      },
+    })
+
+    local statusline = require('copilot_agent.statusline')
+    local chat_winid = vim.api.nvim_get_current_win()
+    vim.cmd('belowright new')
+    local input_winid = vim.api.nvim_get_current_win()
+
+    agent.state.chat_winid = chat_winid
+    agent.state.input_winid = input_winid
+    agent.state.chat_statusline_managed = false
+    agent.state.input_statusline_managed = false
+    vim.wo[chat_winid].statusline = '%f'
+    vim.wo[input_winid].statusline = '%m'
+
+    statusline.refresh_chat_statusline()
+    statusline.refresh_input_statusline()
+
+    assert_eq('%f', vim.wo[chat_winid].statusline)
+    assert_eq('%m', vim.wo[input_winid].statusline)
+  end)
+
+  it('supports selecting statusline components', function()
+    package.loaded['copilot_agent'] = nil
+    local agent = require('copilot_agent')
+    agent.setup({
+      auto_create_session = false,
+      statusline = {
+        enabled = true,
+        components = {
+          mode = true,
+          permission = false,
+          busy = true,
+          session = true,
+          model = false,
+          tool = false,
+          intent = false,
+          context = false,
+          config = false,
+          attachments = false,
+          help = false,
+        },
+      },
+      service = {
+        auto_start = true,
+      },
+    })
+
+    local statusline = require('copilot_agent.statusline')
+    local chat_winid = vim.api.nvim_get_current_win()
+    vim.cmd('belowright new')
+    local input_winid = vim.api.nvim_get_current_win()
+
+    agent.state.chat_winid = chat_winid
+    agent.state.input_winid = input_winid
+    agent.state.session_id = 'nvim-1717245296789000000'
+
+    statusline.refresh_chat_statusline()
+    statusline.refresh_input_statusline()
+
+    assert_true(vim.wo[chat_winid].statusline:find('session: [', 1, true) ~= nil)
+    assert_true(vim.wo[chat_winid].statusline:find('✅ready', 1, true) ~= nil)
+    assert_true(vim.wo[chat_winid].statusline:find('✅approve-all', 1, true) == nil)
+    assert_true(vim.wo[chat_winid].statusline:find('󱃕', 1, true) == nil)
+    assert_true(vim.wo[input_winid].statusline:find('(? for help)', 1, true) == nil)
+    assert_true(vim.wo[input_winid].statusline:find('✅ready', 1, true) ~= nil)
+    assert_true(agent.statusline():find('󱃕', 1, true) == nil)
+    assert_true(agent.statusline():find('✅ready', 1, true) ~= nil)
   end)
 end)
 
@@ -802,6 +977,9 @@ describe('model state sync', function()
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
+      statusline = {
+        enabled = true,
+      },
       chat = {
         reasoning = {
           enabled = true,
@@ -940,6 +1118,43 @@ describe('model state sync', function()
     vim.wait(200)
     extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(0, #extmarks)
+  end)
+
+  it('wraps long reasoning virtual text to the chat window width', function()
+    agent.open_chat()
+    local original_width = vim.api.nvim_win_get_width(agent.state.chat_winid)
+    vim.api.nvim_win_set_width(agent.state.chat_winid, 28)
+
+    local long_reasoning = 'this reasoning line should wrap neatly inside the overlay gutter'
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-reasoning-wrap',
+        deltaContent = long_reasoning,
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    local preview = trimmed_virt_lines(virt_lines)
+    local reconstructed = {}
+    for idx, line in ipairs(preview) do
+      if idx == 1 then
+        reconstructed[#reconstructed + 1] = line:sub(#'Reasoning: ' + 1)
+      else
+        reconstructed[#reconstructed + 1] = line
+      end
+    end
+
+    assert_true(#preview >= 2)
+    assert_true(preview[1]:find('Reasoning: ', 1, true) == 1)
+    assert_eq(long_reasoning, table.concat(reconstructed, ' '))
+    vim.api.nvim_win_set_width(agent.state.chat_winid, original_width)
   end)
 
   it('renders reasoning overlay during a continuous burst of deltas', function()
@@ -1181,6 +1396,33 @@ describe('model state sync', function()
     assert_eq(0, #extmarks)
   end)
 
+  it('clears shell activity when a new assistant turn starts before execution completes', function()
+    agent.open_chat()
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        toolCallId = 'tool-stale-overlay',
+      },
+    })
+
+    vim.wait(200)
+
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+
+    vim.wait(3200)
+    extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(0, #extmarks)
+  end)
+
   it('uses command and arguments from tool.execution_start when permission text is unavailable', function()
     agent.open_chat()
 
@@ -1415,6 +1657,7 @@ describe('model state sync', function()
     })
 
     vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     local joined = table.concat(lines, '\n')
     assert_true(joined:find('reasoning_delta received', 1, true) ~= nil)
@@ -1471,6 +1714,7 @@ describe('model state sync', function()
     vim.wait(250)
 
     vim.fn.stdpath = original_stdpath
+    flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
     local joined = table.concat(lines, '\n')
     assert_true(joined:find('assistant.message_delta received', 1, true) ~= nil)
@@ -1541,6 +1785,7 @@ describe('model state sync', function()
 
     vim.fn.stdpath = original_stdpath
     vim.notify = original_notify
+    flush_log_file_queue()
     local log_path = temp_log_dir .. '/copilot_agent.log'
     local joined = ''
     if vim.fn.filereadable(log_path) == 1 then
@@ -1952,6 +2197,9 @@ describe('statusline config counts', function()
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
+      statusline = {
+        enabled = true,
+      },
       service = {
         auto_start = true,
       },
@@ -1959,7 +2207,8 @@ describe('statusline config counts', function()
   end)
 
   it('uses responsive labels for discovered instruction, agent, skill, and MCP counts', function()
-    local original_get_width = vim.api.nvim_win_get_width
+    local original_laststatus = vim.o.laststatus
+    local original_winwidth = vim.fn.winwidth
     agent.state.instruction_count = 2
     agent.state.agent_count = 1
     agent.state.skill_count = 3
@@ -1975,14 +2224,204 @@ describe('statusline config counts', function()
     assert_eq(medium, require('copilot_agent.statusline').statusline_config(120))
     assert_eq(large, require('copilot_agent.statusline').statusline_config(200))
     assert_eq(highlighted, require('copilot_agent.statusline').statusline_config_highlighted(200))
-    vim.api.nvim_win_get_width = function(winid)
+    vim.o.laststatus = 1
+    vim.fn.winwidth = function(winid)
       if winid == 0 then
         return 200
       end
-      return original_get_width(winid)
+      return original_winwidth(winid)
     end
     assert_true(agent.statusline():find(large, 1, true) ~= nil)
+    vim.o.laststatus = original_laststatus
+    vim.fn.winwidth = original_winwidth
+  end)
+
+  it('uses editor columns when laststatus is 2', function()
+    local statusline = require('copilot_agent.statusline')
+    local original_laststatus = vim.o.laststatus
+    local original_columns = vim.o.columns
+    local original_winwidth = vim.fn.winwidth
+
+    agent.state.instruction_count = 2
+    agent.state.agent_count = 1
+    agent.state.skill_count = 3
+    agent.state.mcp_count = 4
+    agent.state.current_model = 'claude-opus-4.7'
+    agent.state.reasoning_effort = 'high'
+    agent.state.current_intent = 'Running a very long shell command in a narrow split'
+
+    vim.fn.winwidth = function(winid)
+      if winid == 0 then
+        return 80
+      end
+      return original_winwidth(winid)
+    end
+
+    vim.o.columns = 200
+    vim.o.laststatus = 2
+    local columns_statusline = statusline.statusline_component()
+
+    vim.fn.winwidth = function(winid)
+      if winid == 0 then
+        return 200
+      end
+      return original_winwidth(winid)
+    end
+    vim.o.laststatus = 1
+    local wide_window_statusline = statusline.statusline_component()
+
+    assert_eq(wide_window_statusline, columns_statusline)
+
+    vim.fn.winwidth = original_winwidth
+    vim.o.columns = original_columns
+    vim.o.laststatus = original_laststatus
+  end)
+
+  it('uses editor columns for the exported global statusline API', function()
+    local statusline = require('copilot_agent.statusline')
+    local original_laststatus = vim.o.laststatus
+    local original_columns = vim.o.columns
+    local original_winwidth = vim.fn.winwidth
+
+    agent.state.instruction_count = 2
+    agent.state.agent_count = 1
+    agent.state.skill_count = 3
+    agent.state.mcp_count = 4
+    agent.state.current_model = 'claude-opus-4.7'
+    agent.state.reasoning_effort = 'high'
+    agent.state.current_intent = 'Running a very long shell command in a narrow split'
+
+    vim.fn.winwidth = function(winid)
+      if winid == 0 then
+        return 80
+      end
+      return original_winwidth(winid)
+    end
+
+    vim.o.columns = 200
+    vim.o.laststatus = 3
+    local global_statusline = statusline.statusline_component()
+
+    vim.fn.winwidth = function(winid)
+      if winid == 0 then
+        return 200
+      end
+      return original_winwidth(winid)
+    end
+    vim.o.laststatus = 1
+    local wide_window_statusline = statusline.statusline_component()
+
+    assert_eq(wide_window_statusline, global_statusline)
+
+    vim.fn.winwidth = original_winwidth
+    vim.o.columns = original_columns
+    vim.o.laststatus = original_laststatus
+  end)
+
+  it('refreshes chat statusline from editor columns when laststatus is 3', function()
+    local statusline = require('copilot_agent.statusline')
+    local original_laststatus = vim.o.laststatus
+    local original_columns = vim.o.columns
+    local original_get_width = vim.api.nvim_win_get_width
+    local widths = {}
+
+    agent.open_chat()
+    local chat_winid = agent.state.chat_winid
+
+    agent.state.session_id = 'nvim-1717245296789000000'
+    agent.state.session_name = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+    widths[chat_winid] = 80
+    vim.api.nvim_win_get_width = function(winid)
+      return widths[winid] or original_get_width(winid)
+    end
+
+    vim.o.columns = 200
+    vim.o.laststatus = 3
+    statusline.refresh_chat_statusline()
+    local wide_columns_statusline = vim.wo[chat_winid].statusline
+
+    widths[chat_winid] = 40
+    statusline.refresh_chat_statusline()
+    local resized_split_statusline = vim.wo[chat_winid].statusline
+    assert_eq(wide_columns_statusline, resized_split_statusline)
+
+    vim.o.columns = 120
+    statusline.refresh_chat_statusline()
+    local smaller_columns_statusline = vim.wo[chat_winid].statusline
+    assert_true(smaller_columns_statusline ~= resized_split_statusline)
+
     vim.api.nvim_win_get_width = original_get_width
+    vim.o.columns = original_columns
+    vim.o.laststatus = original_laststatus
+  end)
+
+  it('uses winwidth(0) when laststatus is 1', function()
+    local statusline = require('copilot_agent.statusline')
+    local original_laststatus = vim.o.laststatus
+    local original_columns = vim.o.columns
+    local original_winwidth = vim.fn.winwidth
+
+    agent.state.instruction_count = 2
+    agent.state.agent_count = 1
+    agent.state.skill_count = 3
+    agent.state.mcp_count = 4
+    agent.state.current_model = 'claude-opus-4.7'
+    agent.state.reasoning_effort = 'high'
+    agent.state.current_intent = 'Running a very long shell command in a narrow split'
+
+    vim.o.columns = 200
+    vim.o.laststatus = 1
+    vim.fn.winwidth = function(winid)
+      if winid == 0 then
+        return 80
+      end
+      return original_winwidth(winid)
+    end
+    local narrow_window_statusline = statusline.statusline_component()
+
+    vim.fn.winwidth = function(winid)
+      if winid == 0 then
+        return 200
+      end
+      return original_winwidth(winid)
+    end
+    local wide_window_statusline = statusline.statusline_component()
+
+    assert_true(narrow_window_statusline ~= wide_window_statusline)
+
+    vim.fn.winwidth = original_winwidth
+    vim.o.columns = original_columns
+    vim.o.laststatus = original_laststatus
+  end)
+
+  it('resolves the moved chat window before computing chat statusline width', function()
+    local statusline = require('copilot_agent.statusline')
+    agent.open_chat()
+
+    local stale_chat_win = agent.state.chat_winid
+    local source_buf = vim.api.nvim_create_buf(false, true)
+    vim.cmd('leftabove vnew')
+    local moved_chat_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(moved_chat_win, agent.state.chat_bufnr)
+    vim.api.nvim_win_set_buf(stale_chat_win, source_buf)
+    agent.state.chat_winid = stale_chat_win
+
+    local original_get_width = vim.api.nvim_win_get_width
+    local stale_width_used = false
+    vim.api.nvim_win_get_width = function(winid)
+      if winid == stale_chat_win then
+        stale_width_used = true
+      end
+      return original_get_width(winid)
+    end
+
+    statusline.refresh_chat_statusline()
+
+    vim.api.nvim_win_get_width = original_get_width
+
+    assert_eq(moved_chat_win, agent.state.chat_winid)
+    assert_false(stale_width_used)
   end)
 end)
 
@@ -5901,6 +6340,26 @@ describe('chat input behavior', function()
     assert_eq(prefix .. 'draft message', vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, -1, false)[1])
   end)
 
+  it('does not crash render metrics when the chat window no longer shows the chat buffer', function()
+    local render = require('copilot_agent.render')
+    agent.open_chat()
+
+    render.append_entry('assistant', 'render stale window guard')
+    render.render_chat()
+
+    local stale_chat_win = agent.state.chat_winid
+    local source_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { '# markdown buffer' })
+    vim.api.nvim_win_set_buf(stale_chat_win, source_buf)
+
+    local ok_at_bottom, at_bottom = pcall(render.chat_at_bottom)
+    assert_true(ok_at_bottom)
+    assert_false(at_bottom)
+
+    local ok_render = pcall(render.render_chat)
+    assert_true(ok_render)
+  end)
+
   it('completes discovered command arguments from the chat input', function()
     local vscode_dir = vim.fn.fnamemodify(vscode_mcp, ':h')
     root_mcp_backup = vim.fn.filereadable(root_mcp) == 1 and vim.fn.readfile(root_mcp) or nil
@@ -5975,6 +6434,63 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(mcp_words, '/mcp docs'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp browser'))
     assert_true(vim.tbl_contains(instruction_words, '/instructions .github/copilot-instructions.md'))
+  end)
+
+  it('completes nested attachment paths inside subfolders', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local line = prefix .. '@lua/cop'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local replace_start = input._input_omnifunc(1, '')
+    local items = vim.tbl_map(function(item)
+      return item.word
+    end, input._input_omnifunc(0, ''))
+
+    assert_eq(#prefix, replace_start)
+    assert_true(vim.tbl_contains(items, '@lua/copilot_agent'))
+  end)
+
+  it('auto-triggers attachment completion after entering a nested folder slash', function()
+    local original_complete = vim.fn.complete
+    local original_mode = vim.fn.mode
+    local completions = {}
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.cmd('startinsert!')
+    vim.fn.mode = function()
+      return 'i'
+    end
+    vim.fn.complete = function(col, items)
+      table.insert(completions, { col = col, items = items })
+    end
+
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. '@lua/' })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. '@lua/') })
+    vim.api.nvim_exec_autocmds('TextChangedI', { buffer = agent.state.input_bufnr })
+    vim.wait(50, function()
+      return #completions > 0
+    end)
+
+    vim.fn.complete = original_complete
+    vim.fn.mode = original_mode
+
+    assert_eq(1, #completions)
+    assert_eq(#prefix + 1, completions[1].col)
+    assert_true(vim.tbl_contains(
+      vim.tbl_map(function(item)
+        return item.word
+      end, completions[1].items),
+      '@lua/copilot_agent'
+    ))
   end)
 
   it('replaces the generic slash completion with agent completion when typing /agent', function()

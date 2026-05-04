@@ -67,6 +67,7 @@ local DIFF_FLOAT_HEIGHT_RATIO = 0.7 -- Leave visible editor context above and be
 local FLOAT_VERTICAL_BORDER_LINES = 2 -- Account for the rounded-border float frame when sizing content buffers.
 local TURN_END_PROMPT_PREVIEW_CHARS = 200 -- Show enough of the prompt in turn-end logs to identify the completed request.
 local RECENT_ACTIVITY_LINE_MAX_CHARS = 120 -- Keep recent activity summaries compact enough for overlays and statusline-adjacent displays.
+local OVERLAY_STALE_IDLE_TIMEOUT_MS = 10 * 60 * 1000 -- Clear orphaned shell activity overlays after prolonged inactivity so stale "Activity: bash" banners never linger indefinitely.
 local intentionally_stopped_event_jobs = {}
 local sanitize_permission_text
 local summarize_tool_activity
@@ -74,12 +75,7 @@ local summarize_tool_activity
 local function preload_history_checkpoint_ids(session_id)
   local ids = {}
   for _, checkpoint in ipairs(checkpoints.list(session_id)) do
-    if
-      type(checkpoint.assistant_message_id) == 'string'
-      and checkpoint.assistant_message_id ~= ''
-      and type(checkpoint.id) == 'string'
-      and checkpoint.id ~= ''
-    then
+    if type(checkpoint.assistant_message_id) == 'string' and checkpoint.assistant_message_id ~= '' and type(checkpoint.id) == 'string' and checkpoint.id ~= '' then
       ids[checkpoint.assistant_message_id] = {
         id = checkpoint.id,
         prompt = checkpoint.prompt,
@@ -223,25 +219,14 @@ local function log_session_event_payload(event_name, raw_data)
 
   local decoded = decode_json_silently(raw_data)
   if type(decoded) == 'table' then
-    log_debug_trace(
-        'sse.event raw event=' .. tostring(event_name) .. ' payload=',
-        sanitize_session_log_value(decoded),
-        {
-          max_len = TRACE_LOG_MAX_CHARS,
-          depth = TRACE_LOG_DEPTH,
-        }
-      )
+    log_debug_trace('sse.event raw event=' .. tostring(event_name) .. ' payload=', sanitize_session_log_value(decoded), {
+      max_len = TRACE_LOG_MAX_CHARS,
+      depth = TRACE_LOG_DEPTH,
+    })
     return
   end
 
-  log(
-      string.format(
-        'sse.event raw event=%s string=%s',
-        tostring(event_name),
-        serialize_log_value(raw_data, { max_len = TRACE_LOG_MAX_CHARS })
-      ),
-      vim.log.levels.DEBUG
-    )
+  log(string.format('sse.event raw event=%s string=%s', tostring(event_name), serialize_log_value(raw_data, { max_len = TRACE_LOG_MAX_CHARS })), vim.log.levels.DEBUG)
 end
 
 local function preview_delta_boundary(current, delta)
@@ -251,12 +236,7 @@ local function preview_delta_boundary(current, delta)
   local delta_head = delta:sub(1, DELTA_BOUNDARY_CONTEXT_CHARS)
   local tail_last = current_tail:sub(-1)
   local head_first = delta_head:sub(1, 1)
-  local suspicious_join = tail_last ~= ''
-    and head_first ~= ''
-    and tail_last:match('[%w%)]')
-    and head_first:match('[%w%(]')
-    and not tail_last:match('%s')
-    and not head_first:match('%s')
+  local suspicious_join = tail_last ~= '' and head_first ~= '' and tail_last:match('[%w%)]') and head_first:match('[%w%(]') and not tail_last:match('%s') and not head_first:match('%s')
 
   return string.format(
     'tail=%s head=%s suspicious=%s',
@@ -362,16 +342,7 @@ local function merge_assistant_message_content(current, incoming, ctx)
     return finish('replace-empty-or-thinking', incoming)
   end
   local function canonicalize(text)
-    return text
-      :gsub('\r\n?', '\n')
-      :gsub('’', "'")
-      :gsub('‘', "'")
-      :gsub('“', '"')
-      :gsub('”', '"')
-      :lower()
-      :gsub('[%p%c]+', ' ')
-      :gsub('%s+', ' ')
-      :match('^%s*(.-)%s*$')
+    return text:gsub('\r\n?', '\n'):gsub('’', "'"):gsub('‘', "'"):gsub('“', '"'):gsub('”', '"'):lower():gsub('[%p%c]+', ' '):gsub('%s+', ' '):match('^%s*(.-)%s*$')
   end
   local function split_message_lines(text)
     return vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
@@ -449,24 +420,14 @@ local function merge_assistant_message_content(current, incoming, ctx)
     if vim.startswith(canonical_incoming, canonical_current) then
       return finish('replace-canonical-prefix-extension', incoming)
     end
-    if
-      ctx
-      and ctx.prefer_incoming_suffix_replacement == true
-      and #canonical_incoming < #canonical_current
-      and canonical_current:sub(-#canonical_incoming) == canonical_incoming
-    then
+    if ctx and ctx.prefer_incoming_suffix_replacement == true and #canonical_incoming < #canonical_current and canonical_current:sub(-#canonical_incoming) == canonical_incoming then
       return finish('replace-live-canonical-suffix', incoming)
     end
     if canonical_current:find(canonical_incoming, 1, true) then
       return finish('keep-canonical-substring', current)
     end
   end
-  if
-    ctx
-    and ctx.prefer_incoming_suffix_replacement == true
-    and #incoming < #current
-    and current:sub(-#incoming) == incoming
-  then
+  if ctx and ctx.prefer_incoming_suffix_replacement == true and #incoming < #current and current:sub(-#incoming) == incoming then
     return finish('replace-live-literal-suffix', incoming)
   end
   if current:find(incoming, 1, true) then
@@ -500,8 +461,7 @@ local function merge_assistant_message_content(current, incoming, ctx)
   end
   if canonical_current ~= '' and canonical_incoming ~= '' and #canonical_incoming >= #canonical_current then
     local shared_prefix = common_prefix_len(canonical_current, canonical_incoming)
-    local min_prefix =
-      math.max(NEAR_PREFIX_MIN_CHARS, math.floor(math.min(#canonical_current, #canonical_incoming) * NEAR_PREFIX_MATCH_RATIO))
+    local min_prefix = math.max(NEAR_PREFIX_MIN_CHARS, math.floor(math.min(#canonical_current, #canonical_incoming) * NEAR_PREFIX_MATCH_RATIO))
     if shared_prefix >= min_prefix then
       return finish('replace-canonical-near-prefix', incoming, { overlap = shared_prefix })
     end
@@ -515,13 +475,7 @@ local function looks_like_shell_tool(name)
     return false
   end
   name = vim.trim(name):lower()
-  return name == 'bash'
-    or name == 'sh'
-    or name == 'zsh'
-    or name == 'fish'
-    or name == 'pwsh'
-    or name == 'powershell'
-    or name == 'cmd'
+  return name == 'bash' or name == 'sh' or name == 'zsh' or name == 'fish' or name == 'pwsh' or name == 'powershell' or name == 'cmd'
 end
 
 local function overlay_now_ms()
@@ -535,6 +489,43 @@ end
 
 local function min_overlay_tool_duration_ms()
   return 3000
+end
+
+local function overlay_stale_idle_timeout_ms()
+  return OVERLAY_STALE_IDLE_TIMEOUT_MS
+end
+
+local function overlay_run_id_for_tool_call(tool_call_id)
+  local current = state.overlay_tool_display
+  if not current then
+    return nil
+  end
+
+  if type(tool_call_id) == 'string' and tool_call_id ~= '' then
+    if current.tool_call_id == tool_call_id then
+      return current.run_id
+    end
+    return nil
+  end
+
+  if type(state.active_tool_run_id) == 'number' and current.run_id == state.active_tool_run_id then
+    return state.active_tool_run_id
+  end
+
+  return nil
+end
+
+local function touch_overlay_tool_activity(run_id)
+  if type(run_id) ~= 'number' then
+    return
+  end
+
+  local current = state.overlay_tool_display
+  if not current or current.run_id ~= run_id or current.completed == true then
+    return
+  end
+
+  current.last_activity_ms = overlay_now_ms()
 end
 
 local function extract_shell_command_text(data)
@@ -587,10 +578,8 @@ local function extract_shell_command_text(data)
     end
     visited[value] = true
 
-    local command_with_args = assemble_command_with_args(
-      value.command or value.executable or value.program or value.cmd,
-      value.arguments or value.args or value.argv or value.commandArgs or value.command_args
-    )
+    local command_with_args =
+      assemble_command_with_args(value.command or value.executable or value.program or value.cmd, value.arguments or value.args or value.argv or value.commandArgs or value.command_args)
     if command_with_args then
       return command_with_args
     end
@@ -1298,22 +1287,60 @@ local function schedule_overlay_tool_clear(delay_ms, run_id)
   end, math.max(0, math.floor(tonumber(delay_ms) or 0)))
 end
 
-local function enqueue_overlay_tool(tool_name, detail)
+local function schedule_overlay_tool_stale_clear(run_id, delay_ms)
+  if type(run_id) ~= 'number' then
+    return
+  end
+
+  local delay = math.max(0, math.floor(tonumber(delay_ms) or overlay_stale_idle_timeout_ms()))
+  vim.defer_fn(function()
+    local current = state.overlay_tool_display
+    if not current or current.run_id ~= run_id or current.completed == true then
+      return
+    end
+
+    local now_ms = overlay_now_ms()
+    local last_activity_ms = tonumber(current.last_activity_ms) or tonumber(current.display_started_ms) or now_ms
+    local idle_ms = now_ms - last_activity_ms
+    local stale_timeout_ms = overlay_stale_idle_timeout_ms()
+    if idle_ms < stale_timeout_ms then
+      schedule_overlay_tool_stale_clear(run_id, stale_timeout_ms - idle_ms)
+      return
+    end
+
+    log(string.format('overlay.tool stale clear run_id=%s idle_ms=%d', tostring(run_id), idle_ms), vim.log.levels.DEBUG)
+    state.overlay_tool_display = nil
+    if state.active_tool_run_id == run_id then
+      state.active_tool = nil
+      state.active_tool_run_id = nil
+      state.active_tool_detail = nil
+      state.pending_tool_detail = nil
+      refresh_statuslines()
+    end
+    refresh_reasoning_overlay(true)
+  end, delay)
+end
+
+local function enqueue_overlay_tool(tool_name, detail, tool_call_id)
   if not looks_like_shell_tool(tool_name) then
     return nil
   end
 
   state.overlay_tool_run_id = (tonumber(state.overlay_tool_run_id) or 0) + 1
+  local now_ms = overlay_now_ms()
   local item = {
     run_id = state.overlay_tool_run_id,
     tool = tool_name,
     detail = detail,
+    tool_call_id = sanitize_permission_text(tool_call_id),
     completed = false,
-    display_started_ms = overlay_now_ms(),
+    display_started_ms = now_ms,
+    last_activity_ms = now_ms,
   }
 
   cancel_overlay_tool_schedule()
   state.overlay_tool_display = item
+  schedule_overlay_tool_stale_clear(item.run_id)
   refresh_reasoning_overlay(true)
   return item.run_id
 end
@@ -1328,6 +1355,7 @@ local function complete_overlay_tool(run_id)
     return
   end
 
+  current.last_activity_ms = overlay_now_ms()
   current.completed = true
   local elapsed = overlay_now_ms() - (tonumber(current.display_started_ms) or 0)
   local remaining = math.max(0, min_overlay_tool_duration_ms() - elapsed)
@@ -1673,17 +1701,11 @@ local function defer_prompt(callback)
 end
 
 local function answer_permission(session_id, request_id, approved, callback)
-  request(
-    'POST',
-    '/sessions/' .. session_id .. '/permission/' .. request_id,
-    { approved = approved },
-    callback
-      or function(_, err)
-        if err then
-          notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
-        end
-      end
-  )
+  request('POST', '/sessions/' .. session_id .. '/permission/' .. request_id, { approved = approved }, callback or function(_, err)
+    if err then
+      notify('Failed to send permission answer: ' .. tostring(err), vim.log.levels.WARN)
+    end
+  end)
 end
 
 local function sync_model_state(model, reasoning_effort)
@@ -1988,50 +2010,24 @@ local function handle_host_event(event_name, payload)
       local sid = state.session_id
       local event_session_id = data.sessionId
       if type(event_session_id) == 'string' and sid and event_session_id ~= sid then
-        log(
-          string.format(
-            'host.permission_requested ignored event_session_id=%s active_session_id=%s',
-            tostring(event_session_id),
-            tostring(sid)
-          ),
-          vim.log.levels.DEBUG
-        )
+        log(string.format('host.permission_requested ignored event_session_id=%s active_session_id=%s', tostring(event_session_id), tostring(sid)), vim.log.levels.DEBUG)
         return
       end
-      local auto_allowed = (kind == 'read' or kind == 'write')
-          and approvals.directory_allowed(perm.path or perm.fileName)
-        or approvals.tool_allowed(perm)
+      local auto_allowed = (kind == 'read' or kind == 'write') and approvals.directory_allowed(perm.path or perm.fileName) or approvals.tool_allowed(perm)
       if auto_allowed and sid then
         log(
-          string.format(
-            'host.permission_requested auto-approved kind=%s request_id=%s detail=%s',
-            tostring(kind),
-            tostring(req_id),
-            serialize_log_value(perm, { max_len = log_content_length * 10 })
-          ),
+          string.format('host.permission_requested auto-approved kind=%s request_id=%s detail=%s', tostring(kind), tostring(req_id), serialize_log_value(perm, { max_len = log_content_length * 10 })),
           vim.log.levels.DEBUG
         )
         answer_permission(sid, req_id, true)
         return
       end
       if not enqueue_prompt('permission', payload) then
-        log(
-          string.format(
-            'host.permission_requested dropped duplicate request_id=%s kind=%s',
-            tostring(req_id),
-            tostring(kind)
-          ),
-          vim.log.levels.DEBUG
-        )
+        log(string.format('host.permission_requested dropped duplicate request_id=%s kind=%s', tostring(req_id), tostring(kind)), vim.log.levels.DEBUG)
         return
       end
       log(
-        string.format(
-          'host.permission_requested enqueued request_id=%s kind=%s detail=%s',
-          tostring(req_id),
-          tostring(kind),
-          serialize_log_value(perm, { max_len = ERROR_LOG_MAX_CHARS })
-        ),
+        string.format('host.permission_requested enqueued request_id=%s kind=%s detail=%s', tostring(req_id), tostring(kind), serialize_log_value(perm, { max_len = ERROR_LOG_MAX_CHARS })),
         vim.log.levels.DEBUG
       )
       vim.schedule(show_next_prompt)
@@ -2317,9 +2313,7 @@ local function is_expected_reload_attention(err)
     return false
   end
 
-  return message == 'buffer has unsaved changes'
-    or message:find('E37:', 1, true) ~= nil
-    or message:find('No write since last change', 1, true) ~= nil
+  return message == 'buffer has unsaved changes' or message:find('E37:', 1, true) ~= nil or message:find('No write since last change', 1, true) ~= nil
 end
 
 local function reload_attention_level(err)
@@ -2351,12 +2345,7 @@ local function check_open_buffers_for_external_changes(opts)
                 local summary, reload_err = reload_buffer_from_disk(bufnr, path, { force = true })
                 if reload_err then
                   notify(
-                    'External reload needs attention: '
-                      .. vim.fn.fnamemodify(path, ':t')
-                      .. ' ('
-                      .. tostring(summary or 'content updated')
-                      .. '); '
-                      .. tostring(sanitize_reload_error(reload_err)),
+                    'External reload needs attention: ' .. vim.fn.fnamemodify(path, ':t') .. ' (' .. tostring(summary or 'content updated') .. '); ' .. tostring(sanitize_reload_error(reload_err)),
                     reload_attention_level(reload_err)
                   )
                 end
@@ -2397,7 +2386,7 @@ local function clear_reasoning_preview_on_assistant_content(content, reason)
         string.format(
           'assistant content preserved reasoning because content still looks like thinking reason=%s len=%d preview=%s',
           tostring(reason or 'unspecified'),
-          #((content or '')),
+          #(content or ''),
           preview_log_text(content)
         ),
         vim.log.levels.DEBUG
@@ -2407,25 +2396,12 @@ local function clear_reasoning_preview_on_assistant_content(content, reason)
   end
   if (state.reasoning_text or '') == '' and #(state.reasoning_lines or {}) == 0 then
     log(
-      string.format(
-        'assistant content had no reasoning preview to clear reason=%s len=%d preview=%s',
-        tostring(reason or 'unspecified'),
-        #((content or '')),
-        preview_log_text(content)
-      ),
+      string.format('assistant content had no reasoning preview to clear reason=%s len=%d preview=%s', tostring(reason or 'unspecified'), #(content or ''), preview_log_text(content)),
       vim.log.levels.DEBUG
     )
     return
   end
-  log(
-    string.format(
-      'assistant content clearing reasoning reason=%s len=%d preview=%s',
-      tostring(reason or 'unspecified'),
-      #((content or '')),
-      preview_log_text(content)
-    ),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('assistant content clearing reasoning reason=%s len=%d preview=%s', tostring(reason or 'unspecified'), #(content or ''), preview_log_text(content)), vim.log.levels.DEBUG)
   clear_reasoning_preview(reason)
 end
 
@@ -2460,11 +2436,7 @@ end
 local function handle_session_event(payload)
   local event_type = payload and payload.type or nil
   local data = payload and payload.data or {}
-  log_debug_trace(
-    'session.event received type=' .. tostring(event_type) .. ' data=',
-    sanitize_session_log_value(data),
-    { max_len = 2400, depth = 8 }
-  )
+  log_debug_trace('session.event received type=' .. tostring(event_type) .. ' data=', sanitize_session_log_value(data), { max_len = 2400, depth = 8 })
   capture_turn_activity_summary(event_type, data)
 
   if event_type == 'assistant.message_delta' then
@@ -2477,13 +2449,7 @@ local function handle_session_event(payload)
       refresh_statuslines()
     end
     local pending_turn = state.pending_checkpoint_turn
-    if
-      not state.history_loading
-      and pending_turn
-      and pending_turn.session_id == state.session_id
-      and type(data.messageId) == 'string'
-      and data.messageId ~= ''
-    then
+    if not state.history_loading and pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
       pending_turn.assistant_message_id = data.messageId
     end
     local entry, idx, key = ensure_assistant_entry(data.messageId)
@@ -2529,10 +2495,7 @@ local function handle_session_event(payload)
         }
       end
     else
-      log(
-        string.format('user.message ignored during live session message_id=%s', tostring(data.messageId or '<none>')),
-        vim.log.levels.DEBUG
-      )
+      log(string.format('user.message ignored during live session message_id=%s', tostring(data.messageId or '<none>')), vim.log.levels.DEBUG)
     end
     return
   end
@@ -2555,12 +2518,7 @@ local function handle_session_event(payload)
       assign_history_checkpoint_id(data.messageId)
     elseif not state.history_loading then
       local pending_turn = state.pending_checkpoint_turn
-      if
-        pending_turn
-        and pending_turn.session_id == state.session_id
-        and type(data.messageId) == 'string'
-        and data.messageId ~= ''
-      then
+      if pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
         pending_turn.assistant_message_id = data.messageId
       end
     end
@@ -2590,10 +2548,7 @@ local function handle_session_event(payload)
       or event_type == 'tool.execution_complete'
       or event_type == 'assistant.reasoning_delta'
     then
-      log(
-        string.format('session.event skipped during history replay type=%s', tostring(event_type)),
-        vim.log.levels.DEBUG
-      )
+      log(string.format('session.event skipped during history replay type=%s', tostring(event_type)), vim.log.levels.DEBUG)
       return
     end
   end
@@ -2701,6 +2656,9 @@ local function handle_session_event(payload)
       state.active_turn_assistant_message_id = nil
       state.active_assistant_merge_group = nil
     end
+    if state.overlay_tool_display and state.overlay_tool_display.completed ~= true then
+      complete_overlay_tool(state.overlay_tool_display.run_id)
+    end
     state.active_tool = nil
     state.active_tool_run_id = nil
     state.active_tool_detail = nil
@@ -2723,7 +2681,7 @@ local function handle_session_event(payload)
     state.chat_busy = true
     state.active_tool = data.toolName or nil
     state.active_tool_detail = extract_shell_tool_detail(state.active_tool, data)
-    state.active_tool_run_id = enqueue_overlay_tool(state.active_tool, state.active_tool_detail)
+    state.active_tool_run_id = enqueue_overlay_tool(state.active_tool, state.active_tool_detail, data.toolCallId)
     state.pending_tool_detail = nil
     refresh_statuslines()
     refresh_reasoning_overlay()
@@ -2731,27 +2689,37 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'tool.execution_partial_result' then
+    local tool_call_id = sanitize_permission_text(data.toolCallId)
+    touch_overlay_tool_activity(overlay_run_id_for_tool_call(tool_call_id))
     return
   end
 
   if event_type == 'tool.execution_progress' then
+    local tool_call_id = sanitize_permission_text(data.toolCallId)
+    touch_overlay_tool_activity(overlay_run_id_for_tool_call(tool_call_id))
     return
   end
 
   if event_type == 'tool.execution_complete' then
-    log(
-      string.format(
-        'tool.execution_complete tool=%s payload=%s',
-        tostring(state.active_tool or data.toolName or '<none>'),
-        serialize_log_value(data, { max_len = 1600 })
-      ),
-      vim.log.levels.DEBUG
-    )
-    complete_overlay_tool(state.active_tool_run_id)
-    state.active_tool = nil
-    state.active_tool_run_id = nil
-    state.active_tool_detail = nil
-    state.pending_tool_detail = nil
+    local tool_call_id = sanitize_permission_text(data.toolCallId)
+    local completion_run_id = overlay_run_id_for_tool_call(tool_call_id)
+    if not completion_run_id and not tool_call_id then
+      completion_run_id = state.active_tool_run_id
+    end
+
+    log(string.format('tool.execution_complete tool=%s payload=%s', tostring(state.active_tool or data.toolName or '<none>'), serialize_log_value(data, { max_len = 1600 })), vim.log.levels.DEBUG)
+    complete_overlay_tool(completion_run_id)
+
+    local clear_active_tool_state = completion_run_id ~= nil and state.active_tool_run_id == completion_run_id
+    if not clear_active_tool_state and not tool_call_id then
+      clear_active_tool_state = true
+    end
+    if clear_active_tool_state then
+      state.active_tool = nil
+      state.active_tool_run_id = nil
+      state.active_tool_detail = nil
+      state.pending_tool_detail = nil
+    end
     refresh_statuslines()
     refresh_reasoning_overlay()
     return
@@ -2798,10 +2766,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.streaming_delta' then
-    log(
-      'assistant.streaming_delta ignored payload=' .. serialize_log_value(data, { max_len = 1600 }),
-      vim.log.levels.DEBUG
-    )
+    log('assistant.streaming_delta ignored payload=' .. serialize_log_value(data, { max_len = 1600 }), vim.log.levels.DEBUG)
     return
   end
 
@@ -2809,10 +2774,7 @@ local function handle_session_event(payload)
     local kind = data.kind or {}
     local key = first_non_empty(kind.agentId, kind.entryId)
     if not key then
-      log(
-        'system.notification ignored without key payload=' .. serialize_log_value(data, { max_len = 1600 }),
-        vim.log.levels.DEBUG
-      )
+      log('system.notification ignored without key payload=' .. serialize_log_value(data, { max_len = 1600 }), vim.log.levels.DEBUG)
       return
     end
 
@@ -2844,10 +2806,7 @@ local function handle_session_event(payload)
     local op = data.operation or 'update'
     local rel_path = data.path or ''
     if rel_path == '' then
-      log(
-        'session.workspace_file_changed ignored without path payload=' .. serialize_log_value(data, { max_len = 1600 }),
-        vim.log.levels.DEBUG
-      )
+      log('session.workspace_file_changed ignored without path payload=' .. serialize_log_value(data, { max_len = 1600 }), vim.log.levels.DEBUG)
       return
     end
 
@@ -2884,48 +2843,25 @@ local function handle_session_event(payload)
         end
         if reload_err then
           log(
-            string.format(
-              'workspace change update reload skipped path=%s summary=%s error=%s',
-              rel_path,
-              tostring(summary or '<none>'),
-              tostring(sanitize_reload_error(reload_err))
-            ),
+            string.format('workspace change update reload skipped path=%s summary=%s error=%s', rel_path, tostring(summary or '<none>'), tostring(sanitize_reload_error(reload_err))),
             reload_attention_level(reload_err)
           )
           if reload_err ~= 'user declined reload' then
             notify(
-              'Agent updated on disk: '
-                .. rel_path
-                .. ' ('
-                .. tostring(summary or 'content updated')
-                .. '); reload skipped: '
-                .. tostring(sanitize_reload_error(reload_err)),
+              'Agent updated on disk: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. '); reload skipped: ' .. tostring(sanitize_reload_error(reload_err)),
               reload_attention_level(reload_err)
             )
           end
         else
-          log(
-            string.format(
-              'workspace change update reloaded path=%s summary=%s',
-              rel_path,
-              tostring(summary or '<none>')
-            ),
-            vim.log.levels.DEBUG
-          )
-          notify(
-            'Agent reloaded: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. ')',
-            vim.log.levels.INFO
-          )
+          log(string.format('workspace change update reloaded path=%s summary=%s', rel_path, tostring(summary or '<none>')), vim.log.levels.DEBUG)
+          notify('Agent reloaded: ' .. rel_path .. ' (' .. tostring(summary or 'content updated') .. ')', vim.log.levels.INFO)
         end
         -- Offer diff review if the file is tracked by git.
         if state.config.chat.diff_review ~= false and not reload_err then
           offer_diff_review(abs_path, rel_path)
         end
       else
-        log(
-          string.format('workspace change update without open buffer path=%s abs=%s', rel_path, abs_path),
-          vim.log.levels.DEBUG
-        )
+        log(string.format('workspace change update without open buffer path=%s abs=%s', rel_path, abs_path), vim.log.levels.DEBUG)
         notify('Agent updated: ' .. rel_path, vim.log.levels.INFO)
       end
       check_open_buffers_for_external_changes({ skip_path = abs_path })
@@ -2936,10 +2872,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'error' then
-    log(
-      'session.error payload=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 2400, depth = 8 }),
-      vim.log.levels.WARN
-    )
+    log('session.error payload=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 2400, depth = 8 }), vim.log.levels.WARN)
     flush_recent_activity_summary()
     reset_pending_assistant_entry()
     clear_reasoning_preview('error')
@@ -2964,13 +2897,7 @@ local function handle_session_event(payload)
     return
   end
 
-  log(
-    'session.event unhandled type='
-      .. tostring(event_type)
-      .. ' data='
-      .. serialize_log_value(sanitize_session_log_value(data), { max_len = 1600, depth = 8 }),
-    vim.log.levels.DEBUG
-  )
+  log('session.event unhandled type=' .. tostring(event_type) .. ' data=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 1600, depth = 8 }), vim.log.levels.DEBUG)
 end
 
 local function flush_sse_event()
@@ -2986,12 +2913,7 @@ local function flush_sse_event()
   local payload, decode_err = decode_json(raw_data, { log = false })
   if not payload then
     log(
-      string.format(
-        'sse.event decode failed event=%s error=%s data=%s',
-        tostring(event_name),
-        tostring(decode_err),
-        serialize_log_value(raw_data, { max_len = TRACE_LOG_MAX_CHARS })
-      ),
+      string.format('sse.event decode failed event=%s error=%s data=%s', tostring(event_name), tostring(decode_err), serialize_log_value(raw_data, { max_len = TRACE_LOG_MAX_CHARS })),
       vim.log.levels.WARN
     )
     append_entry('error', 'Failed to decode event ' .. event_name .. ': ' .. tostring(decode_err or raw_data))
@@ -3069,14 +2991,7 @@ function M.start_event_stream(session_id)
     'Accept: text/event-stream',
     build_url(string.format('/sessions/%s/events?history=true', session_id)),
   }
-  log(
-    string.format(
-      'sse.stream start session_id=%s url=%s',
-      tostring(session_id or '<none>'),
-      build_url(string.format('/sessions/%s/events?history=true', session_id))
-    ),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('sse.stream start session_id=%s url=%s', tostring(session_id or '<none>'), build_url(string.format('/sessions/%s/events?history=true', session_id))), vim.log.levels.DEBUG)
 
   -- Batch incoming SSE chunks to avoid flooding the Neovim event loop.
   -- on_stdout fires for every curl output chunk (potentially hundreds/sec);
@@ -3146,17 +3061,11 @@ function M.start_event_stream(session_id)
     end)
     state.history_loading = false
     state.history_pending_user_entries = {}
-    log(
-      string.format('sse.stream failed to start session_id=%s', tostring(session_id or '<none>')),
-      vim.log.levels.WARN
-    )
+    log(string.format('sse.stream failed to start session_id=%s', tostring(session_id or '<none>')), vim.log.levels.WARN)
     append_entry('error', 'failed to start event stream')
     return
   end
-  log(
-    string.format('sse.stream started session_id=%s job_id=%s', tostring(session_id or '<none>'), tostring(job_id)),
-    vim.log.levels.DEBUG
-  )
+  log(string.format('sse.stream started session_id=%s job_id=%s', tostring(session_id or '<none>'), tostring(job_id)), vim.log.levels.DEBUG)
   state.events_job_id = job_id
 end
 
@@ -3174,14 +3083,7 @@ function M.reload_session_history(session_id, callback)
   preload_history_checkpoint_ids(session_id)
   request('GET', string.format('/sessions/%s/messages', session_id), nil, function(response, err)
     if err then
-      log(
-        string.format(
-          'session.history reload failed session_id=%s error=%s',
-          tostring(session_id),
-          serialize_log_value(err, { max_len = ERROR_LOG_MAX_CHARS })
-        ),
-        vim.log.levels.WARN
-      )
+      log(string.format('session.history reload failed session_id=%s error=%s', tostring(session_id), serialize_log_value(err, { max_len = ERROR_LOG_MAX_CHARS })), vim.log.levels.WARN)
       state.history_loading = false
       state.history_checkpoint_ids = nil
       state.history_pending_user_entries = {}
@@ -3193,14 +3095,7 @@ function M.reload_session_history(session_id, callback)
       handle_session_event(event)
     end
 
-    log(
-      string.format(
-        'session.history reloaded session_id=%s event_count=%d',
-        tostring(session_id),
-        #((response and response.events) or {})
-      ),
-      vim.log.levels.DEBUG
-    )
+    log(string.format('session.history reloaded session_id=%s event_count=%d', tostring(session_id), #((response and response.events) or {})), vim.log.levels.DEBUG)
 
     state.history_loading = false
     state.history_checkpoint_ids = nil

@@ -160,6 +160,41 @@ local function command_completion_context(before)
   return nil
 end
 
+local function attachment_completion_context(before)
+  before = type(before) == 'string' and before or ''
+  local start_pos = before:find('@[^%s]*$')
+  if not start_pos then
+    return nil
+  end
+
+  return {
+    start = start_pos,
+    token = before:sub(start_pos),
+    query = before:sub(start_pos + 1),
+  }
+end
+
+local function attachment_completion_items(query)
+  query = type(query) == 'string' and query or ''
+  local wd = working_directory()
+  local pattern = wd .. '/' .. query .. '*'
+  local items = {}
+  local seen = {}
+
+  for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
+    local rel = path:sub(#wd + 2)
+    if rel ~= '' and not seen[rel] then
+      seen[rel] = true
+      table.insert(items, { word = '@' .. rel, abbr = rel, menu = '[file]' })
+    end
+  end
+
+  table.sort(items, function(left, right)
+    return left.abbr < right.abbr
+  end)
+  return items
+end
+
 local function discovered_instruction_names()
   local wd = working_directory()
   local files = {}
@@ -315,9 +350,13 @@ local function input_omnifunc(findstart, base)
   local line = vim.api.nvim_get_current_line()
   local col = vim.api.nvim_win_get_cursor(0)[2]
   local before = line:sub(1, col)
+  local attachment_context = attachment_completion_context(before)
   local command_context = command_completion_context(before)
 
   if findstart == 1 then
+    if attachment_context then
+      return attachment_context.start - 1
+    end
     if command_context then
       return command_context.start - 1
     end
@@ -329,15 +368,8 @@ local function input_omnifunc(findstart, base)
   end
 
   local items = {}
-  if vim.startswith(base, '@') then
-    local query = base:sub(2)
-    local wd = working_directory()
-    local pattern = wd .. '/' .. query .. '*'
-    local files = vim.fn.glob(pattern, false, true)
-    for _, f in ipairs(files) do
-      local rel = f:sub(#wd + 2)
-      table.insert(items, { word = '@' .. rel, abbr = rel, menu = '[file]' })
-    end
+  if attachment_context or vim.startswith(base, '@') then
+    items = attachment_completion_items(vim.startswith(base, '@') and base:sub(2) or attachment_context.query)
   elseif command_context and command_context.kind == 'agent' then
     local query = command_context.query:lower()
     for _, name in ipairs(discovered_agent_names()) do
@@ -706,10 +738,14 @@ local function create_input_buffer()
     local line = vim.api.nvim_get_current_line()
     local col = vim.api.nvim_win_get_cursor(0)[2]
     local before = line:sub(1, col)
+    local attachment_context = attachment_completion_context(before)
     local command_context = command_completion_context(before)
 
     local start_col, items
-    if command_context then
+    if attachment_context then
+      start_col = attachment_context.start
+      items = input_omnifunc(0, attachment_context.token)
+    elseif command_context then
       start_col = command_context.start
       items = input_omnifunc(0, line:sub(start_col, col))
     else
@@ -729,12 +765,21 @@ local function create_input_buffer()
   local auto_completion_scheduled = false
 
   local function auto_completion_key(before)
-    local pos = before:find('[@/]$')
+    local attachment_context = attachment_completion_context(before)
+    if attachment_context then
+      if attachment_context.query == '' then
+        return 'attachment:' .. attachment_context.start
+      end
+      if attachment_context.token:sub(-1) == '/' then
+        return 'attachment:' .. attachment_context.start .. ':' .. attachment_context.query
+      end
+    end
+
+    local pos = before:find('/$')
     if pos then
-      local trigger = before:sub(pos, pos)
       local prev_char = pos == 1 and '' or before:sub(pos - 1, pos - 1)
-      if trigger == '@' or pos == 1 or prev_char:match('%s') then
-        return trigger .. ':' .. pos
+      if pos == 1 or prev_char:match('%s') then
+        return 'slash:' .. pos
       end
     end
 

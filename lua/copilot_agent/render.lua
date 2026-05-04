@@ -68,8 +68,7 @@ local function reasoning_config()
   local reasoning = (((state.config or {}).chat or {}).reasoning or {})
   local enabled
   if reasoning.enabled == nil then
-    enabled = #(state.reasoning_lines or {}) > 0
-      or (type(state.reasoning_effort) == 'string' and state.reasoning_effort ~= '')
+    enabled = #(state.reasoning_lines or {}) > 0 or (type(state.reasoning_effort) == 'string' and state.reasoning_effort ~= '')
   else
     enabled = reasoning.enabled == true
   end
@@ -157,12 +156,22 @@ local function truncate_display_text(text, max_width)
   return table.concat(out) .. '…'
 end
 
-local function wrap_overlay_text(text, max_width)
-  text = type(text) == 'string' and text:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
+local function wrap_overlay_text(text, max_width, opts)
+  opts = type(opts) == 'table' and opts or {}
+  local collapse_whitespace = opts.collapse_whitespace ~= false
+  local trim_chunks = opts.trim_chunks ~= false
+  local min_width = math.max(1, math.floor(tonumber(opts.min_width) or OVERLAY_WRAP_MIN_WIDTH))
+  text = type(text) == 'string' and text or ''
+  if collapse_whitespace then
+    text = text:gsub('%s+', ' ')
+  end
+  if trim_chunks then
+    text = text:match('^%s*(.-)%s*$') or ''
+  end
   if text == '' then
     return {}
   end
-  max_width = math.max(OVERLAY_WRAP_MIN_WIDTH, math.floor(tonumber(max_width) or OVERLAY_WRAP_FALLBACK_WIDTH))
+  max_width = math.max(min_width, math.floor(tonumber(max_width) or OVERLAY_WRAP_FALLBACK_WIDTH))
   if vim.fn.strdisplaywidth(text) <= max_width then
     return { text }
   end
@@ -176,7 +185,7 @@ local function wrap_overlay_text(text, max_width)
         chunk = chunk:sub(1, break_at - 1)
       end
     end
-    wrapped[#wrapped + 1] = vim.trim(chunk)
+    wrapped[#wrapped + 1] = trim_chunks and vim.trim(chunk) or chunk
     pos = pos + #chunk
     while pos <= #text and text:sub(pos, pos) == ' ' do
       pos = pos + 1
@@ -198,15 +207,7 @@ local function tool_is_displayable_in_overlay(name)
     return false
   end
   local normalized = vim.trim(name):lower()
-  if
-    normalized == 'bash'
-    or normalized == 'sh'
-    or normalized == 'zsh'
-    or normalized == 'fish'
-    or normalized == 'pwsh'
-    or normalized == 'powershell'
-    or normalized == 'cmd'
-  then
+  if normalized == 'bash' or normalized == 'sh' or normalized == 'zsh' or normalized == 'fish' or normalized == 'pwsh' or normalized == 'powershell' or normalized == 'cmd' then
     return true
   end
   return false
@@ -219,11 +220,7 @@ local function activity_overlay_lines(_)
   end
 
   local line = overlay_tool.tool
-  if
-    type(overlay_tool.detail) == 'string'
-    and overlay_tool.detail ~= ''
-    and overlay_tool.detail ~= overlay_tool.tool
-  then
+  if type(overlay_tool.detail) == 'string' and overlay_tool.detail ~= '' and overlay_tool.detail ~= overlay_tool.tool then
     line = line .. ' — ' .. overlay_tool.detail
   end
   line = type(line) == 'string' and line:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
@@ -241,14 +238,19 @@ local function activity_overlay_lines(_)
 end
 
 local function append_overlay_section(virt_lines, lines, first_prefix, other_prefix, highlight, right_align)
+  local display_lines = {}
+  for idx, line in ipairs(lines) do
+    local prefix = idx == 1 and first_prefix or other_prefix
+    display_lines[#display_lines + 1] = prefix .. line
+  end
+  lines = display_lines
+
   local win_width
   if right_align then
     local win = state.chat_winid
     win_width = (win and vim.api.nvim_win_is_valid(win)) and vim.api.nvim_win_get_width(win) or 80
   end
-  for idx, line in ipairs(lines) do
-    local prefix = idx == 1 and first_prefix or other_prefix
-    local display_text = prefix .. line
+  for _, display_text in ipairs(lines) do
     if right_align and win_width then
       local text_width = vim.fn.strdisplaywidth(display_text)
       local pad = math.max(0, win_width - text_width - 1)
@@ -264,10 +266,35 @@ local function append_overlay_section(virt_lines, lines, first_prefix, other_pre
   end
 end
 
+local function reasoning_overlay_lines(lines)
+  local display_lines = {}
+  local first_prefix = '  Reasoning: '
+  local other_prefix = '             '
+  local prefix_width = vim.fn.strdisplaywidth(first_prefix)
+  local max_width = math.max(1, activity_overlay_width() - prefix_width)
+
+  for _, line in ipairs(lines or {}) do
+    local wrapped = wrap_overlay_text(line, max_width, {
+      collapse_whitespace = false,
+      min_width = 1,
+      trim_chunks = true,
+    })
+    if #wrapped == 0 then
+      wrapped = { '' }
+    end
+    for _, chunk in ipairs(wrapped) do
+      local prefix = #display_lines == 0 and first_prefix or other_prefix
+      display_lines[#display_lines + 1] = prefix .. chunk
+    end
+  end
+
+  return display_lines
+end
+
 local function reasoning_virtual_lines(task_lines, reasoning_lines)
   local virt_lines = {}
   append_overlay_section(virt_lines, task_lines, '  Activity: ', '            ', 'CopilotAgentActivity', false)
-  append_overlay_section(virt_lines, reasoning_lines, '  Reasoning: ', '             ', 'CopilotAgentReasoning', false)
+  append_overlay_section(virt_lines, reasoning_overlay_lines(reasoning_lines), '', '', 'CopilotAgentReasoning', false)
   return virt_lines
 end
 
@@ -405,7 +432,8 @@ local function update_reasoning_overlay_now()
 
   local task_lines = activity_overlay_lines(max_lines)
   local reasoning_lines = enabled and M.reasoning_lines(max_lines) or {}
-  if #task_lines == 0 and #reasoning_lines == 0 then
+  local rendered_reasoning_lines = reasoning_overlay_lines(reasoning_lines)
+  if #task_lines == 0 and #rendered_reasoning_lines == 0 then
     sync_chat_tail_spacer_lines(bufnr, 0)
     if had_overlay then
       M.release_overlay_gutter()
@@ -418,7 +446,7 @@ local function update_reasoning_overlay_now()
         #(state.reasoning_text or ''),
         #(state.reasoning_lines or {}),
         #task_lines,
-        #reasoning_lines,
+        #rendered_reasoning_lines,
         chat_view_log_summary()
       ),
       vim.log.levels.DEBUG
@@ -427,8 +455,8 @@ local function update_reasoning_overlay_now()
   end
 
   sync_chat_tail_spacer_lines(bufnr, state.chat_busy and OVERLAY_TAIL_SPACER_LINES or 0)
-  local padding = M.overlay_bottom_padding(#task_lines, #reasoning_lines)
-  M.reserve_overlay_gutter(#task_lines, #reasoning_lines)
+  local padding = M.overlay_bottom_padding(#task_lines, #rendered_reasoning_lines)
+  M.reserve_overlay_gutter(#task_lines, #rendered_reasoning_lines)
   local anchor_row, anchor_above = overlay_anchor(bufnr)
   local extmark_id = vim.api.nvim_buf_set_extmark(bufnr, REASONING_NS, anchor_row, 0, {
     virt_lines = reasoning_virtual_lines(task_lines, reasoning_lines),
@@ -440,7 +468,7 @@ local function update_reasoning_overlay_now()
       'reasoning overlay updated extmark=%s activity=%d reasoning=%d padding=%d anchor_row=%d above=%s text_len=%d stored_lines=%d %s',
       tostring(extmark_id),
       #task_lines,
-      #reasoning_lines,
+      #rendered_reasoning_lines,
       padding,
       anchor_row,
       tostring(anchor_above),
@@ -611,8 +639,7 @@ local function pending_assistant_entry_key()
 
   local pending_turn = state.pending_checkpoint_turn
   if pending_turn and pending_turn.session_id == state.session_id and pending_turn.entry_index then
-    state.pending_assistant_entry_key =
-      string.format('pending:%s:%s', pending_turn.session_id, pending_turn.entry_index)
+    state.pending_assistant_entry_key = string.format('pending:%s:%s', pending_turn.session_id, pending_turn.entry_index)
     return state.pending_assistant_entry_key
   end
 
@@ -1057,13 +1084,7 @@ local function normalize_content_lines(lines)
     local next_item = normalized[idx + 1]
     local current_blocks_following = item.in_fence and item.fence_role ~= 'close'
     local next_blocks_spacing = next_item and next_item.in_fence and next_item.fence_role ~= 'close'
-    if
-      next_item
-      and not current_blocks_following
-      and not next_blocks_spacing
-      and next_item.kind ~= 'blank'
-      and needs_blank_after(item.kind, next_item.kind)
-    then
+    if next_item and not current_blocks_following and not next_blocks_spacing and next_item.kind ~= 'blank' and needs_blank_after(item.kind, next_item.kind) then
       with_transitions[#with_transitions + 1] = ''
     end
   end
@@ -1130,8 +1151,7 @@ local function collapsed_activity_line(content)
     return 'Activity: hidden'
   end
   local count_summary = count == 1 and '1 item hidden' or tostring(count) .. ' items hidden'
-  local preview =
-    truncate_display_text(activity_preview_text(preview_source or fallback_line), ACTIVITY_PREVIEW_MAX_WIDTH)
+  local preview = truncate_display_text(activity_preview_text(preview_source or fallback_line), ACTIVITY_PREVIEW_MAX_WIDTH)
   if preview == '' then
     return 'Activity: ' .. count_summary
   end
@@ -1221,12 +1241,9 @@ local function build_activity_details_lines(entry)
   local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
   local tool_count = 0
   for _, item in ipairs(items) do
-    if
-      type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output or item.complete_data)
-    then
+    if type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output or item.complete_data) then
       tool_count = tool_count + 1
-      local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary
-        or ('Tool ' .. tostring(tool_count))
+      local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Tool ' .. tostring(tool_count))
       append_markdown_heading(lines, string.format('## Tool %d — %s', tool_count, title))
       append_markdown_field(lines, 'Tool', item.tool_name)
       append_markdown_field(lines, 'Command', item.tool_detail)
@@ -1241,11 +1258,7 @@ local function build_activity_details_lines(entry)
         end
       end
       append_markdown_code_block(lines, '### Error', item.error_message)
-      append_markdown_code_block(
-        lines,
-        item.output_text and '### Output' or '### Partial output',
-        item.output_text or item.partial_output
-      )
+      append_markdown_code_block(lines, item.output_text and '### Output' or '### Partial output', item.output_text or item.partial_output)
       append_markdown_inspect_block(lines, '### Telemetry', item.tool_telemetry)
     end
   end
@@ -1353,13 +1366,50 @@ local chat_view_metrics
 local chat_view_metrics_summary
 local target_topline_for_padding
 
-function M.chat_at_bottom()
-  local winid = state.chat_winid
-  local bufnr = state.chat_bufnr
+local function chat_window_matches_buffer(winid, bufnr)
   if not winid or not vim.api.nvim_win_is_valid(winid) then
     return false
   end
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return false
+  end
+  return vim.api.nvim_win_get_buf(winid) == bufnr
+end
+
+local function resolve_chat_window_and_buffer()
+  local bufnr = state.chat_bufnr
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    state.chat_winid = nil
+    return nil, nil
+  end
+
+  local winid = state.chat_winid
+  if chat_window_matches_buffer(winid, bufnr) then
+    return winid, bufnr
+  end
+
+  local current_tab = vim.api.nvim_get_current_tabpage()
+  local windows = vim.fn.win_findbuf(bufnr)
+  for _, candidate in ipairs(windows) do
+    if chat_window_matches_buffer(candidate, bufnr) and vim.api.nvim_win_get_tabpage(candidate) == current_tab then
+      state.chat_winid = candidate
+      return candidate, bufnr
+    end
+  end
+  for _, candidate in ipairs(windows) do
+    if chat_window_matches_buffer(candidate, bufnr) then
+      state.chat_winid = candidate
+      return candidate, bufnr
+    end
+  end
+
+  state.chat_winid = nil
+  return nil, bufnr
+end
+
+function M.chat_at_bottom()
+  local winid, bufnr = resolve_chat_window_and_buffer()
+  if not winid or not bufnr then
     return false
   end
   local info = vim.fn.getwininfo(winid)
@@ -1383,12 +1433,8 @@ local function with_programmatic_chat_scroll(callback)
 end
 
 local function set_chat_view(topline, cursor_line)
-  local winid = state.chat_winid
-  local bufnr = state.chat_bufnr
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return
-  end
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+  local winid, bufnr = resolve_chat_window_and_buffer()
+  if not winid or not bufnr then
     return
   end
 
@@ -1405,35 +1451,22 @@ local function set_chat_view(topline, cursor_line)
 end
 
 function M.scroll_to_bottom()
-  local winid = state.chat_winid
-  local bufnr = state.chat_bufnr
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return
-  end
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+  local winid, bufnr = resolve_chat_window_and_buffer()
+  if not winid or not bufnr then
     return
   end
   local lc = vim.api.nvim_buf_line_count(bufnr)
   local topline, target_metrics = target_topline_for_padding(winid, bufnr, 0, 1)
   local raw_topline = M.overlay_bottom_topline(lc, vim.api.nvim_win_get_height(winid), 0)
   if target_metrics and (target_metrics.wrapped_rows > 0 or raw_topline ~= topline) then
-    log(
-      string.format(
-        'chat scroll_to_bottom target=%d raw_target=%d %s %s',
-        topline,
-        raw_topline,
-        chat_view_metrics_summary(target_metrics),
-        chat_view_log_summary()
-      ),
-      vim.log.levels.DEBUG
-    )
+    log(string.format('chat scroll_to_bottom target=%d raw_target=%d %s %s', topline, raw_topline, chat_view_metrics_summary(target_metrics), chat_view_log_summary()), vim.log.levels.DEBUG)
   end
   set_chat_view(topline, lc)
 end
 
 local function current_chat_view()
-  local winid = state.chat_winid
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
+  local winid = select(1, resolve_chat_window_and_buffer())
+  if not winid then
     return nil
   end
   local info = vim.fn.getwininfo(winid)
@@ -1441,21 +1474,26 @@ local function current_chat_view()
 end
 
 chat_text_height_from_topline = function(winid, bufnr, topline)
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return 0
-  end
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return 0
   end
 
   local line_count = math.max(1, vim.api.nvim_buf_line_count(bufnr))
   local start_row = math.max(0, math.min(line_count - 1, math.floor(tonumber(topline) or 1) - 1))
-  local info = vim.api.nvim_win_text_height(winid, {
+  if not chat_window_matches_buffer(winid, bufnr) then
+    return math.max(0, line_count - start_row)
+  end
+
+  local ok, info = pcall(vim.api.nvim_win_text_height, winid, {
     start_row = start_row,
     end_row = line_count - 1,
   })
+  if not ok then
+    log(string.format('chat text height fallback win=%s buf=%s start_row=%d line_count=%d error=%s', tostring(winid), tostring(bufnr), start_row, line_count, tostring(info)), vim.log.levels.DEBUG)
+    return math.max(0, line_count - start_row)
+  end
   if type(info) ~= 'table' or type(info.all) ~= 'number' then
-    error('nvim_win_text_height returned invalid metrics')
+    return math.max(0, line_count - start_row)
   end
   return math.max(0, math.floor(info.all + (tonumber(info.fill) or 0)))
 end
@@ -1521,13 +1559,12 @@ target_topline_for_padding = function(winid, bufnr, padding, min_topline)
 end
 
 function M.overlay_bottom_padding(task_line_count, reasoning_line_count)
-  local total =
-    math.max(0, math.floor(tonumber(task_line_count) or 0) + math.floor(tonumber(reasoning_line_count) or 0))
+  local total = math.max(0, math.floor(tonumber(task_line_count) or 0) + math.floor(tonumber(reasoning_line_count) or 0))
   if total <= 0 then
     return 0
   end
 
-  local winid = state.chat_winid
+  local winid = select(1, resolve_chat_window_and_buffer())
   local win_height = (winid and vim.api.nvim_win_is_valid(winid)) and vim.api.nvim_win_get_height(winid) or 0
   if win_height <= 1 then
     return total
@@ -1549,10 +1586,11 @@ local function current_overlay_follow_state()
   local enabled, max_lines = reasoning_config()
   local task_lines = activity_overlay_lines(max_lines)
   local reasoning_lines = enabled and M.reasoning_lines(max_lines) or {}
+  local rendered_reasoning_lines = reasoning_overlay_lines(reasoning_lines)
   return {
     task_count = #task_lines,
-    reasoning_count = #reasoning_lines,
-    padding = M.overlay_bottom_padding(#task_lines, #reasoning_lines),
+    reasoning_count = #rendered_reasoning_lines,
+    padding = M.overlay_bottom_padding(#task_lines, #rendered_reasoning_lines),
     tail_spacers = overlay_tail_spacer_lines(),
   }
 end
@@ -1592,12 +1630,8 @@ local function active_conversation_topline()
 end
 
 function M.reserve_overlay_gutter(task_line_count, reasoning_line_count)
-  local winid = state.chat_winid
-  local bufnr = state.chat_bufnr
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return
-  end
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+  local winid, bufnr = resolve_chat_window_and_buffer()
+  if not winid or not bufnr then
     return
   end
 
@@ -1697,21 +1731,14 @@ function M.reserve_overlay_gutter(task_line_count, reasoning_line_count)
 end
 
 function M.release_overlay_gutter()
-  local winid = state.chat_winid
-  local bufnr = state.chat_bufnr
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return
-  end
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+  local winid, bufnr = resolve_chat_window_and_buffer()
+  if not winid or not bufnr then
     return
   end
 
   if auto_follow_active_conversation() then
     if state.overlay_gutter_restore_view then
-      log(
-        'reasoning overlay gutter dropped saved view because active conversation follow resumed',
-        vim.log.levels.DEBUG
-      )
+      log('reasoning overlay gutter dropped saved view because active conversation follow resumed', vim.log.levels.DEBUG)
       state.overlay_gutter_restore_view = nil
     end
     log('reasoning overlay gutter released via active conversation follow', vim.log.levels.DEBUG)
@@ -1724,12 +1751,7 @@ function M.release_overlay_gutter()
     state.overlay_gutter_restore_view = nil
     if restore_view.winid == winid and restore_view.bufnr == bufnr then
       log(
-        string.format(
-          'reasoning overlay gutter restored saved view top=%d cursor=%d %s',
-          restore_view.topline,
-          restore_view.cursor_line or restore_view.topline,
-          chat_view_log_summary()
-        ),
+        string.format('reasoning overlay gutter restored saved view top=%d cursor=%d %s', restore_view.topline, restore_view.cursor_line or restore_view.topline, chat_view_log_summary()),
         vim.log.levels.DEBUG
       )
       set_chat_view(restore_view.topline, restore_view.cursor_line or restore_view.topline)
@@ -1745,12 +1767,8 @@ function M.release_overlay_gutter()
 end
 
 function M.follow_active_conversation(force)
-  local winid = state.chat_winid
-  local bufnr = state.chat_bufnr
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return false
-  end
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+  local winid, bufnr = resolve_chat_window_and_buffer()
+  if not winid or not bufnr then
     return false
   end
 
@@ -1828,7 +1846,8 @@ end
 
 function M.handle_chat_window_scrolled(winid)
   winid = tonumber(winid)
-  if not winid or not state.chat_winid or winid ~= state.chat_winid then
+  local chat_winid = select(1, resolve_chat_window_and_buffer())
+  if not winid or not chat_winid or winid ~= chat_winid then
     return
   end
   if not vim.api.nvim_win_is_valid(winid) or state.history_loading then
@@ -1844,14 +1863,7 @@ function M.handle_chat_window_scrolled(winid)
   end
 
   if state.overlay_gutter_restore_view then
-    log(
-      string.format(
-        'reasoning overlay gutter discarded saved view due to manual scroll new_top=%s new_bot=%s',
-        tostring(view.topline),
-        tostring(view.botline)
-      ),
-      vim.log.levels.DEBUG
-    )
+    log(string.format('reasoning overlay gutter discarded saved view due to manual scroll new_top=%s new_bot=%s', tostring(view.topline), tostring(view.botline)), vim.log.levels.DEBUG)
     state.overlay_gutter_restore_view = nil
   end
 
@@ -2054,12 +2066,7 @@ function M.render_chat()
     stream_timer:stop()
     stream_pending = false
     log(
-      string.format(
-        'render_chat preserved streaming start idx=%s start=%d total_lines=%d',
-        tostring(state.active_turn_assistant_index or '<none>'),
-        state.stream_line_start,
-        total_lines
-      ),
+      string.format('render_chat preserved streaming start idx=%s start=%d total_lines=%d', tostring(state.active_turn_assistant_index or '<none>'), state.stream_line_start, total_lines),
       vim.log.levels.DEBUG
     )
   else
@@ -2292,9 +2299,7 @@ function M.ensure_assistant_entry(message_id)
   local active_index = active_turn_entry_index()
   if active_index then
     bind_active_turn_message_id(active_index, message_id)
-    local active_key = (type(message_id) == 'string' and message_id ~= '' and message_id)
-      or state.active_turn_assistant_message_id
-      or pending_assistant_entry_key()
+    local active_key = (type(message_id) == 'string' and message_id ~= '' and message_id) or state.active_turn_assistant_message_id or pending_assistant_entry_key()
     bind_live_assistant_entry(active_index)
     return state.entries[active_index], active_index, active_key
   end

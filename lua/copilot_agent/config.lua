@@ -17,6 +17,11 @@ local defaults = {
   notify = true,
   file_log_level = 'WARN', -- TRACE logs raw host/session payloads; DEBUG logs plugin actions + HTTP details to stdpath('log')/copilot_agent.log
   log_content_length = 1000, -- max content length to include in logs (0 for unlimited, default 1000)
+  file_log_batch = {
+    enabled = true, -- Queue file-log writes and flush in batches to reduce open/write/close churn during streaming-heavy sessions.
+    flush_interval_ms = 2000, -- Flush queued log lines at least every 2 seconds when the queue has pending entries.
+    max_entries = 20, -- Flush immediately once this many queued log lines accumulate.
+  },
   service = {
     auto_start = false,
     command = nil, -- nil = auto-detect installed binary, then fall back to 'go run .'
@@ -79,6 +84,24 @@ local defaults = {
     auto_open = true,
     buf_name = 'CopilotAgentDashboard',
   },
+  statusline = {
+    enabled = false, -- When true, the plugin manages local chat/input statuslines; leave false to keep your own statusline.
+    -- Toggle individual statusline segments. You can also provide a list like
+    -- { 'mode', 'busy', 'session' } to include only those components.
+    components = {
+      mode = true,
+      permission = true,
+      busy = true,
+      session = true,
+      model = true,
+      tool = true,
+      intent = true,
+      context = true,
+      config = true,
+      attachments = true,
+      help = true,
+    },
+  },
   session = {
     working_directory = nil,
     model = nil,
@@ -108,6 +131,8 @@ local state = {
   chat_winid = nil,
   input_bufnr = nil,
   input_winid = nil,
+  chat_statusline_managed = false, -- true when plugin populated the chat window local statusline
+  input_statusline_managed = false, -- true when plugin populated the input window local statusline
   service_job_id = nil,
   service_starting = false,
   service_addr_known = false, -- set true when COPILOT_AGENT_ADDR= line received

@@ -13,6 +13,10 @@ local MIN_SERIALIZED_LOG_DEPTH = 1 -- vim.inspect needs at least one level to de
 local DEFAULT_SERIALIZED_LOG_DEPTH = 6 -- Deep enough for nested request/response tables while still keeping debug logs readable.
 local LOG_CALLER_STACK_START = 3 -- Skip the logger helpers themselves when resolving the external call site.
 local LOG_CALLER_STACK_END = 12 -- Stop the stack walk before deep wrapper chains add unnecessary overhead.
+local MIN_FILE_LOG_BATCH_FLUSH_INTERVAL_MS = 50 -- Avoid sub-frame timers that can spin the event loop when users misconfigure batch intervals.
+local DEFAULT_FILE_LOG_BATCH_FLUSH_INTERVAL_MS = 2000 -- Keep file IO amortized while still surfacing logs quickly enough for interactive debugging.
+local MIN_FILE_LOG_BATCH_MAX_ENTRIES = 1 -- Batch size must be positive so queued lines are always flushable.
+local DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES = 20 -- Big enough to reduce file churn during token streaming without delaying logs excessively.
 
 local _log_levels = {
   TRACE = vim.log.levels.TRACE,
@@ -21,6 +25,8 @@ local _log_levels = {
   WARN = vim.log.levels.WARN,
   ERROR = vim.log.levels.ERROR,
 }
+local _pending_log_entries = {}
+local _flush_scheduled = false
 
 local function current_config()
   return require('copilot_agent.config').state.config
@@ -44,6 +50,101 @@ function M.should_log(level)
   local configured_level = M.resolve_log_level(current_config().file_log_level) or vim.log.levels.WARN
   level = level or vim.log.levels.INFO
   return level >= configured_level
+end
+
+local function normalize_integer(value, fallback, min_value)
+  local numeric = math.floor(tonumber(value) or fallback)
+  if numeric < min_value then
+    return min_value
+  end
+  return numeric
+end
+
+local function resolve_file_log_batch_config()
+  local file_log_batch = current_config().file_log_batch
+  if type(file_log_batch) ~= 'table' then
+    file_log_batch = {}
+  end
+
+  return {
+    enabled = file_log_batch.enabled ~= false,
+    flush_interval_ms = normalize_integer(file_log_batch.flush_interval_ms, DEFAULT_FILE_LOG_BATCH_FLUSH_INTERVAL_MS, MIN_FILE_LOG_BATCH_FLUSH_INTERVAL_MS),
+    max_entries = normalize_integer(file_log_batch.max_entries, DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES, MIN_FILE_LOG_BATCH_MAX_ENTRIES),
+  }
+end
+
+local function write_log_lines(path, lines)
+  if type(path) ~= 'string' or path == '' then
+    return
+  end
+  if type(lines) ~= 'table' or #lines == 0 then
+    return
+  end
+
+  vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
+  local f = assert(io.open(path, 'a'))
+  f:write(table.concat(lines))
+  f:close()
+end
+
+local function drain_log_queue()
+  if #_pending_log_entries == 0 then
+    return
+  end
+
+  local queue = _pending_log_entries
+  _pending_log_entries = {}
+  local grouped_lines = {}
+  local grouped_paths = {}
+
+  for _, entry in ipairs(queue) do
+    if type(entry) == 'table' and type(entry.path) == 'string' and entry.path ~= '' and type(entry.line) == 'string' then
+      if not grouped_lines[entry.path] then
+        grouped_lines[entry.path] = {}
+        grouped_paths[#grouped_paths + 1] = entry.path
+      end
+      grouped_lines[entry.path][#grouped_lines[entry.path] + 1] = entry.line
+    end
+  end
+
+  for _, path in ipairs(grouped_paths) do
+    pcall(write_log_lines, path, grouped_lines[path])
+  end
+end
+
+function M.flush_pending()
+  _flush_scheduled = false
+  drain_log_queue()
+end
+
+local function schedule_log_flush(delay_ms)
+  if _flush_scheduled then
+    return
+  end
+  _flush_scheduled = true
+  vim.defer_fn(function()
+    _flush_scheduled = false
+    M.flush_pending()
+  end, delay_ms)
+end
+
+local function enqueue_log_line(path, line)
+  local file_log_batch = resolve_file_log_batch_config()
+  if not file_log_batch.enabled then
+    M.flush_pending()
+    pcall(write_log_lines, path, { line })
+    return
+  end
+
+  _pending_log_entries[#_pending_log_entries + 1] = {
+    path = path,
+    line = line,
+  }
+  if #_pending_log_entries >= file_log_batch.max_entries then
+    M.flush_pending()
+    return
+  end
+  schedule_log_flush(file_log_batch.flush_interval_ms)
 end
 
 function M.serialize_log_value(value, opts)
@@ -120,13 +221,7 @@ function M.log(message, level)
   else
     line = string.format('%s [%s] %s\n', os.date('%Y-%m-%d %H:%M:%S'), prefix, tostring(message))
   end
-  pcall(function()
-    local path = M.log_path()
-    vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
-    local f = assert(io.open(path, 'a'))
-    f:write(line)
-    f:close()
-  end)
+  enqueue_log_line(M.log_path(), line)
 end
 
 function M.notify(message, level)

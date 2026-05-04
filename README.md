@@ -255,8 +255,29 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
       dashboard = {
         auto_open = true,                -- show the Copilot Agent dashboard on empty startup
       },
+      statusline = {
+        enabled = false,                 -- default: keep plugin-owned chat/input local statuslines disabled
+        components = {                   -- default: all true
+          mode = true,
+          permission = true,
+          busy = true,
+          session = true,
+          model = true,
+          tool = true,
+          intent = true,
+          context = true,
+          config = true,
+          attachments = true,
+          help = true,
+        },
+      },
       notify = true,  -- set false to silence all [copilot-agent] vim.notify calls
       file_log_level = "WARN",  -- TRACE | DEBUG | INFO | WARN | ERROR; TRACE logs raw host/session payloads, DEBUG logs plugin actions and HTTP details to stdpath("log") .. "/copilot_agent.log"
+      file_log_batch = {
+        enabled = true,            -- queue file-log writes and flush in batches
+        flush_interval_ms = 2000,  -- flush pending log lines at least every 2 seconds
+        max_entries = 20,          -- flush immediately when queue reaches this size
+      },
     })
     -- Start the combined HTTP + LSP service.
     -- Called automatically by CopilotAgentChat / CopilotAgentAsk if auto_start = true.
@@ -265,6 +286,8 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
   end,
 }
 ```
+
+`file_log_batch` controls buffered file logging behavior. Set `enabled = false` to restore immediate per-line writes.
 
 If you want to point at a binary in a custom location:
 
@@ -531,9 +554,42 @@ The action builds a prompt from the selected text, file path, and line range, th
 
 Expose Copilot state in your statusline. Each function returns a short string.
 
-When your cursor is in a Copilot Agent window, the plugin replaces that window's local statusline with its own statusline. This applies to both the chat window and the input window, so your normal global statusline stays visible everywhere else.
+By default, plugin-managed chat/input local statuslines are disabled (`statusline.enabled = false`), so you can keep your own statusline setup unchanged.
 
-Default examples:
+If you want plugin-managed local statuslines in Copilot windows, enable them explicitly:
+
+```lua
+require("copilot_agent").setup({
+  statusline = {
+    enabled = true,
+  },
+})
+```
+
+You can choose which components are rendered with `statusline.components` (default: all enabled). Supported component keys are: `mode`, `permission`, `busy`, `session`, `model`, `tool`, `intent`, `context`, `config`, `attachments`, `help`.
+
+```lua
+require("copilot_agent").setup({
+  statusline = {
+    enabled = true,
+    components = {
+      mode = true,
+      busy = true,
+      session = true,
+      permission = false,
+      model = false,
+      tool = false,
+      intent = false,
+      context = false,
+      config = false,
+      attachments = false,
+      help = false,
+    },
+  },
+})
+```
+
+When enabled, default examples:
 
 ```text
 input window
@@ -578,7 +634,7 @@ Sessions are auto-named by the SDK after the first conversation turn. You can re
 
 When a session is deleted, its checkpoint git worktree is soft-deleted instead of being removed immediately. This applies both to `:CopilotAgentDeleteSession` and `:CopilotAgentStop!`. The checkpoint metadata records the deletion time and the worktree is pruned automatically after 7 days on the next plugin startup or checkpoint/session lifecycle operation.
 
-The chat/output statusline shows the active session summary together with its short session ID, and transcript separators between turns render the completed-turn checkpoint label (`v001`, `v002`, ...) as a virtual rule so you can copy it for rewind/recovery workflows without opening the input buffer.
+When plugin-managed statuslines are enabled, the chat/output statusline shows the active session summary together with its short session ID, and transcript separators between turns render the completed-turn checkpoint label (`v001`, `v002`, ...) as a virtual rule so you can copy it for rewind/recovery workflows without opening the input buffer.
 
 **Session selection behaviour:**
 
@@ -608,6 +664,7 @@ See [server/README.md](server/README.md#http-api-reference) for the full endpoin
 1. 📖 **[Build a To-Do App with Copilot Agent](doc/tutorial-flask.md)** — Full-stack to-do list app with a REST API and responsive UI.
 2. 🌤️ **[Build a Weather Dashboard with Copilot Agent](doc/tutorial-weather-dashboard.md)** — Glassmorphism weather app with wttr.in data, animated UI, and backend tests.
 3. 🧩 **[Build a Weather Dashboard with Preset Copilot Agents](doc/tutorial-custom-agent-weather.md)** — Copy a ready-made `.github/agents/` pack and use separate UI, Python, and QA specialists.
+4. 🐦 **[Build a Terminal Flappy Bird with Custom Agents and Skills](doc/tutorial-flappy-bird-go.md)** — Bootstrap a repo with script-copied prompts/agents/skills, implement a Go terminal game, and run `go vet`/`go test` before launching from Neovim terminal.
 
 ---
 

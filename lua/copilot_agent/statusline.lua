@@ -18,6 +18,65 @@ local _statusline_medium_width = 140 -- Re-enable medium-detail statusline secti
 local _intent_statusline_max_len = 30 -- Keep the intent label short enough to coexist with model, mode, and task indicators.
 local _intent_statusline_preview_chars = 27 -- Trim slightly below the hard cap so the prefixed icon and ellipsis never crowd adjacent statusline sections.
 local _reasoning_statusline_max_len = 32 -- Keep the rolling reasoning snippet short so it does not dominate the statusline.
+local _is_list = vim.islist or vim.tbl_islist
+local _statusline_component_defaults = {
+  mode = true,
+  permission = true,
+  busy = true,
+  session = true,
+  model = true,
+  tool = true,
+  intent = true,
+  context = true,
+  config = true,
+  attachments = true,
+  help = true,
+}
+
+local function statusline_config()
+  local statusline_cfg = state.config and state.config.statusline
+  if type(statusline_cfg) ~= 'table' then
+    return {}
+  end
+  return statusline_cfg
+end
+
+local function plugin_statusline_enabled()
+  return statusline_config().enabled == true
+end
+
+local function statusline_component_enabled(name)
+  if _statusline_component_defaults[name] ~= true then
+    return false
+  end
+
+  local components = statusline_config().components
+  if type(components) ~= 'table' then
+    return _statusline_component_defaults[name]
+  end
+
+  if _is_list(components) then
+    for _, item in ipairs(components) do
+      if item == name then
+        return true
+      end
+    end
+    return false
+  end
+
+  local value = components[name]
+  if value == nil then
+    return _statusline_component_defaults[name]
+  end
+  return value == true
+end
+
+local function statusline_part(name, producer, ...)
+  if not statusline_component_enabled(name) then
+    return ''
+  end
+  return producer(...)
+end
 
 local _mode_icon = {
   ask = '💬',
@@ -189,7 +248,7 @@ local function config_labels(width)
   }
 end
 
-local function statusline_session_id(session_id)
+local function statusline_session_id(session_id, compact)
   if
     type(session_id) == 'string'
     and #session_id == 36
@@ -201,7 +260,16 @@ local function statusline_session_id(session_id)
   then
     return '#' .. session_id:sub(1, 8)
   end
-  return '#' .. format_session_id(session_id):gsub('T', ' ', 1)
+
+  local formatted = format_session_id(session_id)
+  if compact then
+    local prefix, year, month, day = formatted:match('^(.-)%-(%d%d%d%d)%-(%d%d)%-(%d%d)T')
+    if prefix and year and month and day then
+      return string.format('#%s-%s-%s-%s', prefix, year:sub(3, 4), month, day)
+    end
+  end
+
+  return '#' .. formatted:gsub('T', ' ', 1)
 end
 
 function M.statusline_session(width)
@@ -209,8 +277,8 @@ function M.statusline_session(width)
     return ''
   end
 
-  local formatted_id = statusline_session_id(state.session_id)
   local size = statusline_size(width)
+  local formatted_id = statusline_session_id(state.session_id, size == 'small')
   if size == 'small' then
     return 'session: [' .. formatted_id .. ']'
   end
@@ -350,19 +418,68 @@ local function fit_statusline_parts(parts, width, sep)
   return table.concat(out, sep)
 end
 
+local function resolve_window_for_buffer(winid, bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    if winid and vim.api.nvim_win_is_valid(winid) then
+      return winid
+    end
+    return nil
+  end
+
+  if winid and vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
+    return winid
+  end
+
+  local current_tab = vim.api.nvim_get_current_tabpage()
+  local windows = vim.fn.win_findbuf(bufnr)
+  for _, candidate in ipairs(windows) do
+    if vim.api.nvim_win_is_valid(candidate) and vim.api.nvim_win_get_buf(candidate) == bufnr and vim.api.nvim_win_get_tabpage(candidate) == current_tab then
+      return candidate
+    end
+  end
+
+  for _, candidate in ipairs(windows) do
+    if vim.api.nvim_win_is_valid(candidate) and vim.api.nvim_win_get_buf(candidate) == bufnr then
+      return candidate
+    end
+  end
+
+  return nil
+end
+
+local function statusline_window_width()
+  -- The exported statusline() API follows the editor-wide statusline width for
+  -- the common laststatus=2/3 modes, and only falls back to the current
+  -- window width when statuslines are per-window (laststatus=1).
+  if vim.o.laststatus == 2 or vim.o.laststatus == 3 then
+    return vim.opt.columns:get()
+  end
+  return vim.fn.winwidth(0)
+end
+
+local function refresh_statusline_width(winid)
+  if vim.o.laststatus == 2 or vim.o.laststatus == 3 then
+    return vim.opt.columns:get()
+  end
+  if winid and vim.api.nvim_win_is_valid(winid) then
+    return vim.api.nvim_win_get_width(winid)
+  end
+  return vim.fn.winwidth(0)
+end
+
 function M.statusline_component()
-  local width = vim.api.nvim_win_get_width(0)
+  local width = statusline_window_width()
   return fit_statusline_parts(
     build_parts(
-      M.statusline_mode(),
-      M.statusline_permission(),
-      M.statusline_busy(),
-      M.statusline_model(),
-      M.statusline_tool(),
-      M.statusline_intent(),
-      M.statusline_context(),
-      M.statusline_config(width),
-      M.statusline_attachments()
+      statusline_part('mode', M.statusline_mode),
+      statusline_part('permission', M.statusline_permission),
+      statusline_part('busy', M.statusline_busy),
+      statusline_part('model', M.statusline_model),
+      statusline_part('tool', M.statusline_tool),
+      statusline_part('intent', M.statusline_intent),
+      statusline_part('context', M.statusline_context),
+      statusline_part('config', M.statusline_config, width),
+      statusline_part('attachments', M.statusline_attachments)
     ),
     width,
     ' '
@@ -370,56 +487,88 @@ function M.statusline_component()
 end
 
 function M.refresh_input_statusline()
-  if not state.input_winid or not vim.api.nvim_win_is_valid(state.input_winid) then
+  local input_winid = resolve_window_for_buffer(state.input_winid, state.input_bufnr)
+  if not input_winid then
+    state.input_winid = nil
     return
   end
-  local width = vim.api.nvim_win_get_width(state.input_winid)
+  state.input_winid = input_winid
+  local ok, input = pcall(require, 'copilot_agent.input')
+  local function refresh_separator()
+    if ok and type(input.refresh_separator) == 'function' then
+      input.refresh_separator()
+    end
+  end
+
+  if not plugin_statusline_enabled() then
+    if state.input_statusline_managed then
+      vim.wo[input_winid].statusline = ''
+    end
+    state.input_statusline_managed = false
+    refresh_separator()
+    return
+  end
+
+  local width = refresh_statusline_width(input_winid)
   local line = ' '
     .. fit_statusline_parts(
       build_parts(
-        M.statusline_mode(),
-        M.statusline_permission(),
-        M.statusline_busy(),
-        M.statusline_model(),
-        M.statusline_tool(),
-        M.statusline_intent(),
-        M.statusline_context(),
-        M.statusline_config_highlighted(width),
-        M.statusline_attachments(),
-        '(? for help)'
+        statusline_part('mode', M.statusline_mode),
+        statusline_part('permission', M.statusline_permission),
+        statusline_part('busy', M.statusline_busy),
+        statusline_part('model', M.statusline_model),
+        statusline_part('tool', M.statusline_tool),
+        statusline_part('intent', M.statusline_intent),
+        statusline_part('context', M.statusline_context),
+        statusline_part('config', M.statusline_config_highlighted, width),
+        statusline_part('attachments', M.statusline_attachments),
+        statusline_part('help', function()
+          return '(? for help)'
+        end)
       ),
       math.max(1, width - 1),
       '  '
     )
-  vim.wo[state.input_winid].statusline = line
-  local ok, input = pcall(require, 'copilot_agent.input')
-  if ok and type(input.refresh_separator) == 'function' then
-    input.refresh_separator()
-  end
+  vim.wo[input_winid].statusline = line
+  state.input_statusline_managed = true
+  refresh_separator()
 end
 
 function M.refresh_chat_statusline()
-  if not state.chat_winid or not vim.api.nvim_win_is_valid(state.chat_winid) then
+  local chat_winid = resolve_window_for_buffer(state.chat_winid, state.chat_bufnr)
+  if not chat_winid then
+    state.chat_winid = nil
     return
   end
-  local width = vim.api.nvim_win_get_width(state.chat_winid)
+  state.chat_winid = chat_winid
+
+  if not plugin_statusline_enabled() then
+    if state.chat_statusline_managed then
+      vim.wo[chat_winid].statusline = ''
+    end
+    state.chat_statusline_managed = false
+    return
+  end
+
+  local width = refresh_statusline_width(chat_winid)
   local line = ' '
     .. fit_statusline_parts(
       build_parts(
-      M.statusline_mode(),
-      M.statusline_busy(),
-      M.statusline_session(width),
-      M.statusline_permission(),
-      M.statusline_model(),
-      M.statusline_tool(),
-      M.statusline_intent(),
-      M.statusline_context(),
-      M.statusline_config_highlighted(width)
-    ),
-    math.max(1, width - 1),
-    '  '
+        statusline_part('mode', M.statusline_mode),
+        statusline_part('busy', M.statusline_busy),
+        statusline_part('session', M.statusline_session, width),
+        statusline_part('permission', M.statusline_permission),
+        statusline_part('model', M.statusline_model),
+        statusline_part('tool', M.statusline_tool),
+        statusline_part('intent', M.statusline_intent),
+        statusline_part('context', M.statusline_context),
+        statusline_part('config', M.statusline_config_highlighted, width)
+      ),
+      math.max(1, width - 1),
+      '  '
     )
-  vim.wo[state.chat_winid].statusline = line
+  vim.wo[chat_winid].statusline = line
+  state.chat_statusline_managed = true
 end
 
 local _sl_pending = false

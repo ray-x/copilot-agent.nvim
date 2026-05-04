@@ -241,7 +241,7 @@ local SLASH_COMMANDS = {
   { word = '/context', info = 'Show context window token usage' },
   { word = '/usage', info = 'Display session usage metrics' },
   { word = '/session', info = 'View and manage sessions' },
-  { word = '/diff', info = 'Review changes in current directory' },
+  { word = '/diff', info = 'Review differences between checkpoints' },
   { word = '/review', info = 'Run code review agent' },
   { word = '/lsp', info = 'Manage language server configuration' },
   { word = '/plan', info = 'Create an implementation plan' },

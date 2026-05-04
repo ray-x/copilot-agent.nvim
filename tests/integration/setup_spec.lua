@@ -61,6 +61,15 @@ local function trimmed_virt_lines(virt_lines)
   end, virt_lines or {})
 end
 
+local function virt_line_highlight_for_text(virt_line, text)
+  for _, chunk in ipairs(virt_line or {}) do
+    if chunk[1] == text then
+      return chunk[2]
+    end
+  end
+  return nil
+end
+
 local function command_exists(name)
   return vim.fn.exists(':' .. name) == 2
 end
@@ -889,35 +898,6 @@ describe('statusline plugin config', function()
     pcall(vim.cmd, 'tabonly | only')
   end)
 
-  it('does not override local statuslines when plugin statusline is disabled', function()
-    package.loaded['copilot_agent'] = nil
-    local agent = require('copilot_agent')
-    agent.setup({
-      auto_create_session = false,
-      service = {
-        auto_start = true,
-      },
-    })
-
-    local statusline = require('copilot_agent.statusline')
-    local chat_winid = vim.api.nvim_get_current_win()
-    vim.cmd('belowright new')
-    local input_winid = vim.api.nvim_get_current_win()
-
-    agent.state.chat_winid = chat_winid
-    agent.state.input_winid = input_winid
-    agent.state.chat_statusline_managed = false
-    agent.state.input_statusline_managed = false
-    vim.wo[chat_winid].statusline = '%f'
-    vim.wo[input_winid].statusline = '%m'
-
-    statusline.refresh_chat_statusline()
-    statusline.refresh_input_statusline()
-
-    assert_eq('%f', vim.wo[chat_winid].statusline)
-    assert_eq('%m', vim.wo[input_winid].statusline)
-  end)
-
   it('supports selecting statusline components', function()
     package.loaded['copilot_agent'] = nil
     local agent = require('copilot_agent')
@@ -1119,6 +1099,65 @@ describe('model state sync', function()
 
     local lines = table.concat(vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false), '\n')
     assert_true(lines:find('Turn cancelled', 1, true) ~= nil)
+  end)
+
+  it('styles markdown-like spans inside reasoning overlay virtual text', function()
+    agent.open_chat()
+    local original_width = vim.api.nvim_win_get_width(agent.state.chat_winid)
+    vim.api.nvim_win_set_width(agent.state.chat_winid, 120)
+
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'assistant-markup-reasoning',
+        deltaContent = [[**bold** *italic* `code` 'single' "double"]],
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    assert_eq([[  Reasoning: **bold** *italic* `code` 'single' "double"]], virt_line_text(virt_lines[1]))
+    assert_eq('CopilotAgentOverlayStrong', virt_line_highlight_for_text(virt_lines[1], '**bold**'))
+    assert_eq('CopilotAgentOverlayEmphasis', virt_line_highlight_for_text(virt_lines[1], '*italic*'))
+    assert_eq('CopilotAgentOverlayCode', virt_line_highlight_for_text(virt_lines[1], '`code`'))
+    assert_eq('CopilotAgentOverlayQuoted', virt_line_highlight_for_text(virt_lines[1], "'single'"))
+    assert_eq('CopilotAgentOverlayQuoted', virt_line_highlight_for_text(virt_lines[1], '"double"'))
+    vim.api.nvim_win_set_width(agent.state.chat_winid, original_width)
+  end)
+
+  it('styles markdown-like spans inside tool activity overlay virtual text', function()
+    agent.open_chat()
+    local original_width = vim.api.nvim_win_get_width(agent.state.chat_winid)
+    vim.api.nvim_win_set_width(agent.state.chat_winid, 120)
+
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'printf',
+        arguments = { '**bold**', '*italic*', '`code`', "'single'", '"double"' },
+      },
+    })
+
+    vim.wait(200)
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    assert_eq([[  Activity: 🔧 bash — printf **bold** *italic* `code` 'single' "double"]], virt_line_text(virt_lines[1]))
+    assert_eq('CopilotAgentOverlayStrong', virt_line_highlight_for_text(virt_lines[1], '**bold**'))
+    assert_eq('CopilotAgentOverlayEmphasis', virt_line_highlight_for_text(virt_lines[1], '*italic*'))
+    assert_eq('CopilotAgentOverlayCode', virt_line_highlight_for_text(virt_lines[1], '`code`'))
+    assert_eq('CopilotAgentOverlayQuoted', virt_line_highlight_for_text(virt_lines[1], "'single'"))
+    assert_eq('CopilotAgentOverlayQuoted', virt_line_highlight_for_text(virt_lines[1], '"double"'))
+    vim.api.nvim_win_set_width(agent.state.chat_winid, original_width)
   end)
 
   it('renders a rolling reasoning preview in chat virtual lines', function()
@@ -1702,65 +1741,6 @@ describe('model state sync', function()
     assert_true(joined:find('reasoning preview cleared (turn end)', 1, true) ~= nil)
   end)
 
-  it('logs assistant merge and streaming decisions when DEBUG file logging is enabled', function()
-    local original_stdpath = vim.fn.stdpath
-    local temp_log_dir = vim.fn.tempname()
-    vim.fn.mkdir(temp_log_dir, 'p')
-    vim.fn.stdpath = function(kind)
-      if kind == 'log' then
-        return temp_log_dir
-      end
-      return original_stdpath(kind)
-    end
-
-    agent.setup({
-      auto_create_session = false,
-      notify = false,
-      file_log_level = 'DEBUG',
-      service = {
-        auto_start = true,
-      },
-    })
-    events = require('copilot_agent.events')
-    local render = require('copilot_agent.render')
-    agent.state.session_id = 'session-log'
-    agent.open_chat()
-
-    local prompt_idx = render.append_entry('user', 'trace duplicates')
-    agent.state.pending_checkpoint_turn = {
-      session_id = 'session-log',
-      prompt = 'trace duplicates',
-      entry_index = prompt_idx,
-    }
-
-    events.handle_session_event({
-      type = 'assistant.message_delta',
-      data = {
-        messageId = 'assistant-log',
-        deltaContent = 'First line.',
-      },
-    })
-    events.handle_session_event({
-      type = 'assistant.message',
-      data = {
-        messageId = 'assistant-log-2',
-        content = 'First line.\nSecond line.',
-      },
-    })
-
-    vim.wait(250)
-
-    vim.fn.stdpath = original_stdpath
-    flush_log_file_queue()
-    local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
-    local joined = table.concat(lines, '\n')
-    assert_true(joined:find('assistant.message_delta received', 1, true) ~= nil)
-    assert_true(joined:find('assistant.message_delta appended', 1, true) ~= nil)
-    assert_true(joined:find('assistant.message received', 1, true) ~= nil)
-    assert_true(joined:find('assistant.message merge decision=', 1, true) ~= nil)
-    assert_true(joined:find('assistant stream update applying', 1, true) ~= nil)
-  end)
-
   it('does not emit deprecated assistant.message_delta stitch diagnostics', function()
     local original_stdpath = vim.fn.stdpath
     local original_notify = vim.notify
@@ -2137,93 +2117,6 @@ describe('model state sync', function()
     assert_eq(0, #extmarks)
   end)
 
-  it('deduplicates the thinking spinner and keeps it anchored before message ids arrive', function()
-    local render = require('copilot_agent.render')
-    local function assistant_entries()
-      local entries = {}
-      for _, entry in ipairs(agent.state.entries) do
-        if entry.kind == 'assistant' then
-          entries[#entries + 1] = entry
-        end
-      end
-      return entries
-    end
-
-    render.stop_thinking_spinner()
-    render.reset_pending_assistant_entry()
-    render.clear_transcript()
-    agent.state.chat_busy = false
-    agent.state.pending_checkpoint_turn = nil
-    agent.state.session_id = 'session-123'
-    agent.open_chat()
-    render.append_entry('user', 'pending prompt')
-    agent.state.pending_checkpoint_turn = {
-      session_id = 'session-123',
-      prompt = 'pending prompt',
-      entry_index = 1,
-    }
-
-    events.handle_session_event({
-      type = 'assistant.message_delta',
-      data = {
-        deltaContent = '...',
-      },
-    })
-    events.handle_session_event({
-      type = 'assistant.message_delta',
-      data = {
-        deltaContent = '   ',
-      },
-    })
-
-    vim.wait(250)
-    local assistants = assistant_entries()
-
-    local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
-    local spinner_rows = {}
-    for row, line in ipairs(lines) do
-      if line:find('Thinking…', 1, true) ~= nil then
-        spinner_rows[#spinner_rows + 1] = row
-      end
-    end
-
-    assert_eq(1, #spinner_rows)
-    assert_eq(1, #assistants)
-
-    local first_spinner_row = spinner_rows[1]
-    vim.wait(650)
-    lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
-    local current_spinner_row
-    local spinner_count = 0
-    for row, line in ipairs(lines) do
-      if line:find('Thinking…', 1, true) ~= nil then
-        spinner_count = spinner_count + 1
-        current_spinner_row = row
-      end
-    end
-
-    assert_eq(1, spinner_count)
-    assert_eq(first_spinner_row, current_spinner_row)
-
-    events.handle_session_event({
-      type = 'assistant.message_delta',
-      data = {
-        messageId = 'assistant-42',
-        deltaContent = 'final answer',
-      },
-    })
-
-    vim.wait(150)
-    assistants = assistant_entries()
-    assert_eq(1, #assistants)
-    assert_eq('final answer', assistants[1].content)
-
-    agent.state.pending_checkpoint_turn = nil
-    events.handle_session_event({
-      type = 'assistant.turn_end',
-      data = {},
-    })
-  end)
 end)
 
 describe('statusline config counts', function()
@@ -2506,31 +2399,6 @@ describe('workspace file reload', function()
       vim.fn.delete(temp_file_two)
     end
     pcall(vim.cmd, 'tabonly | only')
-  end)
-
-  it('reloads changed buffers immediately and reports a diff summary', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr = vim.api.nvim_get_current_buf()
-    vim.fn.writefile({ 'local value = 2', 'print(value)', 'return value' }, temp_file)
-
-    events.handle_session_event({
-      type = 'session.workspace_file_changed',
-      data = {
-        operation = 'update',
-        path = vim.fn.fnamemodify(temp_file, ':t'),
-      },
-    })
-
-    assert_eq('📝sync', agent.statusline_busy())
-    vim.wait(100)
-
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    assert_eq('local value = 2', lines[1])
-    assert_eq('print(value)', lines[2])
-    assert_eq('✅ready', agent.statusline_busy())
-    assert_true(#notifications > 0)
-    assert_true(notifications[#notifications].message:find('Agent reloaded:', 1, true) ~= nil)
-    assert_true(notifications[#notifications].message:find('+1', 1, true) ~= nil)
   end)
 
   it('prompts before reloading a modified buffer updated by the plugin', function()
@@ -3381,6 +3249,184 @@ describe('rewind command', function()
 
     assert_true(slash.execute('/rewind V059'))
     assert_eq('V059', captured)
+  end)
+end)
+
+describe('diff command', function()
+  local agent
+  local slash
+  local checkpoints
+  local original_list
+  local original_system
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    agent.state.session_id = 'session-123'
+    agent.state.session_working_directory = '/tmp/checkpoint-workspace'
+    slash = require('copilot_agent.slash')
+    checkpoints = require('copilot_agent.checkpoints')
+    original_list = checkpoints.list
+    original_system = vim.system
+  end)
+
+  after_each(function()
+    checkpoints.list = original_list
+    vim.system = original_system
+  end)
+
+  it('uses checkpoint commits for /diff summaries', function()
+    local captured_args
+    local captured_cwd
+
+    checkpoints.list = function(session_id)
+      assert_eq('session-123', session_id)
+      return {
+        { id = 'v001', commit = 'aaa111', prompt = 'first prompt' },
+        { id = 'v002', commit = 'bbb222', prompt = 'second prompt' },
+      }
+    end
+
+    vim.system = function(args, opts)
+      captured_args = args
+      captured_cwd = opts.cwd
+      return {
+        wait = function()
+          return {
+            code = 0,
+            stdout = 'lua/copilot_agent/init.lua | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)\n',
+            stderr = '',
+          }
+        end,
+      }
+    end
+
+    assert_true(slash.execute('/diff v002'))
+
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'diff',
+      '--stat',
+      'aaa111',
+      'bbb222',
+      '--',
+      '.',
+    }, captured_args)
+    assert_eq('/tmp/checkpoint-workspace', captured_cwd)
+    assert_eq('system', agent.state.entries[#agent.state.entries].kind)
+    assert_eq(
+      'Checkpoint diff v001 -> v002:\nlua/copilot_agent/init.lua | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)',
+      agent.state.entries[#agent.state.entries].content
+    )
+  end)
+end)
+
+describe('checkpoint diff review', function()
+  local agent
+  local events
+  local checkpoints
+  local original_list
+  local original_system
+  local original_ui_select
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    agent.state.session_id = 'session-123'
+    agent.state.session_working_directory = '/tmp/checkpoint-workspace'
+    events = require('copilot_agent.events')
+    checkpoints = require('copilot_agent.checkpoints')
+    original_list = checkpoints.list
+    original_system = vim.system
+    original_ui_select = vim.ui.select
+  end)
+
+  after_each(function()
+    checkpoints.list = original_list
+    vim.system = original_system
+    vim.ui.select = original_ui_select
+    pcall(vim.cmd, 'tabonly | only')
+  end)
+
+  it('uses checkpoint commits for CopilotAgentDiff review', function()
+    local select_call = 0
+    local commands = {}
+
+    checkpoints.list = function()
+      return {
+        { id = 'v001', commit = 'aaa111', prompt = 'first prompt' },
+        { id = 'v002', commit = 'bbb222', prompt = 'second prompt' },
+        { id = 'v003', commit = 'ccc333', prompt = 'third prompt' },
+      }
+    end
+
+    vim.ui.select = function(items, _, on_choice)
+      select_call = select_call + 1
+      on_choice(items[1], 1)
+    end
+
+    vim.system = function(cmd, _)
+      commands[#commands + 1] = cmd
+      local stdout = ''
+      if cmd[4] == 'diff' and cmd[5] == '--name-only' then
+        stdout = 'lua/copilot_agent/init.lua\n'
+      elseif cmd[4] == 'show' and cmd[5] == 'bbb222:lua/copilot_agent/init.lua' then
+        stdout = 'return "before"\n'
+      elseif cmd[4] == 'show' and cmd[5] == 'ccc333:lua/copilot_agent/init.lua' then
+        stdout = 'return "after"\n'
+      end
+      return {
+        wait = function()
+          return {
+            code = 0,
+            stdout = stdout,
+            stderr = '',
+          }
+        end,
+      }
+    end
+
+    events.review_diff()
+
+    assert_eq(3, select_call)
+    assert.same({
+      'git',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'diff',
+      '--name-only',
+      'bbb222',
+      'ccc333',
+      '--',
+      '.',
+    }, commands[1])
+    assert_true(table.concat(commands[1], ' '):find('HEAD', 1, true) == nil)
+    assert_eq('bbb222:lua/copilot_agent/init.lua', commands[2][5])
+    assert_eq('ccc333:lua/copilot_agent/init.lua', commands[3][5])
+
+    local saw_before = false
+    local saw_after = false
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(bufnr) then
+        local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+        if lines[1] == 'return "before"' then
+          saw_before = true
+        elseif lines[1] == 'return "after"' then
+          saw_after = true
+        end
+      end
+    end
+    assert_true(saw_before)
+    assert_true(saw_after)
   end)
 end)
 

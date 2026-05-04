@@ -350,7 +350,7 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 | `:CopilotAgentStop`              | Disconnect the active session                              |
 | `:CopilotAgentStop!`             | Delete the active session; checkpoint cleanup waits 7 days |
 | `:CopilotAgentCancel`            | Cancel the current agent turn                              |
-| `:CopilotAgentDiff`              | Pick a changed file and open vimdiff against HEAD          |
+| `:CopilotAgentDiff`              | Pick two checkpoints and open vimdiff for a changed file   |
 | `:CopilotAgentStatus`            | Show service URL, session id, stream status                |
 | `:CopilotAgentLsp`               | Start (or reuse) the LSP client for code actions           |
 | `:CopilotAgentPasteImage`        | Paste clipboard image as attachment                        |
@@ -408,7 +408,7 @@ Supported slash commands:
 | `/compact`             | —                          | Compact session history and refresh context usage                                   |
 | `/context`             | —                          | Show current context-window token usage                                             |
 | `/cwd`                 | `[path]`                   | Show or change the working directory used for future session actions                |
-| `/diff`                | `[cached]`                 | Show a git diff summary for the current project; `cached` uses staged changes       |
+| `/diff`                | `[vNNN\|from to\|from..to]` | Show a checkpoint diff summary; default compares the latest two checkpoints         |
 | `/env`                 | —                          | Show the current environment, service, session, model, and mode snapshot            |
 | `/fleet`               | `[prompt]`                 | Start fleet mode for the active session                                             |
 | `/init`                | `[args]`                   | Run the project initialization helper                                               |

@@ -100,4 +100,4 @@ end, { desc = 'Re-show the last dismissed ask_user prompt' })
 
 vim.api.nvim_create_user_command('CopilotAgentDiff', function()
   copilot_agent.review_diff()
-end, { desc = 'Pick a changed file and open vimdiff against HEAD' })
+end, { desc = 'Pick two checkpoints and open vimdiff for a changed file between them' })

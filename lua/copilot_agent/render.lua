@@ -28,6 +28,10 @@ local OVERLAY_MIN_WINDOW_WIDTH = 24 -- Reserve enough width for overlay headings
 local OVERLAY_HORIZONTAL_PADDING = 4 -- Leave a small gutter between virtual overlay text and the window edge.
 local OVERLAY_SEPARATOR_HORIZONTAL_PADDING = 2 -- Preserve a small margin around separator rules.
 local OVERLAY_BREAK_THRESHOLD_RATIO = 0.3 -- Only wrap on whitespace after at least 30% of the line to avoid tiny fragments.
+local OVERLAY_STRONG_HL = 'CopilotAgentOverlayStrong'
+local OVERLAY_EMPHASIS_HL = 'CopilotAgentOverlayEmphasis'
+local OVERLAY_CODE_HL = 'CopilotAgentOverlayCode'
+local OVERLAY_QUOTED_HL = 'CopilotAgentOverlayQuoted'
 local ACTIVITY_DETAIL_PREFIXES = {
   'Ran ',
   'Viewed ',
@@ -237,6 +241,130 @@ local function activity_overlay_lines(_)
   return wrapped
 end
 
+local function append_overlay_chunk(chunks, text, highlight)
+  if type(text) ~= 'string' or text == '' then
+    return
+  end
+  if #chunks > 0 and chunks[#chunks][2] == highlight then
+    chunks[#chunks][1] = chunks[#chunks][1] .. text
+    return
+  end
+  chunks[#chunks + 1] = { text, highlight }
+end
+
+local function find_unescaped_sequence(text, sequence, start_pos)
+  start_pos = math.max(1, math.floor(tonumber(start_pos) or 1))
+  while start_pos <= #text do
+    local found = text:find(sequence, start_pos, true)
+    if not found then
+      return nil
+    end
+    local escapes = 0
+    local idx = found - 1
+    while idx >= 1 and text:sub(idx, idx) == '\\' do
+      escapes = escapes + 1
+      idx = idx - 1
+    end
+    if escapes % 2 == 0 then
+      return found
+    end
+    start_pos = found + 1
+  end
+  return nil
+end
+
+local function valid_overlay_emphasis_inner(inner)
+  return type(inner) == 'string' and inner ~= '' and inner:find('^%s') == nil and inner:find('%s$') == nil
+end
+
+local function overlay_markup_span_at(text, pos)
+  local pair = text:sub(pos, pos + 1)
+  if pair == '**' or pair == '__' then
+    local closing = find_unescaped_sequence(text, pair, pos + 2)
+    while closing do
+      if valid_overlay_emphasis_inner(text:sub(pos + 2, closing - 1)) then
+        return closing + 1, OVERLAY_STRONG_HL
+      end
+      closing = find_unescaped_sequence(text, pair, closing + 2)
+    end
+  end
+
+  local char = text:sub(pos, pos)
+  if char == '*' or char == '_' then
+    if text:sub(pos - 1, pos - 1) == char or text:sub(pos + 1, pos + 1) == char then
+      return nil
+    end
+    local closing = find_unescaped_sequence(text, char, pos + 1)
+    while closing do
+      if text:sub(closing - 1, closing - 1) ~= char and text:sub(closing + 1, closing + 1) ~= char then
+        if valid_overlay_emphasis_inner(text:sub(pos + 1, closing - 1)) then
+          return closing, OVERLAY_EMPHASIS_HL
+        end
+      end
+      closing = find_unescaped_sequence(text, char, closing + 1)
+    end
+    return nil
+  end
+
+  if char == '`' then
+    local closing = find_unescaped_sequence(text, char, pos + 1)
+    if closing then
+      return closing, OVERLAY_CODE_HL
+    end
+    return nil
+  end
+
+  if char == '"' then
+    local closing = find_unescaped_sequence(text, char, pos + 1)
+    if closing then
+      return closing, OVERLAY_QUOTED_HL
+    end
+    return nil
+  end
+
+  if char == "'" then
+    local prev = text:sub(pos - 1, pos - 1)
+    local next_char = text:sub(pos + 1, pos + 1)
+    if prev:match('[%w_]') and next_char:match('[%w_]') then
+      return nil
+    end
+    local closing = find_unescaped_sequence(text, char, pos + 1)
+    if closing then
+      return closing, OVERLAY_QUOTED_HL
+    end
+  end
+
+  return nil
+end
+
+local function overlay_markup_chunks(text, base_highlight)
+  text = type(text) == 'string' and text or ''
+  if text == '' then
+    return {}
+  end
+
+  local chunks = {}
+  local plain_start = 1
+  local cursor = 1
+  while cursor <= #text do
+    local span_end, highlight = overlay_markup_span_at(text, cursor)
+    if span_end then
+      if plain_start < cursor then
+        append_overlay_chunk(chunks, text:sub(plain_start, cursor - 1), base_highlight)
+      end
+      append_overlay_chunk(chunks, text:sub(cursor, span_end), highlight)
+      cursor = span_end + 1
+      plain_start = cursor
+    else
+      cursor = cursor + 1
+    end
+  end
+  if plain_start <= #text then
+    append_overlay_chunk(chunks, text:sub(plain_start), base_highlight)
+  end
+  return chunks
+end
+
 local function append_overlay_section(virt_lines, lines, first_prefix, other_prefix, highlight, right_align)
   local display_lines = {}
   for idx, line in ipairs(lines) do
@@ -251,17 +379,17 @@ local function append_overlay_section(virt_lines, lines, first_prefix, other_pre
     win_width = (win and vim.api.nvim_win_is_valid(win)) and vim.api.nvim_win_get_width(win) or 80
   end
   for _, display_text in ipairs(lines) do
+    local line_chunks = overlay_markup_chunks(display_text, highlight)
     if right_align and win_width then
       local text_width = vim.fn.strdisplaywidth(display_text)
       local pad = math.max(0, win_width - text_width - 1)
-      virt_lines[#virt_lines + 1] = {
-        { string.rep(' ', pad), '' },
-        { display_text, highlight },
-      }
+      local padded_chunks = { { string.rep(' ', pad), '' } }
+      for _, chunk in ipairs(line_chunks) do
+        padded_chunks[#padded_chunks + 1] = chunk
+      end
+      virt_lines[#virt_lines + 1] = padded_chunks
     else
-      virt_lines[#virt_lines + 1] = {
-        { display_text, highlight },
-      }
+      virt_lines[#virt_lines + 1] = line_chunks
     end
   end
 end

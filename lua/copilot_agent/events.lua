@@ -65,6 +65,7 @@ local REASONING_ID_MAX_CHARS = 32 -- Reasoning IDs are only diagnostic breadcrum
 local DIFF_FLOAT_WIDTH_RATIO = 0.8 -- Use most of the editor width so diffs stay readable without fully covering the workspace.
 local DIFF_FLOAT_HEIGHT_RATIO = 0.7 -- Leave visible editor context above and below the proposed-change float.
 local FLOAT_VERTICAL_BORDER_LINES = 2 -- Account for the rounded-border float frame when sizing content buffers.
+local CHECKPOINT_PICKER_LABEL_MAX_CHARS = 60 -- Checkpoint picker labels should stay readable while still surfacing the prompt context.
 local TURN_END_PROMPT_PREVIEW_CHARS = 200 -- Show enough of the prompt in turn-end logs to identify the completed request.
 local RECENT_ACTIVITY_LINE_MAX_CHARS = 120 -- Keep recent activity summaries compact enough for overlays and statusline-adjacent displays.
 local OVERLAY_STALE_IDLE_TIMEOUT_MS = 10 * 60 * 1000 -- Clear orphaned shell activity overlays after prolonged inactivity so stale "Activity: bash" banners never linger indefinitely.
@@ -3165,65 +3166,197 @@ M.forget_buffer_disk_state = forget_buffer_disk_state
 M.offer_diff_review = offer_diff_review
 M._deprecated_merge_assistant_delta_content = merge_assistant_delta_content
 
---- List all uncommitted changed files and open vimdiff for the selected one.
---- Shows a picker of files with unstaged/staged changes relative to HEAD.
-local function review_diff()
-  local wd = working_directory()
-  -- Get files with changes (staged + unstaged) relative to HEAD.
-  local changed = vim.fn.systemlist({ 'git', '-C', wd, 'diff', '--name-only', 'HEAD' })
-  if vim.v.shell_error ~= 0 or #changed == 0 or (changed[1] or '') == '' then
-    -- Also check for untracked files that were newly created.
-    local untracked = vim.fn.systemlist({ 'git', '-C', wd, 'ls-files', '--others', '--exclude-standard' })
-    if vim.v.shell_error ~= 0 or #untracked == 0 or (untracked[1] or '') == '' then
-      notify('No uncommitted changes found', vim.log.levels.INFO)
-      return
-    end
-    changed = untracked
+local function checkpoint_diff_workspace()
+  local workspace = state.session_working_directory or working_directory()
+  if type(workspace) ~= 'string' or workspace == '' then
+    return nil
   end
-  -- Filter out empty strings.
-  changed = vim.tbl_filter(function(f)
-    return f and f ~= ''
-  end, changed)
-  if #changed == 0 then
-    notify('No uncommitted changes found', vim.log.levels.INFO)
+  return workspace
+end
+
+local function checkpoint_git_dir(session_id)
+  return checkpoints._session_dir(session_id) .. '/repo/.git'
+end
+
+local function checkpoint_systemlist(session_id, workspace, args)
+  local cmd = {
+    'git',
+    '--git-dir=' .. checkpoint_git_dir(session_id),
+    '--work-tree=' .. workspace,
+  }
+  vim.list_extend(cmd, args)
+  if vim.system then
+    local result = vim.system(cmd, { text = true, cwd = workspace }):wait()
+    local stdout = (result.stdout or '') ~= '' and (result.stdout or '') or (result.stderr or '')
+    local lines = stdout ~= '' and vim.split(stdout, '\n', { plain = true }) or {}
+    if #lines > 0 and lines[#lines] == '' then
+      table.remove(lines)
+    end
+    return lines, result.code, cmd
+  end
+  local output = vim.fn.systemlist(cmd)
+  return output, vim.v.shell_error, cmd
+end
+
+local function checkpoint_picker_label(item)
+  local prompt = type(item.prompt) == 'string' and vim.trim(item.prompt) or ''
+  if prompt == '' then
+    return item.id
+  end
+  prompt = prompt:gsub('%s+', ' ')
+  if #prompt > CHECKPOINT_PICKER_LABEL_MAX_CHARS then
+    prompt = prompt:sub(1, CHECKPOINT_PICKER_LABEL_MAX_CHARS - 3) .. '...'
+  end
+  return string.format('%s  [%s]', prompt, item.id)
+end
+
+local function checkpoint_file_lines(session_id, workspace, checkpoint, path)
+  local lines, exit_code = checkpoint_systemlist(session_id, workspace, {
+    'show',
+    checkpoint.commit .. ':' .. path,
+  })
+  if exit_code ~= 0 then
+    return {
+      string.format('[File not present in %s]', checkpoint.id),
+    }
+  end
+  if #lines == 0 then
+    return { '' }
+  end
+  return lines
+end
+
+local function configure_checkpoint_diff_buffer(bufnr, name, lines, filename)
+  vim.bo[bufnr].buftype = 'nofile'
+  vim.bo[bufnr].bufhidden = 'wipe'
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].modifiable = true
+  vim.api.nvim_buf_set_name(bufnr, name)
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  local ft = vim.filetype.match({ filename = filename }) or ''
+  if ft ~= '' then
+    vim.bo[bufnr].filetype = ft
+  end
+  vim.bo[bufnr].modifiable = false
+  vim.bo[bufnr].readonly = true
+end
+
+local function open_checkpoint_diff(path, older_checkpoint, newer_checkpoint)
+  local session_id = state.session_id
+  local workspace = checkpoint_diff_workspace()
+  if not session_id or not workspace then
+    notify('Checkpoint diff unavailable', vim.log.levels.WARN)
     return
   end
 
-  vim.ui.select(changed, { prompt = 'Review diff for:' }, function(choice)
-    if not choice then
+  local older_lines = checkpoint_file_lines(session_id, workspace, older_checkpoint, path)
+  local newer_lines = checkpoint_file_lines(session_id, workspace, newer_checkpoint, path)
+
+  vim.cmd('tabnew')
+  local older_win = vim.api.nvim_get_current_win()
+  local older_buf = vim.api.nvim_get_current_buf()
+  configure_checkpoint_diff_buffer(older_buf, string.format('%s (%s)', path, older_checkpoint.id), older_lines, path)
+  window.disable_folds(older_win)
+  vim.cmd('diffthis')
+
+  vim.cmd('vnew')
+  local newer_win = vim.api.nvim_get_current_win()
+  local newer_buf = vim.api.nvim_get_current_buf()
+  configure_checkpoint_diff_buffer(newer_buf, string.format('%s (%s)', path, newer_checkpoint.id), newer_lines, path)
+  window.disable_folds(newer_win)
+  vim.cmd('diffthis')
+end
+
+--- Pick two checkpoints, then pick a changed file and open a vimdiff between their saved versions.
+local function review_diff()
+  if not state.session_id then
+    notify('No active session to diff', vim.log.levels.INFO)
+    return
+  end
+
+  local workspace = checkpoint_diff_workspace()
+  if not workspace then
+    notify('Checkpoint diff unavailable: working directory is not set', vim.log.levels.WARN)
+    return
+  end
+
+  local checkpoint_items = vim.tbl_filter(function(item)
+    return type(item) == 'table' and type(item.id) == 'string' and item.id ~= '' and type(item.commit) == 'string' and item.commit ~= ''
+  end, checkpoints.list(state.session_id))
+  if #checkpoint_items < 2 then
+    notify('Need at least two checkpoints to diff', vim.log.levels.INFO)
+    return
+  end
+
+  local newer_choices = {}
+  for idx = #checkpoint_items, 2, -1 do
+    newer_choices[#newer_choices + 1] = {
+      index = idx,
+      checkpoint = checkpoint_items[idx],
+    }
+  end
+
+  vim.ui.select(newer_choices, {
+    prompt = 'Select newer checkpoint',
+    format_item = function(item)
+      return checkpoint_picker_label(item.checkpoint)
+    end,
+  }, function(newer_choice)
+    if not newer_choice then
       return
     end
-    local abs_path = vim.fn.fnamemodify(wd .. '/' .. choice, ':p')
-    -- Check if file is tracked (has a HEAD version) for vimdiff.
-    vim.fn.systemlist({ 'git', '-C', wd, 'cat-file', '-e', 'HEAD:' .. choice })
-    if vim.v.shell_error ~= 0 then
-      -- New untracked file — just open it.
-      vim.cmd('tabnew ' .. vim.fn.fnameescape(abs_path))
-      notify('New file (no HEAD version): ' .. choice, vim.log.levels.INFO)
-      return
+
+    local older_choices = {}
+    for idx = newer_choice.index - 1, 1, -1 do
+      older_choices[#older_choices + 1] = {
+        index = idx,
+        checkpoint = checkpoint_items[idx],
+      }
     end
-    -- Get the old (HEAD) version and open vimdiff.
-    local old_lines = vim.fn.systemlist({ 'git', '-C', wd, 'show', 'HEAD:' .. choice })
-    if vim.v.shell_error ~= 0 then
-      notify('Could not read old version of ' .. choice, vim.log.levels.WARN)
-      return
-    end
-    vim.cmd('tabnew ' .. vim.fn.fnameescape(abs_path))
-    vim.cmd('diffthis')
-    vim.cmd('vnew')
-    local scratch = vim.api.nvim_get_current_buf()
-    vim.bo[scratch].buftype = 'nofile'
-    vim.bo[scratch].bufhidden = 'wipe'
-    vim.bo[scratch].swapfile = false
-    vim.api.nvim_buf_set_name(scratch, choice .. ' (HEAD)')
-    vim.api.nvim_buf_set_lines(scratch, 0, -1, false, old_lines)
-    local ft = vim.filetype.match({ filename = abs_path }) or ''
-    if ft ~= '' then
-      vim.bo[scratch].filetype = ft
-    end
-    vim.bo[scratch].modifiable = false
-    window.disable_folds(vim.api.nvim_get_current_win())
-    vim.cmd('diffthis')
+
+    vim.ui.select(older_choices, {
+      prompt = 'Select older checkpoint to compare',
+      format_item = function(item)
+        return checkpoint_picker_label(item.checkpoint)
+      end,
+    }, function(older_choice)
+      if not older_choice then
+        return
+      end
+
+      local changed, exit_code = checkpoint_systemlist(state.session_id, workspace, {
+        'diff',
+        '--name-only',
+        older_choice.checkpoint.commit,
+        newer_choice.checkpoint.commit,
+        '--',
+        '.',
+      })
+      if exit_code ~= 0 then
+        notify('Checkpoint diff failed', vim.log.levels.WARN)
+        return
+      end
+
+      changed = vim.tbl_filter(function(path)
+        return type(path) == 'string' and path ~= ''
+      end, changed)
+      if #changed == 0 then
+        notify(
+          string.format('No file differences between checkpoints %s and %s', older_choice.checkpoint.id, newer_choice.checkpoint.id),
+          vim.log.levels.INFO
+        )
+        return
+      end
+
+      vim.ui.select(changed, {
+        prompt = string.format('Review file diff for %s -> %s', older_choice.checkpoint.id, newer_choice.checkpoint.id),
+      }, function(path)
+        if not path then
+          return
+        end
+        open_checkpoint_diff(path, older_choice.checkpoint, newer_choice.checkpoint)
+      end)
+    end)
   end)
 end
 

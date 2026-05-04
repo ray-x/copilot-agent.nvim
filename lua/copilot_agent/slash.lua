@@ -610,36 +610,137 @@ local function cwd_command(args)
 end
 
 local function diff_command(args)
-  local cwd = working_directory()
-  local git_root, git_err = run_command({ 'git', '-C', cwd, 'rev-parse', '--show-toplevel' }, cwd)
-  if git_err then
-    append_entry('error', 'Diff unavailable: ' .. git_err)
+  local function normalize_checkpoint_id(checkpoint_id)
+    checkpoint_id = vim.trim(checkpoint_id or '')
+    if checkpoint_id == '' then
+      return nil
+    end
+    local number = checkpoint_id:match('^[vV](%d+)$')
+    if number then
+      return string.format('v%03d', tonumber(number))
+    end
+    return checkpoint_id
+  end
+
+  local function checkpoint_index_by_id(checkpoint_items, checkpoint_id)
+    local normalized = normalize_checkpoint_id(checkpoint_id)
+    if not normalized then
+      return nil, nil
+    end
+    for idx, item in ipairs(checkpoint_items or {}) do
+      if type(item.id) == 'string' and item.id == normalized then
+        return idx, item
+      end
+    end
+    return nil, nil
+  end
+
+  local function parse_diff_checkpoint_args(raw_args)
+    raw_args = vim.trim(raw_args or '')
+    if raw_args == '' then
+      return nil, nil, nil
+    end
+
+    local from_arg, to_arg = raw_args:match('^(%S+)%.%.(%S+)$')
+    if from_arg and to_arg then
+      return from_arg, to_arg, nil
+    end
+
+    local tokens = {}
+    for token in raw_args:gmatch('%S+') do
+      tokens[#tokens + 1] = token
+    end
+    if #tokens == 1 then
+      return nil, tokens[1], nil
+    end
+    if #tokens == 2 then
+      return tokens[1], tokens[2], nil
+    end
+    return nil, nil, 'Usage: /diff [checkpoint] | /diff <from> <to> | /diff <from>..<to>'
+  end
+
+  local function resolve_diff_checkpoints(checkpoint_items, raw_args)
+    if #checkpoint_items < 2 then
+      return nil, nil, 'Need at least two checkpoints to diff'
+    end
+
+    local from_arg, to_arg, parse_err = parse_diff_checkpoint_args(raw_args)
+    if parse_err then
+      return nil, nil, parse_err
+    end
+
+    if not to_arg then
+      return checkpoint_items[#checkpoint_items - 1], checkpoint_items[#checkpoint_items], nil
+    end
+
+    local to_idx, to_item = checkpoint_index_by_id(checkpoint_items, to_arg)
+    if not to_item then
+      return nil, nil, 'Checkpoint not found: ' .. to_arg
+    end
+
+    if not from_arg then
+      if to_idx <= 1 then
+        return nil, nil, 'Checkpoint ' .. to_item.id .. ' has no earlier checkpoint to compare'
+      end
+      return checkpoint_items[to_idx - 1], to_item, nil
+    end
+
+    local from_idx, from_item = checkpoint_index_by_id(checkpoint_items, from_arg)
+    if not from_item then
+      return nil, nil, 'Checkpoint not found: ' .. from_arg
+    end
+    if from_idx == to_idx then
+      return nil, nil, 'Choose two different checkpoints'
+    end
+    if from_idx > to_idx then
+      from_item, to_item = to_item, from_item
+    end
+    return from_item, to_item, nil
+  end
+
+  if not state.session_id then
+    append_entry('error', 'Diff unavailable: no active session')
     return true
   end
 
-  local prefix, prefix_err = run_command({ 'git', '-C', cwd, 'rev-parse', '--show-prefix' }, cwd)
-  if prefix_err then
-    append_entry('error', 'Diff unavailable: ' .. prefix_err)
+  local checkpoint_items = vim.tbl_filter(function(item)
+    return type(item) == 'table' and type(item.id) == 'string' and item.id ~= '' and type(item.commit) == 'string' and item.commit ~= ''
+  end, checkpoints.list(state.session_id))
+  local from_checkpoint, to_checkpoint, range_err = resolve_diff_checkpoints(checkpoint_items, args)
+  if range_err then
+    append_entry('error', 'Diff unavailable: ' .. range_err)
     return true
   end
-  local pathspec = prefix ~= '' and prefix or '.'
 
-  local diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--stat', '--', pathspec }
-  if vim.trim(args or '') == 'cached' then
-    diff_args = { 'git', '--no-pager', '-C', git_root, 'diff', '--cached', '--stat', '--', pathspec }
+  local checkpoint_git_dir = checkpoints._session_dir(state.session_id) .. '/repo/.git'
+  local workspace = state.session_working_directory or working_directory()
+  if type(workspace) ~= 'string' or workspace == '' then
+    append_entry('error', 'Diff unavailable: working directory is not set')
+    return true
   end
 
-  local output, diff_err = run_command(diff_args, git_root)
+  local output, diff_err = run_command({
+    'git',
+    '--no-pager',
+    '--git-dir=' .. checkpoint_git_dir,
+    '--work-tree=' .. workspace,
+    'diff',
+    '--stat',
+    from_checkpoint.commit,
+    to_checkpoint.commit,
+    '--',
+    '.',
+  }, workspace)
   if diff_err then
     append_entry('error', 'Diff failed: ' .. diff_err)
     return true
   end
   if output == '' then
-    append_entry('system', 'Working tree is clean')
+    append_entry('system', string.format('No differences between checkpoints %s and %s', from_checkpoint.id, to_checkpoint.id))
     return true
   end
 
-  append_entry('system', 'Git diff summary for ' .. vim.fn.fnamemodify(git_root, ':~') .. ':\n' .. output)
+  append_entry('system', string.format('Checkpoint diff %s -> %s:\n%s', from_checkpoint.id, to_checkpoint.id, output))
   return true
 end
 

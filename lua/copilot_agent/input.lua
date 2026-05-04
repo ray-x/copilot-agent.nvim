@@ -127,7 +127,7 @@ local function discovered_skill_names()
 end
 
 local function command_completion_context(before)
-  for _, command in ipairs({ 'agent', 'skills', 'model', 'resume', 'session', 'mcp', 'instructions' }) do
+  for _, command in ipairs({ 'agent', 'skills', 'model', 'resume', 'session', 'mcp', 'instructions', 'lsp' }) do
     local token = '/' .. command
     local lower_before = before:lower()
     local start_pos, end_pos
@@ -193,6 +193,16 @@ local function attachment_completion_items(query)
     return left.abbr < right.abbr
   end)
   return items
+end
+
+local function lsp_action_items()
+  return {
+    'create',
+    'status',
+    'show',
+    'test',
+    'help',
+  }
 end
 
 local function discovered_instruction_names()
@@ -433,6 +443,17 @@ local function input_omnifunc(findstart, base)
           word = '/instructions ' .. name,
           abbr = name,
           menu = '[instruction]',
+        })
+      end
+    end
+  elseif command_context and command_context.kind == 'lsp' then
+    local query = command_context.query:lower()
+    for _, action in ipairs(lsp_action_items()) do
+      if query == '' or vim.startswith(action, query) then
+        table.insert(items, {
+          word = '/lsp ' .. action,
+          abbr = action,
+          menu = '[lsp]',
         })
       end
     end

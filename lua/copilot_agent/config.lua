@@ -243,7 +243,7 @@ local SLASH_COMMANDS = {
   { word = '/session', info = 'View and manage sessions' },
   { word = '/diff', info = 'Review differences between checkpoints' },
   { word = '/review', info = 'Run code review agent' },
-  { word = '/lsp', info = 'Manage language server configuration' },
+  { word = '/lsp', info = 'Bootstrap or inspect project language server config' },
   { word = '/plan', info = 'Create an implementation plan' },
   { word = '/research', info = 'Run deep research investigation' },
   { word = '/init', info = 'Initialize Copilot instructions for this repository' },

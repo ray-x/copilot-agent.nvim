@@ -864,34 +864,38 @@ local function mcp_command(args)
 end
 
 local function lsp_status_message()
-  local parts = {
-    'LSP status:',
-    '  Active client id: ' .. tostring(state.lsp_client_id or '<none>'),
-    '  Root: ' .. tostring(working_directory()),
-    '  Service cwd: ' .. tostring(service.service_cwd()),
-  }
-  return table.concat(parts, '\n')
+  return lsp.status_message()
 end
 
 local function lsp_command(args)
   local action = vim.trim(args or '')
 
   local function run(choice)
-    if not choice or choice == '' or choice == 'status' then
-      append_entry('system', lsp_status_message())
+    if not choice or choice == '' then
+      lsp.help()
       return
     end
-    if choice == 'start' then
-      local client_id = lsp.start_lsp({ root_dir = working_directory() })
-      append_entry('system', client_id and ('Started Copilot LSP client ' .. client_id) or 'Failed to start Copilot LSP')
+    if choice == 'create' then
+      lsp.create_config()
       return
     end
-    if choice == 'install' then
-      lsp.install_binary()
-      append_entry('system', 'Installing Copilot agent binary…')
+    if choice == 'status' then
+      notify(lsp_status_message(), vim.log.levels.INFO)
       return
     end
-    append_entry('error', 'Unknown /lsp action: ' .. choice)
+    if choice == 'show' then
+      lsp.show_config()
+      return
+    end
+    if choice == 'test' then
+      lsp.test()
+      return
+    end
+    if choice == 'help' then
+      lsp.help()
+      return
+    end
+    notify('Unknown /lsp action: ' .. choice, vim.log.levels.ERROR)
   end
 
   if action ~= '' then
@@ -900,9 +904,11 @@ local function lsp_command(args)
   end
 
   vim.ui.select({
-    { id = 'status', label = 'Show LSP status' },
-    { id = 'start', label = 'Start LSP for current workspace' },
-    { id = 'install', label = 'Install or update binary' },
+    { id = 'create', label = 'Create or update .github/lsp.json from active project LSP clients' },
+    { id = 'status', label = 'Show project LSP status' },
+    { id = 'show', label = 'Show configured servers from .github/lsp.json' },
+    { id = 'test', label = 'Test configured servers against active project clients' },
+    { id = 'help', label = 'Show /lsp help' },
   }, {
     prompt = 'Copilot LSP',
     format_item = function(item)

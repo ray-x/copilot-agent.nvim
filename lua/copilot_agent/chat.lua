@@ -74,7 +74,7 @@ local function help_lines()
     '    @<path>         Attach a file',
     '    /<cmd>          Run a built-in slash command',
     '    Type / + <Tab>  Browse command completion',
-    '    Examples        /model  /new  /resume  /diff  /share',
+    '    Examples        /model  /new  /resume  /diff  /lsp create',
     '',
   '  Review / recovery',
     '    :CopilotAgentDiff      Review file differences between checkpoints',

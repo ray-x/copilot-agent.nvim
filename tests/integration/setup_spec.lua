@@ -3327,6 +3327,193 @@ describe('diff command', function()
   end)
 end)
 
+describe('lsp slash command', function()
+  local agent
+  local slash
+  local temp_workspace
+  local go_buf
+  local lua_buf
+  local notifications
+  local original_notify
+  local original_buf_get_clients
+  local original_get_clients
+  local original_executable
+  local gopls_client
+  local lua_ls_client
+  local helper_client
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.lsp'] = nil
+    agent = require('copilot_agent')
+    temp_workspace = vim.fn.tempname()
+    vim.fn.mkdir(temp_workspace .. '/lua', 'p')
+    vim.fn.writefile({ 'package main', 'func main() {}' }, temp_workspace .. '/main.go')
+    vim.fn.writefile({ 'return {}' }, temp_workspace .. '/lua/init.lua')
+
+    agent.setup({
+      auto_create_session = false,
+      notify = true,
+      session = {
+        working_directory = function()
+          return temp_workspace
+        end,
+      },
+    })
+    agent.state.session_working_directory = temp_workspace
+    slash = require('copilot_agent.slash')
+
+    go_buf = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(go_buf, temp_workspace .. '/main.go')
+    vim.bo[go_buf].filetype = 'go'
+
+    lua_buf = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(lua_buf, temp_workspace .. '/lua/init.lua')
+    vim.bo[lua_buf].filetype = 'lua'
+
+    gopls_client = {
+      id = 11,
+      name = 'gopls',
+      config = {
+        cmd = { 'gopls' },
+        root_dir = temp_workspace,
+      },
+      server_capabilities = {
+        definitionProvider = true,
+        referencesProvider = true,
+      },
+    }
+    lua_ls_client = {
+      id = 12,
+      name = 'lua_ls',
+      config = {
+        cmd = { 'lua-language-server' },
+        root_dir = temp_workspace,
+      },
+      server_capabilities = {
+        definitionProvider = true,
+        referencesProvider = true,
+      },
+    }
+    helper_client = {
+      id = 99,
+      name = 'copilot-agent',
+      config = {
+        root_dir = temp_workspace,
+      },
+      server_capabilities = {
+        definitionProvider = true,
+        referencesProvider = true,
+      },
+    }
+
+    notifications = {}
+    original_notify = vim.notify
+    vim.notify = function(message, level)
+      notifications[#notifications + 1] = {
+        message = message,
+        level = level,
+      }
+    end
+
+    original_buf_get_clients = vim.lsp.buf_get_clients
+    vim.lsp.buf_get_clients = function(bufnr)
+      if bufnr == go_buf then
+        return { gopls_client }
+      end
+      if bufnr == lua_buf then
+        return { lua_ls_client }
+      end
+      return {}
+    end
+
+    original_get_clients = vim.lsp.get_clients
+    vim.lsp.get_clients = function(opts)
+      opts = opts or {}
+      if opts.name == 'copilot-agent' then
+        return { helper_client }
+      end
+      if opts.bufnr == go_buf then
+        return { gopls_client }
+      end
+      if opts.bufnr == lua_buf then
+        return { lua_ls_client }
+      end
+      return { helper_client, gopls_client, lua_ls_client }
+    end
+
+    original_executable = vim.fn.executable
+    vim.fn.executable = function(command)
+      if command == 'gopls' or command == 'lua-language-server' then
+        return 1
+      end
+      return original_executable(command)
+    end
+  end)
+
+  after_each(function()
+    vim.notify = original_notify
+    vim.lsp.buf_get_clients = original_buf_get_clients
+    vim.lsp.get_clients = original_get_clients
+    vim.fn.executable = original_executable
+    vim.fn.delete(temp_workspace, 'rf')
+  end)
+
+  it('bootstraps .github/lsp.json from active project clients and opens it', function()
+    local config_path = temp_workspace .. '/.github/lsp.json'
+
+    assert_true(slash.execute('/lsp create'))
+
+    local decoded = vim.json.decode(table.concat(vim.fn.readfile(config_path), '\n'))
+    assert_eq('gopls', decoded.lspServers.gopls.command)
+    assert_true(vim.tbl_isempty(decoded.lspServers.gopls.args))
+    assert_eq('go', decoded.lspServers.gopls.fileExtensions['.go'])
+    assert_eq('lua-language-server', decoded.lspServers.lua_ls.command)
+    assert_eq('lua', decoded.lspServers.lua_ls.fileExtensions['.lua'])
+    local uv = vim.uv or vim.loop
+    assert_eq(
+      (uv and uv.fs_realpath and uv.fs_realpath(config_path)) or vim.fn.fnamemodify(config_path, ':p'),
+      (uv and uv.fs_realpath and uv.fs_realpath(vim.api.nvim_buf_get_name(0))) or vim.api.nvim_buf_get_name(0)
+    )
+    assert_true(notifications[#notifications].message:find('Wrote 2 project LSP servers', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find('Restart the Copilot service', 1, true) ~= nil)
+  end)
+
+  it('reports status, show, test, and help through notifications', function()
+    local config_path = temp_workspace .. '/.github/lsp.json'
+    vim.fn.mkdir(temp_workspace .. '/.github', 'p')
+    vim.fn.writefile(vim.split(vim.json.encode({
+      lspServers = {
+        gopls = {
+          command = 'gopls',
+          args = {},
+          fileExtensions = {
+            ['.go'] = 'go',
+          },
+        },
+      },
+    }, { indent = '  ' }), '\n', { plain = true }), config_path)
+
+    assert_true(slash.execute('/lsp status'))
+    assert_true(notifications[#notifications].message:find('LSP status', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find('gopls', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find('copilot-agent', 1, true) ~= nil)
+
+    assert_true(slash.execute('/lsp show'))
+    assert_true(notifications[#notifications].message:find('Configured LSP servers', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find('.go -> go', 1, true) ~= nil)
+
+    assert_true(slash.execute('/lsp test'))
+    assert_true(notifications[#notifications].message:find('LSP test', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find('Result: 1/1 configured server matched an active project LSP client.', 1, true) ~= nil)
+
+    assert_true(slash.execute('/lsp help'))
+    assert_true(notifications[#notifications].message:find('/lsp create', 1, true) ~= nil)
+    assert_true(notifications[#notifications].message:find(':CopilotAgentLsp still starts the plugin helper LSP', 1, true) ~= nil)
+  end)
+end)
+
 describe('checkpoint diff review', function()
   local agent
   local events
@@ -6680,6 +6867,7 @@ describe('chat input behavior', function()
     local inline_agent_words = completion_words('use /agent to do code review', #(prefix .. 'use /agent'))
     local skill_words = completion_words('/skills ')
     local model_words = completion_words('/model ')
+    local lsp_words = completion_words('/lsp ')
     local resume_words = completion_words('/resume ')
     local session_words = completion_words('/session ')
     local mcp_words = completion_words('/mcp ')
@@ -6694,6 +6882,9 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(skill_words, '/skills selene-check'))
     assert_true(vim.tbl_contains(model_words, '/model gpt-5.4'))
     assert_true(vim.tbl_contains(model_words, '/model claude-sonnet-4.6'))
+    assert_true(vim.tbl_contains(lsp_words, '/lsp create'))
+    assert_true(vim.tbl_contains(lsp_words, '/lsp status'))
+    assert_true(vim.tbl_contains(lsp_words, '/lsp test'))
     assert_true(vim.tbl_contains(resume_words, '/resume session-123'))
     assert_true(vim.tbl_contains(resume_words, '/resume live-456'))
     assert_true(vim.tbl_contains(session_words, '/session session-123'))

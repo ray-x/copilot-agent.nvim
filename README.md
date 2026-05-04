@@ -415,7 +415,7 @@ Supported slash commands:
 | `/instructions`        | `[name]`                   | Open a discovered instructions file from the repository                             |
 | `/list-dir`            | —                          | List allowed directories for the current session                                    |
 | `/list-dirs`           | —                          | Alias for `/list-dir`                                                               |
-| `/lsp`                 | `[status\|start\|install]` | Show LSP status, start the LSP client, or install/update the binary                 |
+| `/lsp`                 | `[create\|status\|show\|test\|help]` | Bootstrap or inspect project LSP config for Copilot CLI                           |
 | `/mcp`                 | `[name]`                   | Open a discovered MCP config file                                                   |
 | `/model`               | `[id]`                     | Pick or switch the active model                                                     |
 | `/new`                 | —                          | Start a fresh session                                                               |
@@ -542,6 +542,8 @@ There are **two separate interruption points** in an agentic loop:
 ## LSP Code Actions
 
 The Go binary runs an LSP server on stdio. Start it with `:CopilotAgentLsp` or `require("copilot_agent").start_lsp()`.
+
+This helper server is separate from the project language servers used by Copilot CLI for code intelligence. Use `/lsp create` to bootstrap `.github/lsp.json` from active Neovim project LSP clients, then restart the Copilot service so config discovery reloads it.
 
 Available code actions (triggered on any selection via `vim.lsp.buf.code_action()`):
 

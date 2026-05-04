@@ -5815,6 +5815,9 @@ describe('chat input behavior', function()
   it('summarizes apply_patch activity by changed file instead of raw patch text', function()
     local events = require('copilot_agent.events')
     local render = require('copilot_agent.render')
+    local service = require('copilot_agent.service')
+    local project_root_name = vim.fn.fnamemodify(service.working_directory(), ':t')
+    local foreign_absolute_path = '/tmp/other-machine/workspaces/' .. project_root_name .. '/lua/copilot_agent/events.lua'
     agent.state.session_id = 'session-123'
     agent.state.entries = {}
     agent.state.entry_row_index = {}
@@ -5838,7 +5841,7 @@ describe('chat input behavior', function()
         toolName = 'apply_patch',
         input = table.concat({
           '*** Begin Patch',
-          '*** Update File: /Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/events.lua',
+          '*** Update File: ' .. foreign_absolute_path,
           '@@',
           '-old line',
           '+new line',

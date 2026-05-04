@@ -2,6 +2,12 @@
 
 GitHub Copilot's agentic runtime, natively in Neovim. A lightweight Go bridge to the [official SDK](https://github.com/github/copilot-sdk) with native tool execution, four chat modes, session-aware permissions, persistent sessions, repository-local agent/skill discovery, and LSP code actions.
 
+## Demo video
+
+50 seconds video to create a terminal version of flappy bird:
+
+https://gist.github.com/user-attachments/assets/2859b00a-ed80-4fee-bf0e-38550f1af993
+
 ## Advanced Agentic Features
 
 - Native SDK Agent Loop: Leverages the official Copilot SDK to perform autonomous tasks like reading/writing files, executing terminal commands, and fetching web data.

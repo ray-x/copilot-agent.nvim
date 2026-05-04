@@ -47,6 +47,7 @@ local reset_frozen_render = render.reset_frozen_render
 local scroll_to_bottom = render.scroll_to_bottom
 
 local is_thinking_content = utils.is_thinking_content
+local tilde_home_path = utils.tilde_home_path
 
 local M = {}
 local active_prompt_id = nil
@@ -1631,7 +1632,7 @@ sanitize_permission_text = function(text)
   if text == '' then
     return nil
   end
-  return text
+  return tilde_home_path(text)
 end
 
 local function build_permission_prompt(permission)
@@ -2723,7 +2724,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.intent' then
-    state.current_intent = data.intent or nil
+    state.current_intent = sanitize_permission_text(data.intent)
     refresh_statuslines()
     refresh_reasoning_overlay()
     return

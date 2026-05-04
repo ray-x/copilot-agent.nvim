@@ -5,6 +5,7 @@
 local source_path = debug.getinfo(1, 'S').source
 local module_path = type(source_path) == 'string' and vim.fn.fnamemodify(source_path:gsub('^@', ''), ':p') or nil
 local plugin_root = module_path and vim.fn.fnamemodify(module_path, ':h:h:h') or nil
+local utils = require('copilot_agent.utils')
 
 local M = {}
 local MIN_SERIALIZED_LOG_LENGTH = 32 -- Even very small log previews should leave enough room for a useful snippet plus an ellipsis.
@@ -202,6 +203,7 @@ local function resolve_log_caller()
 end
 
 function M.log(message, level)
+  message = utils.tilde_home_path(tostring(message))
   level = level or vim.log.levels.INFO
   if not M.should_log(level) then
     return
@@ -217,14 +219,15 @@ function M.log(message, level)
   local caller = (level == vim.log.levels.TRACE or level == vim.log.levels.DEBUG) and resolve_log_caller() or nil
   local line
   if caller then
-    line = string.format('%s [%s] %s %s\n', os.date('%Y-%m-%d %H:%M:%S'), prefix, caller, tostring(message))
+    line = string.format('%s [%s] %s %s\n', os.date('%Y-%m-%d %H:%M:%S'), prefix, caller, message)
   else
-    line = string.format('%s [%s] %s\n', os.date('%Y-%m-%d %H:%M:%S'), prefix, tostring(message))
+    line = string.format('%s [%s] %s\n', os.date('%Y-%m-%d %H:%M:%S'), prefix, message)
   end
   enqueue_log_line(M.log_path(), line)
 end
 
 function M.notify(message, level)
+  message = utils.tilde_home_path(tostring(message))
   M.log(message, level)
   if current_config().notify == false then
     return

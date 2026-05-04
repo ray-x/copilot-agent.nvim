@@ -60,6 +60,7 @@ local OVERLAY_BOTTOM_GUTTER_MIN_LINES = 5 -- Keep at least a few transcript line
 local OVERLAY_TAIL_SPACER_LINES = 3 -- Leave spacer rows so bottom-anchored virtual lines do not sit flush with content.
 
 local split_lines = utils.split_lines
+local sanitize_display_text = utils.tilde_home_path
 
 local function refresh_statuslines()
   local ok, sl = pcall(require, 'copilot_agent.statusline')
@@ -85,7 +86,7 @@ local function normalize_reasoning_lines(text)
   if type(text) ~= 'string' or text == '' then
     return {}
   end
-  local lines = vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
+  local lines = vim.split(sanitize_display_text(text):gsub('\r\n?', '\n'), '\n', { plain = true })
   local filtered = {}
   for _, line in ipairs(lines) do
     if line ~= '' then
@@ -100,6 +101,7 @@ function M.reasoning_lines(max_lines)
   -- Filter out empty lines to save precious overlay space
   local non_empty = {}
   for _, line in ipairs(lines) do
+    line = sanitize_display_text(line)
     if line ~= '' then
       non_empty[#non_empty + 1] = line
     end
@@ -223,9 +225,11 @@ local function activity_overlay_lines(_)
     return {}
   end
 
-  local line = overlay_tool.tool
-  if type(overlay_tool.detail) == 'string' and overlay_tool.detail ~= '' and overlay_tool.detail ~= overlay_tool.tool then
-    line = line .. ' — ' .. overlay_tool.detail
+  local tool = sanitize_display_text(overlay_tool.tool)
+  local detail = sanitize_display_text(overlay_tool.detail)
+  local line = tool
+  if type(detail) == 'string' and detail ~= '' and detail ~= tool then
+    line = line .. ' — ' .. detail
   end
   line = type(line) == 'string' and line:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
   if line == '' then
@@ -1261,7 +1265,7 @@ local function activity_preview_text(line)
 end
 
 local function collapsed_activity_line(content)
-  local lines = normalize_content_lines(split_lines(content))
+  local lines = normalize_content_lines(split_lines(sanitize_display_text(content)))
   local count = 0
   local preview_source
   local fallback_line
@@ -1309,7 +1313,7 @@ local function normalize_activity_detail_text(text)
   if type(text) ~= 'string' then
     return nil
   end
-  text = text:gsub('\r\n?', '\n')
+  text = sanitize_display_text(text):gsub('\r\n?', '\n')
   if text == '' then
     return nil
   end
@@ -1342,6 +1346,7 @@ local function append_markdown_inspect_block(lines, heading, value)
   if not ok or type(text) ~= 'string' or text == '' then
     return
   end
+  text = sanitize_display_text(text)
   append_markdown_heading(lines, heading)
   for _, line in ipairs(split_lines(text)) do
     lines[#lines + 1] = '    ' .. line
@@ -1353,6 +1358,7 @@ local function append_markdown_field(lines, label, value)
   if not value or value == '' then
     return
   end
+  value = sanitize_display_text(value)
   lines[#lines + 1] = string.format('- **%s:** %s', label, value)
 end
 
@@ -1446,40 +1452,41 @@ function M.entry_lines(entry, idx, align)
     align = true
   end
   local out = {}
+  local content = sanitize_display_text(entry.content or '')
   if entry.kind == 'activity' then
     if not activity_entries_visible() then
-      out[#out + 1] = collapsed_activity_line(entry.content)
+      out[#out + 1] = collapsed_activity_line(content)
     else
       out[#out + 1] = 'Activity:'
-      for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
+      for _, l in ipairs(normalize_content_lines(split_lines(content))) do
         out[#out + 1] = '  ' .. l
       end
     end
     out[#out + 1] = ''
   elseif entry.kind == 'system' or entry.kind == 'error' then
     out[#out + 1] = (entry.kind == 'error' and 'Error' or 'System') .. ':'
-    for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
+    for _, l in ipairs(normalize_content_lines(split_lines(content))) do
       out[#out + 1] = '  ' .. l
     end
     out[#out + 1] = ''
   elseif entry.kind == 'assistant' then
     -- Skip entries whose content is only whitespace after trimming.
-    local trimmed = (entry.content or ''):match('^%s*(.-)%s*$')
+    local trimmed = content:match('^%s*(.-)%s*$')
     if trimmed ~= '' then
       out[#out + 1] = 'Assistant:'
-      for _, l in ipairs(verbatim_content_lines(split_lines(entry.content))) do
+      for _, l in ipairs(verbatim_content_lines(split_lines(content))) do
         out[#out + 1] = '  ' .. l
       end
       out[#out + 1] = ''
     end
   else
     out[#out + 1] = 'User:'
-    for _, l in ipairs(normalize_content_lines(split_lines(entry.content))) do
+    for _, l in ipairs(normalize_content_lines(split_lines(content))) do
       out[#out + 1] = '  ' .. l
     end
     if entry.attachments and #entry.attachments > 0 then
       for _, a in ipairs(entry.attachments) do
-        out[#out + 1] = '  📎 ' .. (a.display or a.path or a.type)
+        out[#out + 1] = '  📎 ' .. sanitize_display_text(a.display or a.path or a.type or '')
       end
     end
     out[#out + 1] = ''

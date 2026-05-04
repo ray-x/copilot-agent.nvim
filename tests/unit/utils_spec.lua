@@ -160,3 +160,31 @@ describe('is_connection_error', function()
     assert.is_true(utils.is_connection_error('Empty reply from server'))
   end)
 end)
+
+describe('tilde_home_path', function()
+  it('returns non-string input unchanged', function()
+    assert.is_nil(utils.tilde_home_path(nil))
+    assert.equal(42, utils.tilde_home_path(42))
+  end)
+
+  it('returns empty strings unchanged', function()
+    assert.equal('', utils.tilde_home_path(''))
+  end)
+
+  it('replaces absolute home path prefixes when HOME is set', function()
+    local home = os.getenv('HOME')
+    if type(home) ~= 'string' or home == '' then
+      return
+    end
+    assert.equal('~/src/main.lua', utils.tilde_home_path(home .. '/src/main.lua'))
+    assert.equal('~', utils.tilde_home_path(home))
+  end)
+
+  it('does not rewrite paths that only share a partial prefix', function()
+    local home = os.getenv('HOME')
+    if type(home) ~= 'string' or home == '' then
+      return
+    end
+    assert.equal(home .. '-backup/file.txt', utils.tilde_home_path(home .. '-backup/file.txt'))
+  end)
+end)

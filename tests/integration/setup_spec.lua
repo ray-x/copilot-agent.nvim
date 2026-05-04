@@ -113,6 +113,60 @@ describe('plugin load', function()
   end)
 end)
 
+describe('home path display sanitization', function()
+  local agent, render, utils
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    package.loaded['copilot_agent.utils'] = nil
+
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    render = require('copilot_agent.render')
+    utils = require('copilot_agent.utils')
+  end)
+
+  it('replaces absolute home paths with a tilde in text', function()
+    local home = os.getenv('HOME')
+    if type(home) ~= 'string' or home == '' then
+      return
+    end
+    local source = string.format('%s/work/file.lua:%s', home, home)
+    assert_eq('~/work/file.lua:~', utils.tilde_home_path(source))
+  end)
+
+  it('sanitizes assistant transcript lines', function()
+    local home = os.getenv('HOME')
+    if type(home) ~= 'string' or home == '' then
+      return
+    end
+    local lines = render.entry_lines({
+      kind = 'assistant',
+      content = 'Opened ' .. home .. '/project/main.go',
+    }, 1)
+    local text = table.concat(lines, '\n')
+    assert_true(text:find('Opened ~/project/main.go', 1, true) ~= nil)
+  end)
+
+  it('sanitizes attachment display paths', function()
+    local home = os.getenv('HOME')
+    if type(home) ~= 'string' or home == '' then
+      return
+    end
+    local lines = render.entry_lines({
+      kind = 'user',
+      content = 'Review this file',
+      attachments = {
+        { path = home .. '/notes/todo.md' },
+      },
+    }, 1)
+    local text = table.concat(lines, '\n')
+    assert_true(text:find('📎 ~/notes/todo.md', 1, true) ~= nil)
+  end)
+
+end)
+
 describe('M.setup', function()
   local agent
 
@@ -2635,6 +2689,7 @@ describe('permission request prompts', function()
   it('uses a single-line read prompt without duplicating the file intention', function()
     local captured
     local path = '/Users/rayxu/github/ray-x/go.nvim/lua/go/commands.lua'
+    local expected_path = require('copilot_agent.utils').tilde_home_path(path)
 
     vim.ui.select = function(items, opts, _)
       captured = { items = items, prompt = opts.prompt }
@@ -2659,7 +2714,7 @@ describe('permission request prompts', function()
       return captured ~= nil
     end)
 
-    assert_eq('Allow: Read ' .. path, captured.prompt)
+    assert_eq('Allow: Read ' .. expected_path, captured.prompt)
     assert_true(captured.prompt:find('\n', 1, true) == nil)
     assert_eq('Allow', captured.items[1])
     assert_eq('Deny', captured.items[2])

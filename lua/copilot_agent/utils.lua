@@ -6,6 +6,22 @@
 -- Kept in a separate module so they can be unit-tested with plain Lua / busted.
 local M = {}
 
+local function escape_lua_pattern(text)
+  return text:gsub('([%(%)%.%%%+%-%*%?%[%]%^%$])', '%%%1')
+end
+
+local function normalized_home_path()
+  local home = os.getenv('HOME')
+  if type(home) ~= 'string' or home == '' then
+    return nil
+  end
+  home = home:gsub('[\\/]+$', '')
+  if home == '' or home == '/' then
+    return nil
+  end
+  return home
+end
+
 -- Returns true when content is empty, whitespace, or dots-only (model "thinking").
 function M.is_thinking_content(s)
   return s == nil or s == '' or s:match('^[%.%s]*$') ~= nil
@@ -30,6 +46,24 @@ end
 -- Strip trailing slashes from a base URL.
 function M.normalize_base_url(url, default_url)
   return (url or default_url or ''):gsub('/+$', '')
+end
+
+-- Replace absolute home-directory prefixes with "~" for UI-safe display.
+function M.tilde_home_path(text)
+  if type(text) ~= 'string' or text == '' then
+    return text
+  end
+
+  local home = normalized_home_path()
+  if not home then
+    return text
+  end
+  local escaped = escape_lua_pattern(home)
+
+  text = text:gsub(escaped .. '([/\\])', '~%1')
+  text = text:gsub(escaped .. '([^%w%/%._%-])', '~%1')
+  text = text:gsub(escaped .. '$', '~')
+  return text
 end
 
 function M.truncate_session_summary(summary, max_len)

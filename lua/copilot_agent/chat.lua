@@ -85,6 +85,8 @@ local function help_lines()
     '    <C-c>           Cancel current turn',
     '    zA              Toggle Activity details',
     '    gA              Open Activity details float',
+    '    [[ / ]]         Jump to prev/next conversation',
+    '    [a / ]a         Jump to prev/next Assistant/Activity',
     '    R               Refresh/re-render',
     '    ?               This help',
     '',
@@ -453,6 +455,22 @@ function M.ensure_chat_window(opts)
   vim.keymap.set('n', 'gA', function()
     render.show_activity_details_under_cursor()
   end, { buffer = bufnr, silent = true, desc = 'Open Activity details float' })
+
+  vim.keymap.set('n', '[[', function()
+    render.jump_conversation(-1)
+  end, { buffer = bufnr, silent = true, desc = 'Jump to previous conversation' })
+
+  vim.keymap.set('n', ']]', function()
+    render.jump_conversation(1)
+  end, { buffer = bufnr, silent = true, desc = 'Jump to next conversation' })
+
+  vim.keymap.set('n', '[a', function()
+    render.jump_assistant_activity(-1)
+  end, { buffer = bufnr, silent = true, desc = 'Jump to previous Assistant/Activity' })
+
+  vim.keymap.set('n', ']a', function()
+    render.jump_assistant_activity(1)
+  end, { buffer = bufnr, silent = true, desc = 'Jump to next Assistant/Activity' })
 
   for _, lhs in ipairs({ 'i', 'I', 'a', 'A', 'o', 'O', '<CR>' }) do
     vim.keymap.set('n', lhs, function()

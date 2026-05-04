@@ -5242,6 +5242,84 @@ describe('chat input behavior', function()
     assert_true(joined:find('Activity: rg activity lua/copilot_agent (2 items hidden)', 1, true) ~= nil)
   end)
 
+  it('registers conversation and Assistant/Activity jump keymaps in the chat buffer', function()
+    agent.open_chat()
+    local normal_maps = vim.api.nvim_buf_get_keymap(agent.state.chat_bufnr, 'n')
+    local lhs_index = {}
+    for _, map in ipairs(normal_maps) do
+      lhs_index[map.lhs] = true
+    end
+
+    assert_true(lhs_index['[['] == true)
+    assert_true(lhs_index[']]'] == true)
+    assert_true(lhs_index['[a'] == true)
+    assert_true(lhs_index[']a'] == true)
+  end)
+
+  it('jumps across conversation and Assistant/Activity transcript blocks in order', function()
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    render.clear_transcript()
+    agent.open_chat()
+
+    local bufnr = agent.state.chat_bufnr
+    local winid = agent.state.chat_winid
+    local user_one = render.append_entry('user', 'first prompt')
+    render.append_entry('activity', 'Ran bash — ls')
+    local assistant_one = render.append_entry('assistant', 'first answer')
+    local user_two = render.append_entry('user', 'second prompt')
+    local activity_two = render.append_entry('activity', 'Ran bash — rg foo')
+    local assistant_two = render.append_entry('assistant', 'second answer')
+    render.render_chat()
+    vim.api.nvim_set_current_win(winid)
+
+    local function row_for_entry(entry_idx)
+      for row, idx in pairs(agent.state.entry_row_index or {}) do
+        if idx == entry_idx then
+          return row + 1
+        end
+      end
+      return nil
+    end
+
+    local row_user_one = row_for_entry(user_one)
+    local row_user_two = row_for_entry(user_two)
+    local row_assistant_one = row_for_entry(assistant_one)
+    local row_activity_two = row_for_entry(activity_two)
+    local row_assistant_two = row_for_entry(assistant_two)
+    assert_not_nil(row_user_one)
+    assert_not_nil(row_user_two)
+    assert_not_nil(row_assistant_one)
+    assert_not_nil(row_activity_two)
+    assert_not_nil(row_assistant_two)
+
+    vim.api.nvim_win_set_cursor(winid, { vim.api.nvim_buf_line_count(bufnr), 0 })
+    assert_true(render.jump_conversation(-1))
+    assert_eq(row_user_two, vim.api.nvim_win_get_cursor(winid)[1])
+    assert_true(render.jump_conversation(-1))
+    assert_eq(row_user_one, vim.api.nvim_win_get_cursor(winid)[1])
+    assert_true(render.jump_conversation(1))
+    assert_eq(row_user_two, vim.api.nvim_win_get_cursor(winid)[1])
+    assert_false(render.jump_conversation(1))
+    assert_eq(row_user_two, vim.api.nvim_win_get_cursor(winid)[1])
+
+    vim.api.nvim_win_set_cursor(winid, { vim.api.nvim_buf_line_count(bufnr), 0 })
+    assert_true(render.jump_assistant_activity(-1))
+    assert_eq(row_assistant_two, vim.api.nvim_win_get_cursor(winid)[1])
+    assert_true(render.jump_assistant_activity(-1))
+    assert_eq(row_activity_two, vim.api.nvim_win_get_cursor(winid)[1])
+    assert_true(render.jump_assistant_activity(-1))
+    assert_eq(row_assistant_one, vim.api.nvim_win_get_cursor(winid)[1])
+
+    vim.api.nvim_win_set_cursor(winid, { row_assistant_one, 0 })
+    assert_true(render.jump_assistant_activity(1))
+    assert_eq(row_activity_two, vim.api.nvim_win_get_cursor(winid)[1])
+    assert_true(render.jump_assistant_activity(1))
+    assert_eq(row_assistant_two, vim.api.nvim_win_get_cursor(winid)[1])
+    assert_false(render.jump_assistant_activity(1))
+    assert_eq(row_assistant_two, vim.api.nvim_win_get_cursor(winid)[1])
+  end)
+
   it('captures tool execution output details in activity transcript entries', function()
     local events = require('copilot_agent.events')
     agent.state.session_id = 'session-123'

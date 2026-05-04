@@ -1420,6 +1420,82 @@ function M.chat_at_bottom()
   return metrics.content_rows <= metrics.visible_height
 end
 
+local function sorted_entry_starts(predicate)
+  local starts = {}
+  for row, idx in pairs(state.entry_row_index or {}) do
+    if type(row) == 'number' and type(idx) == 'number' then
+      local entry = state.entries[idx]
+      if entry and predicate(entry, idx) then
+        starts[#starts + 1] = {
+          row = row + 1,
+          idx = idx,
+        }
+      end
+    end
+  end
+  table.sort(starts, function(a, b)
+    if a.row == b.row then
+      return a.idx < b.idx
+    end
+    return a.row < b.row
+  end)
+  return starts
+end
+
+local function jump_to_transcript_entry(direction, predicate)
+  local winid, bufnr = resolve_chat_window_and_buffer()
+  if not winid or not bufnr then
+    return false
+  end
+
+  local starts = sorted_entry_starts(predicate)
+  if #starts == 0 then
+    return false
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(winid)
+  local cursor_row = cursor and cursor[1] or 1
+  local step = (tonumber(direction) or 1) >= 0 and 1 or -1
+  local target
+  if step > 0 then
+    for _, candidate in ipairs(starts) do
+      if candidate.row > cursor_row then
+        target = candidate
+        break
+      end
+    end
+  else
+    for i = #starts, 1, -1 do
+      local candidate = starts[i]
+      if candidate.row < cursor_row then
+        target = candidate
+        break
+      end
+    end
+  end
+
+  if not target then
+    return false
+  end
+
+  vim.api.nvim_set_current_win(winid)
+  vim.api.nvim_win_set_cursor(winid, { target.row, 0 })
+  state.chat_auto_scroll_enabled = M.chat_at_bottom()
+  return true
+end
+
+function M.jump_conversation(direction)
+  return jump_to_transcript_entry(direction, function(entry)
+    return entry.kind == 'user'
+  end)
+end
+
+function M.jump_assistant_activity(direction)
+  return jump_to_transcript_entry(direction, function(entry)
+    return entry.kind == 'assistant' or entry.kind == 'activity'
+  end)
+end
+
 local function with_programmatic_chat_scroll(callback)
   state.chat_scroll_guard = (tonumber(state.chat_scroll_guard) or 0) + 1
   local ok, result = pcall(callback)

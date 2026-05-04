@@ -386,6 +386,8 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-c>` (output)  | Cancel current turn                                                                          |
 | `zA` (output)     | Toggle collapsed `Activity:` transcript blocks                                               |
 | `gA` (output)     | Open a floating Activity details viewer for the block under the cursor                       |
+| `[[` / `]]` (output) | Jump to previous/next conversation (`User:` block)                                       |
+| `[a` / `]a` (output) | Jump to previous/next `Assistant:` or `Activity:` block                                  |
 | `?` (normal)      | Show help float with keybindings, session commands, and recovery tips                        |
 
 ### Slash Commands

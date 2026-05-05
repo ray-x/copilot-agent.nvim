@@ -79,9 +79,15 @@ The prompt input opens automatically. You can start typing right away.
 
 ### Step 4 — Switch to agent mode
 
-Press **`<C-o>`** until the input statusline shows **🤖 agent**.
+Press `i`, or `a` to enter insert mode a prompt buffer will created under main chat output buffer.
+
+Press **`<C-t>`** until the input statusline shows **🤖 agent**.
 
 In agent mode, Copilot can create files, run shell commands, and iterate on fixes.
+
+## Step 5 - Getting help
+
+Press ? in the chat buffer, you will see a help menu of all key bindings and slash commands and session commands
 
 ---
 
@@ -98,7 +104,13 @@ Start from an empty directory.
 
 ### Step 6 — Ask Copilot to scaffold the app
 
-Send this prompt:
+Start a new session with
+
+```vim
+:CopilotAgentChat
+```
+
+Send this prompt from prompt buffer:
 
 ```text
 Build a simple Flask to-do app in this directory.

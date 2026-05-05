@@ -51,7 +51,7 @@ Inside Neovim:
 :CopilotAgentChat
 ```
 
-Press **`<C-o>`** until the statusline shows **🤖 agent**.
+Press **`<C-t>`** until the statusline shows **🤖 agent**.
 
 ### Step 3 — Start a fresh session if needed so Copilot discovers the agents
 

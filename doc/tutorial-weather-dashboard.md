@@ -42,7 +42,7 @@ Inside Neovim:
 :CopilotAgentChat
 ```
 
-Press **`<C-o>`** until you see **🤖 agent**.
+Press **`<C-t>`** until you see **🤖 agent**.
 
 ### Step 3 — Ask Copilot to build the first version
 
@@ -109,6 +109,8 @@ Keep both agent files short, practical, and easy to understand.
 Because the plugin uses Copilot config discovery, these agents become available to the session after they are created.
 
 ### Step 6 — Start a fresh session so Copilot discovers the agents cleanly
+
+Note: you need to create a new session to trigger the agent discovery.
 
 ```vim
 :CopilotAgentNewSession

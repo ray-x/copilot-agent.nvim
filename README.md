@@ -103,7 +103,7 @@ flowchart TD
 
 The Go binary runs a **single process** that serves both the HTTP bridge (sessions, SSE, user-input, permissions) and an LSP server on stdio. Neovim starts it as an LSP client (`vim.lsp.start`), which owns the process lifetime. The Lua plugin communicates via `curl` shell-outs for all HTTP and SSE traffic.
 
-**Why curl?** Neovim has no built-in HTTP client. `vim.uv` (libuv) exposes raw TCP sockets but requires a manual HTTP/1.1 implementation — headers, chunked encoding, SSE framing. `curl` is universally available on macOS and Linux, handles SSE natively, and keeps the Lua layer thin and dependency-free. The per-request process-spawn overhead (~5–20 ms) is imperceptible against LLM response latency.
+**Why curl?** Neovim has no built-in HTTP client. `vim.uv` (libuv) exposes raw TCP sockets but requires a manual HTTP/1.1 implementation: headers, chunked encoding, SSE framing. `curl` is universally available on macOS and Linux, handles SSE natively, and keeps the Lua layer thin and dependency-free. The per-request process-spawn overhead (~5–20 ms) is imperceptible against LLM response latency.
 
 ---
 
@@ -127,10 +127,10 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 | Session persistence       | ✅ per working directory                                              | ❌                        |
 | Model switching (live)    | ✅ mid-session with tab-complete                                      | ✅                        |
 | LSP code actions          | ✅ (explain / fix / add tests / add docs)                             | ❌                        |
-| ACP / MCP support         | ❌                                                                    | ❌                        |
+| ACP / MCP support         | ❌ (MCP: experimental)                                                | ❓                        |
 | SSE streaming             | ✅ native                                                             | ✅                        |
 | Multi-provider            | ❌ (Copilot only, or Bring your own key)                              | ✅ (provider_resolver)    |
-| Dependencies              | codepilot-cli + go server + curl                                      | Pure Lua (plenary)        |
+| Dependencies              | codepilot-cli + go server + curl                                      | Pure Lua                  |
 
 **When to choose CopilotChat.nvim**: zero-binary Lua setup, just want Copilot chat with buffer context, happy with a Lua-managed tool loop.
 
@@ -149,8 +149,8 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 | Feature                      | **copilot-agent.nvim**                                                | codecompanion.nvim                        | avante.nvim                            |
 | ---------------------------- | --------------------------------------------------------------------- | ----------------------------------------- | -------------------------------------- |
 | Agent backend                | Copilot SDK (Go, embedded)                                            | ACP CLI agents or direct LLM adapters     | ACP CLI agents or direct LLM adapters  |
-| ACP support                  | ❌                                                                    | ✅ (Claude Code, Codex, Copilot CLI, …)   | ✅ (Zen Mode)                          |
-| MCP support                  | ❌                                                                    | ✅                                        | ✅                                     |
+| ACP support                  | ❌ (no plan)                                                          | ✅ (Claude Code, Codex, Copilot CLI, …)   | ✅ (Zen Mode)                          |
+| MCP support                  | ✅ (upstream)                                                         | ✅                                        | ✅                                     |
 | Multi-provider / BYO API key | ❌ (Copilot only)                                                     | ✅ (Anthropic, OpenAI, Gemini, Ollama, …) | ✅ (Claude, OpenAI, Gemini, Ollama, …) |
 | Tool-call execution          | SDK built-ins (file I/O, terminal, web search, ask_user, …)           | Lua tools + ACP agent tools               | Rust tools + ACP agent tools           |
 | Sub-agent / streaming events | ✅ SDK-native                                                         | ❌                                        | ❌                                     |
@@ -164,9 +164,9 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 | GitHub Copilot subscription  | Required                                                              | Optional (one of many providers)          | Optional (one of many providers)       |
 | Community / ecosystem        | Smaller                                                               | Large (adapters, prompts, extensions)     | Large (star count, active development) |
 
-**When to choose codecompanion / avante**: you want model flexibility, ACP access to Claude Code / Codex / Gemini CLI, MCP tool servers, or a large community ecosystem — and you're not exclusively on GitHub Copilot.
+**When to choose codecompanion / avante**: you want model flexibility, ACP access to Claude Code / Codex / Gemini CLI, or a large community ecosystem, and you're not exclusively on GitHub Copilot.
 
-**When to choose copilot-agent.nvim**: you're committed to GitHub Copilot and want the deepest possible SDK integration — native tools, permission management, session persistence, sub-agent events, and LSP code actions — without routing through an intermediate CLI.
+**When to choose copilot-agent.nvim**: you're committed to GitHub Copilot and want the deepest possible SDK integration: native tools, permission management, session persistence, sub-agent events, and LSP code actions, without routing through an intermediate CLI.
 
 ---
 

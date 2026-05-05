@@ -3313,6 +3313,9 @@ describe('diff command', function()
   local checkpoints
   local original_list
   local original_system
+  local original_cmd
+  local original_select
+  local original_filereadable
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
@@ -3326,16 +3329,21 @@ describe('diff command', function()
     checkpoints = require('copilot_agent.checkpoints')
     original_list = checkpoints.list
     original_system = vim.system
+    original_cmd = vim.cmd
+    original_select = vim.ui.select
+    original_filereadable = vim.fn.filereadable
   end)
 
   after_each(function()
     checkpoints.list = original_list
     vim.system = original_system
+    vim.cmd = original_cmd
+    vim.ui.select = original_select
+    vim.fn.filereadable = original_filereadable
   end)
 
-  it('uses checkpoint commits for /diff summaries', function()
-    local captured_args
-    local captured_cwd
+  it('uses parent->checkpoint commits for /diff vNNN summaries', function()
+    local captured_commands = {}
 
     checkpoints.list = function(session_id)
       assert_eq('session-123', session_id)
@@ -3346,10 +3354,16 @@ describe('diff command', function()
     end
 
     vim.system = function(args, opts)
-      captured_args = args
-      captured_cwd = opts.cwd
+      captured_commands[#captured_commands + 1] = { args = args, cwd = opts.cwd }
       return {
         wait = function()
+          if args[5] == 'show' then
+            return {
+              code = 0,
+              stdout = 'aaa111\n',
+              stderr = '',
+            }
+          end
           return {
             code = 0,
             stdout = 'lua/copilot_agent/init.lua | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)\n',
@@ -3366,19 +3380,289 @@ describe('diff command', function()
       '--no-pager',
       '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
       '--work-tree=/tmp/checkpoint-workspace',
+      'show',
+      '-s',
+      '--format=%P',
+      'bbb222',
+    }, captured_commands[1].args)
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
       'diff',
       '--stat',
       'aaa111',
       'bbb222',
       '--',
       '.',
-    }, captured_args)
-    assert_eq('/tmp/checkpoint-workspace', captured_cwd)
+    }, captured_commands[2].args)
+    assert_eq('/tmp/checkpoint-workspace', captured_commands[1].cwd)
+    assert_eq('/tmp/checkpoint-workspace', captured_commands[2].cwd)
     assert_eq('system', agent.state.entries[#agent.state.entries].kind)
     assert_eq(
-      'Checkpoint diff v001 -> v002:\nlua/copilot_agent/init.lua | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)',
+      'Checkpoint diff v002:\nlua/copilot_agent/init.lua | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)',
       agent.state.entries[#agent.state.entries].content
     )
+  end)
+
+  it('uses latest checkpoint parent->checkpoint commits for /diff with no args', function()
+    local captured_commands = {}
+
+    checkpoints.list = function(session_id)
+      assert_eq('session-123', session_id)
+      return {
+        { id = 'v001', commit = 'aaa111', prompt = 'first prompt' },
+        { id = 'v002', commit = 'bbb222', prompt = 'second prompt' },
+        { id = 'v003', commit = 'ccc333', prompt = 'third prompt' },
+      }
+    end
+
+    vim.system = function(args, opts)
+      captured_commands[#captured_commands + 1] = { args = args, cwd = opts.cwd }
+      return {
+        wait = function()
+          if args[5] == 'show' then
+            return {
+              code = 0,
+              stdout = 'bbb222\n',
+              stderr = '',
+            }
+          end
+          return {
+            code = 0,
+            stdout = 'lua/copilot_agent/slash.lua | 3 ++-\n1 file changed, 2 insertions(+), 1 deletion(-)\n',
+            stderr = '',
+          }
+        end,
+      }
+    end
+
+    assert_true(slash.execute('/diff'))
+
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'show',
+      '-s',
+      '--format=%P',
+      'ccc333',
+    }, captured_commands[1].args)
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'diff',
+      '--stat',
+      'bbb222',
+      'ccc333',
+      '--',
+      '.',
+    }, captured_commands[2].args)
+    assert_eq('/tmp/checkpoint-workspace', captured_commands[1].cwd)
+    assert_eq('/tmp/checkpoint-workspace', captured_commands[2].cwd)
+    assert_eq('system', agent.state.entries[#agent.state.entries].kind)
+    assert_eq(
+      'Checkpoint diff v003:\nlua/copilot_agent/slash.lua | 3 ++-\n1 file changed, 2 insertions(+), 1 deletion(-)',
+      agent.state.entries[#agent.state.entries].content
+    )
+  end)
+
+  it('opens Diffview when /diff is given --difftool Diffview', function()
+    local captured_cmds = {}
+
+    checkpoints.list = function(session_id)
+      assert_eq('session-123', session_id)
+      return {
+        { id = 'v001', commit = 'aaa111', prompt = 'first prompt' },
+        { id = 'v002', commit = 'bbb222', prompt = 'second prompt' },
+      }
+    end
+
+    vim.cmd = function(command)
+      captured_cmds[#captured_cmds + 1] = command
+    end
+
+    assert_true(slash.execute('/diff v001..v002 --difftool Diffview'))
+
+    assert.same({
+      'lcd ' .. vim.fn.fnameescape(checkpoints._session_dir('session-123') .. '/repo'),
+      'DiffviewOpen aaa111..bbb222',
+    }, captured_cmds)
+    assert_eq('system', agent.state.entries[#agent.state.entries].kind)
+    assert_eq('Opened Checkpoint diff v001 -> v002 in Diffview', agent.state.entries[#agent.state.entries].content)
+  end)
+
+  it('opens CodeDiff against a temporary checkpoint worktree', function()
+    local captured_cmds = {}
+    local system_commands = {}
+
+    checkpoints.list = function(session_id)
+      assert_eq('session-123', session_id)
+      return {
+        { id = 'v001', commit = 'aaa111', prompt = 'first prompt' },
+        { id = 'v002', commit = 'bbb222', prompt = 'second prompt' },
+      }
+    end
+
+    vim.system = function(args, opts)
+      system_commands[#system_commands + 1] = { args = args, cwd = opts.cwd }
+      return {
+        wait = function()
+          if args[5] == 'diff' and args[6] == '--name-only' then
+            return {
+              code = 0,
+              stdout = 'lua/copilot_agent/slash.lua\n',
+              stderr = '',
+            }
+          end
+          return {
+            code = 0,
+            stdout = '',
+            stderr = '',
+          }
+        end,
+      }
+    end
+
+    vim.ui.select = function(items, _, on_choice)
+      on_choice(items[1])
+    end
+
+    vim.fn.filereadable = function()
+      return 1
+    end
+
+    vim.cmd = function(command)
+      captured_cmds[#captured_cmds + 1] = command
+    end
+
+    assert_true(slash.execute('/diff --difftool CodeDiff v001..v002'))
+
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'diff',
+      '--name-only',
+      'aaa111',
+      'bbb222',
+      '--',
+      '.',
+    }, system_commands[1].args)
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'cat-file',
+      '-e',
+      'bbb222:lua/copilot_agent/slash.lua',
+    }, system_commands[2].args)
+    assert.same({
+      'git',
+      '-C',
+      checkpoints._session_dir('session-123') .. '/repo',
+      'worktree',
+      'add',
+      '--detach',
+      '--force',
+    }, { system_commands[3].args[1], system_commands[3].args[2], system_commands[3].args[3], system_commands[3].args[4], system_commands[3].args[5], system_commands[3].args[6], system_commands[3].args[7] })
+    assert_eq('bbb222', system_commands[3].args[9])
+    assert_true(system_commands[3].args[8]:find('/copilot%-agent/difftool%-worktrees/', 1) ~= nil)
+    assert.same({
+      'tabnew ' .. vim.fn.fnameescape(system_commands[3].args[8] .. '/lua/copilot_agent/slash.lua'),
+      'CodeDiff file aaa111',
+    }, captured_cmds)
+    assert_eq('system', agent.state.entries[#agent.state.entries].kind)
+    assert_eq('Opened Checkpoint diff v001 -> v002 in CodeDiff', agent.state.entries[#agent.state.entries].content)
+  end)
+
+  it('opens native vim diff when /diff is given -difftool with no name', function()
+    local captured_commands = {}
+    local native_cmds = {}
+
+    checkpoints.list = function(session_id)
+      assert_eq('session-123', session_id)
+      return {
+        { id = 'v001', commit = 'aaa111', prompt = 'first prompt' },
+        { id = 'v002', commit = 'bbb222', prompt = 'second prompt' },
+      }
+    end
+
+    vim.system = function(args, opts)
+      captured_commands[#captured_commands + 1] = { args = args, cwd = opts.cwd }
+      return {
+        wait = function()
+          if args[5] == 'diff' and args[6] == '--name-only' then
+            return {
+              code = 0,
+              stdout = 'lua/copilot_agent/slash.lua\n',
+              stderr = '',
+            }
+          end
+          return {
+            code = 0,
+            stdout = 'local before = true\n',
+            stderr = '',
+          }
+        end,
+      }
+    end
+
+    vim.ui.select = function(items, _, on_choice)
+      on_choice(items[1])
+    end
+
+    vim.cmd = function(command)
+      native_cmds[#native_cmds + 1] = command
+    end
+
+    assert_true(slash.execute('/diff -difftool v001..v002'))
+
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'diff',
+      '--name-only',
+      'aaa111',
+      'bbb222',
+      '--',
+      '.',
+    }, captured_commands[1].args)
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'show',
+      'aaa111:lua/copilot_agent/slash.lua',
+    }, captured_commands[2].args)
+    assert.same({
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoints._session_dir('session-123') .. '/repo/.git',
+      '--work-tree=/tmp/checkpoint-workspace',
+      'show',
+      'bbb222:lua/copilot_agent/slash.lua',
+    }, captured_commands[3].args)
+    assert.same({
+      'tabnew',
+      'diffthis',
+      'vnew',
+      'diffthis',
+    }, native_cmds)
+    assert_eq('/tmp/checkpoint-workspace', captured_commands[1].cwd)
+    assert_eq('/tmp/checkpoint-workspace', captured_commands[2].cwd)
+    assert_eq('/tmp/checkpoint-workspace', captured_commands[3].cwd)
+    assert_eq('system', agent.state.entries[#agent.state.entries].kind)
+    assert_eq('Opened Checkpoint diff v001 -> v002 in native vim diff', agent.state.entries[#agent.state.entries].content)
   end)
 end)
 

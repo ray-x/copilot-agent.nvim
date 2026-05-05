@@ -408,7 +408,7 @@ Supported slash commands:
 | `/compact`             | —                                    | Compact session history and refresh context usage                                   |
 | `/context`             | —                                    | Show current context-window token usage                                             |
 | `/cwd`                 | `[path]`                             | Show or change the working directory used for future session actions                |
-| `/diff`                | `[vNNN\|from to\|from..to]`          | Show a checkpoint diff summary; default compares the latest two checkpoints         |
+| `/diff`                | `[vNNN\|from to\|from..to] [--difftool [name]]` | Show a checkpoint diff summary (default shows latest checkpoint changes), or open a visual diff via `--difftool` (`Diffview`, `Fugitive`, or native vim diff when no name is provided) |
 | `/env`                 | —                                    | Show the current environment, service, session, model, and mode snapshot            |
 | `/fleet`               | `[prompt]`                           | Start fleet mode for the active session                                             |
 | `/init`                | `[args]`                             | Run the project initialization helper                                               |

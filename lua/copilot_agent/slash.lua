@@ -23,6 +23,7 @@ local window = require('copilot_agent.window')
 
 local state = cfg.state
 local notify = cfg.notify
+local log = cfg.log
 local append_entry = render.append_entry
 local refresh_statuslines = sl.refresh_statuslines
 local request = http.request
@@ -72,6 +73,14 @@ local function run_command(args, cwd)
     return nil, vim.trim(table.concat(output, '\n'))
   end
   return vim.trim(table.concat(output, '\n')), nil
+end
+
+local function shell_command_text(args)
+  local parts = {}
+  for _, arg in ipairs(args or {}) do
+    parts[#parts + 1] = vim.fn.shellescape(tostring(arg))
+  end
+  return table.concat(parts, ' ')
 end
 
 local function open_path(path)
@@ -609,6 +618,8 @@ local function cwd_command(args)
 end
 
 local function diff_command(args)
+  local empty_tree_hash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
   local function normalize_checkpoint_id(checkpoint_id)
     checkpoint_id = vim.trim(checkpoint_id or '')
     if checkpoint_id == '' then
@@ -637,12 +648,12 @@ local function diff_command(args)
   local function parse_diff_checkpoint_args(raw_args)
     raw_args = vim.trim(raw_args or '')
     if raw_args == '' then
-      return nil, nil, nil
+      return { mode = 'single-latest' }, nil
     end
 
     local from_arg, to_arg = raw_args:match('^(%S+)%.%.(%S+)$')
     if from_arg and to_arg then
-      return from_arg, to_arg, nil
+      return { mode = 'range', from_arg = from_arg, to_arg = to_arg }, nil
     end
 
     local tokens = {}
@@ -650,51 +661,406 @@ local function diff_command(args)
       tokens[#tokens + 1] = token
     end
     if #tokens == 1 then
-      return nil, tokens[1], nil
+      return { mode = 'single', checkpoint_arg = tokens[1] }, nil
     end
     if #tokens == 2 then
-      return tokens[1], tokens[2], nil
+      return { mode = 'range', from_arg = tokens[1], to_arg = tokens[2] }, nil
     end
-    return nil, nil, 'Usage: /diff [checkpoint] | /diff <from> <to> | /diff <from>..<to>'
+    return nil, 'Usage: /diff [checkpoint] | /diff <from> <to> | /diff <from>..<to> [--difftool [name]]'
   end
 
-  local function resolve_diff_checkpoints(checkpoint_items, raw_args)
-    if #checkpoint_items < 2 then
-      return nil, nil, 'Need at least two checkpoints to diff'
-    end
-
-    local from_arg, to_arg, parse_err = parse_diff_checkpoint_args(raw_args)
-    if parse_err then
-      return nil, nil, parse_err
-    end
-
-    if not to_arg then
-      return checkpoint_items[#checkpoint_items - 1], checkpoint_items[#checkpoint_items], nil
-    end
-
-    local to_idx, to_item = checkpoint_index_by_id(checkpoint_items, to_arg)
-    if not to_item then
-      return nil, nil, 'Checkpoint not found: ' .. to_arg
-    end
-
-    if not from_arg then
-      if to_idx <= 1 then
-        return nil, nil, 'Checkpoint ' .. to_item.id .. ' has no earlier checkpoint to compare'
+  local function parse_diff_args(raw_args)
+    local function looks_like_checkpoint_selector(value)
+      if type(value) ~= 'string' then
+        return false
       end
-      return checkpoint_items[to_idx - 1], to_item, nil
+      return value:match('^[vV]%d+$') ~= nil or value:match('^[vV]%d+%.%.[vV]%d+$') ~= nil
     end
 
-    local from_idx, from_item = checkpoint_index_by_id(checkpoint_items, from_arg)
+    local tokens = {}
+    for token in vim.trim(raw_args or ''):gmatch('%S+') do
+      tokens[#tokens + 1] = token
+    end
+
+    local checkpoint_tokens = {}
+    local difftool_requested = false
+    local difftool_name
+    local idx = 1
+    while idx <= #tokens do
+      local token = tokens[idx]
+      local inline_difftool = token:match('^%-%-difftool=(.+)$') or token:match('^%-difftool=(.+)$')
+      if inline_difftool then
+        if difftool_requested then
+          return nil, 'Only one difftool option is allowed'
+        end
+        difftool_requested = true
+        difftool_name = inline_difftool
+      elseif token == '--difftool' or token == '-difftool' then
+        if difftool_requested then
+          return nil, 'Only one difftool option is allowed'
+        end
+        difftool_requested = true
+        local next_token = tokens[idx + 1]
+        if next_token and not next_token:match('^%-') and not looks_like_checkpoint_selector(next_token) then
+          difftool_name = next_token
+          idx = idx + 1
+        end
+      else
+        checkpoint_tokens[#checkpoint_tokens + 1] = token
+      end
+      idx = idx + 1
+    end
+
+    local checkpoint_args, checkpoint_err = parse_diff_checkpoint_args(table.concat(checkpoint_tokens, ' '))
+    if checkpoint_err then
+      return nil, checkpoint_err
+    end
+
+    if type(difftool_name) == 'string' then
+      difftool_name = vim.trim(difftool_name)
+      if difftool_name == '' then
+        difftool_name = nil
+      end
+    end
+
+    return {
+      checkpoint = checkpoint_args,
+      difftool = {
+        requested = difftool_requested,
+        name = difftool_name,
+      },
+    }, nil
+  end
+
+  local function resolve_diff_checkpoints(checkpoint_items, parsed_checkpoint_args)
+    if parsed_checkpoint_args.mode == 'single-latest' then
+      if #checkpoint_items < 1 then
+        return nil, nil, nil, 'Need at least one checkpoint to diff'
+      end
+      return 'single', checkpoint_items[#checkpoint_items], nil, nil
+    end
+
+    if parsed_checkpoint_args.mode == 'single' then
+      local _, checkpoint_item = checkpoint_index_by_id(checkpoint_items, parsed_checkpoint_args.checkpoint_arg)
+      if not checkpoint_item then
+        return nil, nil, nil, 'Checkpoint not found: ' .. parsed_checkpoint_args.checkpoint_arg
+      end
+      return 'single', checkpoint_item, nil, nil
+    end
+
+    if #checkpoint_items < 2 then
+      return nil, nil, nil, 'Need at least two checkpoints to diff'
+    end
+
+    local to_idx, to_item = checkpoint_index_by_id(checkpoint_items, parsed_checkpoint_args.to_arg)
+    if not to_item then
+      return nil, nil, nil, 'Checkpoint not found: ' .. parsed_checkpoint_args.to_arg
+    end
+
+    if not parsed_checkpoint_args.from_arg then
+      if to_idx <= 1 then
+        return nil, nil, nil, 'Checkpoint ' .. to_item.id .. ' has no earlier checkpoint to compare'
+      end
+      return 'range', checkpoint_items[to_idx - 1], to_item, nil
+    end
+
+    local from_idx, from_item = checkpoint_index_by_id(checkpoint_items, parsed_checkpoint_args.from_arg)
     if not from_item then
-      return nil, nil, 'Checkpoint not found: ' .. from_arg
+      return nil, nil, nil, 'Checkpoint not found: ' .. parsed_checkpoint_args.from_arg
     end
     if from_idx == to_idx then
-      return nil, nil, 'Choose two different checkpoints'
+      return nil, nil, nil, 'Choose two different checkpoints'
     end
     if from_idx > to_idx then
       from_item, to_item = to_item, from_item
     end
-    return from_item, to_item, nil
+    return 'range', from_item, to_item, nil
+  end
+
+  local function open_external_difftool(tool_name, checkpoint_repo_dir, from_commit, to_commit)
+    local selected_tool = vim.trim(tool_name or '')
+    if selected_tool == '' then
+      return false, 'Diff tool name is required'
+    end
+
+    local range_spec = from_commit .. '..' .. to_commit
+    local lower_tool = selected_tool:lower()
+    local candidates
+    if lower_tool == 'diffview' or lower_tool == 'diffviewopen' then
+      candidates = {
+        {
+          command = 'DiffviewOpen ' .. range_spec,
+          preserve_cwd = true,
+        },
+      }
+    elseif lower_tool == 'fugitive' then
+      candidates = {
+        {
+          command = string.format('Git diff %s %s -- .', from_commit, to_commit),
+          preserve_cwd = false,
+        },
+      }
+    else
+      candidates = {
+        {
+          command = string.format('%s %s %s', selected_tool, from_commit, to_commit),
+          preserve_cwd = false,
+        },
+        {
+          command = string.format('%s %s', selected_tool, range_spec),
+          preserve_cwd = false,
+        },
+        {
+          command = string.format('%s %s', selected_tool, from_commit),
+          preserve_cwd = false,
+        },
+      }
+    end
+
+    local previous_cwd = vim.fn.getcwd()
+    local attempt_errors = {}
+    for _, candidate in ipairs(candidates) do
+      local ok_lcd, lcd_err = pcall(vim.cmd, 'lcd ' .. vim.fn.fnameescape(checkpoint_repo_dir))
+      if not ok_lcd then
+        return false, tostring(lcd_err)
+      end
+
+      log(string.format('/diff difftool command repo=%s cmd=%s', checkpoint_repo_dir, candidate.command), vim.log.levels.DEBUG)
+      local ok_cmd, cmd_err = pcall(vim.cmd, candidate.command)
+      if ok_cmd then
+        if not candidate.preserve_cwd then
+          local ok_restore, restore_err = pcall(vim.cmd, 'lcd ' .. vim.fn.fnameescape(previous_cwd))
+          if not ok_restore then
+            return false, 'Failed to restore working directory: ' .. tostring(restore_err)
+          end
+        end
+        return true, nil
+      end
+
+      local err_text = tostring(cmd_err)
+      attempt_errors[#attempt_errors + 1] = string.format('%s => %s', candidate.command, err_text)
+      log(string.format('/diff difftool failed repo=%s cmd=%s err=%s', checkpoint_repo_dir, candidate.command, err_text), vim.log.levels.DEBUG)
+      pcall(vim.cmd, 'lcd ' .. vim.fn.fnameescape(previous_cwd))
+    end
+
+    return false, attempt_errors[#attempt_errors] or ('Failed to run difftool ' .. selected_tool)
+  end
+
+  local function checkpoint_file_lines(checkpoint_git_dir, workspace, commit, path)
+    local show_cmd = {
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoint_git_dir,
+      '--work-tree=' .. workspace,
+      'show',
+      string.format('%s:%s', commit, path),
+    }
+    log(string.format('/diff git command cwd=%s cmd=%s', workspace, shell_command_text(show_cmd)), vim.log.levels.DEBUG)
+    local output, show_err = run_command(show_cmd, workspace)
+    if show_err then
+      local lowered = string.lower(show_err)
+      if lowered:find('does not exist in', 1, true) or lowered:find('exists on disk, but not in', 1, true) then
+        return {}
+      end
+      return nil, show_err
+    end
+    if output == '' then
+      return {}
+    end
+    return split_lines(output)
+  end
+
+  local function checkpoint_file_exists(checkpoint_git_dir, workspace, commit, path)
+    local exists_cmd = {
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoint_git_dir,
+      '--work-tree=' .. workspace,
+      'cat-file',
+      '-e',
+      string.format('%s:%s', commit, path),
+    }
+    log(string.format('/diff git command cwd=%s cmd=%s', workspace, shell_command_text(exists_cmd)), vim.log.levels.DEBUG)
+    local _, exists_err = run_command(exists_cmd, workspace)
+    return exists_err == nil
+  end
+
+  local function build_changed_files(checkpoint_git_dir, workspace, from_commit, to_commit)
+    local changed_cmd = {
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoint_git_dir,
+      '--work-tree=' .. workspace,
+      'diff',
+      '--name-only',
+      from_commit,
+      to_commit,
+      '--',
+      '.',
+    }
+    log(string.format('/diff git command cwd=%s cmd=%s', workspace, shell_command_text(changed_cmd)), vim.log.levels.DEBUG)
+    local changed_output, changed_err = run_command(changed_cmd, workspace)
+    if changed_err then
+      return nil, changed_err
+    end
+    if changed_output == '' then
+      return {}, nil
+    end
+    return vim.tbl_filter(function(path)
+      return type(path) == 'string' and path ~= ''
+    end, split_lines(changed_output)), nil
+  end
+
+  local function create_diff_worktree(checkpoint_repo_dir, commit)
+    local worktree_root = vim.fn.stdpath('state') .. '/copilot-agent/difftool-worktrees'
+    vim.fn.mkdir(worktree_root, 'p')
+    local suffix = tostring(now_ms()) .. '-' .. tostring(math.random(1000, 9999))
+    local worktree_dir = worktree_root .. '/' .. suffix
+    local add_cmd = {
+      'git',
+      '-C',
+      checkpoint_repo_dir,
+      'worktree',
+      'add',
+      '--detach',
+      '--force',
+      worktree_dir,
+      commit,
+    }
+    log(string.format('/diff git command cwd=%s cmd=%s', checkpoint_repo_dir, shell_command_text(add_cmd)), vim.log.levels.DEBUG)
+    local _, add_err = run_command(add_cmd, checkpoint_repo_dir)
+    if add_err then
+      return nil, add_err
+    end
+    return worktree_dir, nil
+  end
+
+  local function remove_diff_worktree(checkpoint_repo_dir, worktree_dir)
+    if type(worktree_dir) ~= 'string' or worktree_dir == '' then
+      return
+    end
+    local remove_cmd = {
+      'git',
+      '-C',
+      checkpoint_repo_dir,
+      'worktree',
+      'remove',
+      '--force',
+      worktree_dir,
+    }
+    log(string.format('/diff git command cwd=%s cmd=%s', checkpoint_repo_dir, shell_command_text(remove_cmd)), vim.log.levels.DEBUG)
+    run_command(remove_cmd, checkpoint_repo_dir)
+    pcall(vim.fn.delete, worktree_dir, 'rf')
+  end
+
+  local function open_codediff_tool(tool_name, checkpoint_repo_dir, checkpoint_git_dir, workspace, from_commit, to_commit, summary_label)
+    local changed_files, changed_err = build_changed_files(checkpoint_git_dir, workspace, from_commit, to_commit)
+    if changed_err then
+      return false, changed_err
+    end
+    if vim.tbl_isempty(changed_files) then
+      return false, 'No changed files available for CodeDiff'
+    end
+
+    vim.ui.select(changed_files, {
+      prompt = summary_label .. ' (' .. tool_name .. ' file)',
+    }, function(path)
+      if not path then
+        return
+      end
+
+      local anchor_commit = to_commit
+      local compare_commit = from_commit
+      if not checkpoint_file_exists(checkpoint_git_dir, workspace, anchor_commit, path) and checkpoint_file_exists(checkpoint_git_dir, workspace, from_commit, path) then
+        anchor_commit = from_commit
+        compare_commit = to_commit
+      end
+
+      local worktree_dir, worktree_err = create_diff_worktree(checkpoint_repo_dir, anchor_commit)
+      if worktree_err then
+        append_entry('error', 'Diff unavailable: ' .. worktree_err)
+        return
+      end
+
+      local file_path = worktree_dir .. '/' .. path
+      if vim.fn.filereadable(file_path) ~= 1 then
+        remove_diff_worktree(checkpoint_repo_dir, worktree_dir)
+        append_entry('error', 'Diff unavailable: file not found in checkpoint worktree: ' .. path)
+        return
+      end
+
+      log(string.format('/diff difftool open file tool=%s file=%s anchor=%s compare=%s', tool_name, file_path, anchor_commit, compare_commit), vim.log.levels.DEBUG)
+      vim.cmd('tabnew ' .. vim.fn.fnameescape(file_path))
+      local bufnr = vim.api.nvim_get_current_buf()
+      local group = vim.api.nvim_create_augroup('CopilotAgentDiffToolWorktree' .. tostring(bufnr), { clear = true })
+      local cleaned = false
+      local function cleanup()
+        if cleaned then
+          return
+        end
+        cleaned = true
+        remove_diff_worktree(checkpoint_repo_dir, worktree_dir)
+        pcall(vim.api.nvim_del_augroup_by_id, group)
+      end
+      vim.api.nvim_create_autocmd('User', {
+        group = group,
+        pattern = 'CodeDiffClose',
+        callback = cleanup,
+      })
+      vim.api.nvim_create_autocmd('BufWipeout', {
+        group = group,
+        buffer = bufnr,
+        callback = cleanup,
+      })
+
+      local code_diff_command = string.format('%s file %s', tool_name, compare_commit)
+      log(string.format('/diff difftool command repo=%s cmd=%s', worktree_dir, code_diff_command), vim.log.levels.DEBUG)
+      local ok_cmd, cmd_err = pcall(vim.cmd, code_diff_command)
+      if not ok_cmd then
+        cleanup()
+        append_entry('error', 'Diff unavailable: ' .. tostring(cmd_err))
+        return
+      end
+      append_entry('system', string.format('Opened %s in %s', summary_label, tool_name))
+    end)
+    return true, nil
+  end
+
+  local function configure_native_diff_buffer(bufnr, name, lines, filename)
+    vim.bo[bufnr].buftype = 'nofile'
+    vim.bo[bufnr].bufhidden = 'wipe'
+    vim.bo[bufnr].swapfile = false
+    vim.bo[bufnr].modifiable = true
+    vim.api.nvim_buf_set_name(bufnr, name)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    local ft = vim.filetype.match({ filename = filename }) or ''
+    if ft ~= '' then
+      vim.bo[bufnr].filetype = ft
+    end
+    vim.bo[bufnr].modifiable = false
+    vim.bo[bufnr].readonly = true
+  end
+
+  local function open_native_diff(path, from_commit_label, to_commit_label, from_lines, to_lines)
+    vim.cmd('tabnew')
+    local from_win = vim.api.nvim_get_current_win()
+    local from_buf = vim.api.nvim_get_current_buf()
+    configure_native_diff_buffer(from_buf, string.format('%s (%s)', path, from_commit_label), from_lines, path)
+    window.disable_folds(from_win)
+    vim.cmd('diffthis')
+
+    vim.cmd('vnew')
+    local to_win = vim.api.nvim_get_current_win()
+    local to_buf = vim.api.nvim_get_current_buf()
+    configure_native_diff_buffer(to_buf, string.format('%s (%s)', path, to_commit_label), to_lines, path)
+    window.disable_folds(to_win)
+    vim.cmd('diffthis')
+  end
+
+  local parsed_args, parse_err = parse_diff_args(args)
+  if parse_err then
+    append_entry('error', 'Diff unavailable: ' .. parse_err)
+    return true
   end
 
   if not state.session_id then
@@ -705,41 +1071,142 @@ local function diff_command(args)
   local checkpoint_items = vim.tbl_filter(function(item)
     return type(item) == 'table' and type(item.id) == 'string' and item.id ~= '' and type(item.commit) == 'string' and item.commit ~= ''
   end, checkpoints.list(state.session_id))
-  local from_checkpoint, to_checkpoint, range_err = resolve_diff_checkpoints(checkpoint_items, args)
+  local diff_mode, from_checkpoint, to_checkpoint, range_err = resolve_diff_checkpoints(checkpoint_items, parsed_args.checkpoint)
   if range_err then
     append_entry('error', 'Diff unavailable: ' .. range_err)
     return true
   end
 
-  local checkpoint_git_dir = checkpoints._session_dir(state.session_id) .. '/repo/.git'
+  local checkpoint_repo_dir = checkpoints._session_dir(state.session_id) .. '/repo'
+  local checkpoint_git_dir = checkpoint_repo_dir .. '/.git'
   local workspace = state.session_working_directory or working_directory()
   if type(workspace) ~= 'string' or workspace == '' then
     append_entry('error', 'Diff unavailable: working directory is not set')
     return true
   end
 
-  local output, diff_err = run_command({
+  local from_commit = from_checkpoint.commit
+  local to_commit = (to_checkpoint and to_checkpoint.commit) or from_checkpoint.commit
+  if diff_mode == 'single' then
+    local parent_cmd = {
+      'git',
+      '--no-pager',
+      '--git-dir=' .. checkpoint_git_dir,
+      '--work-tree=' .. workspace,
+      'show',
+      '-s',
+      '--format=%P',
+      from_checkpoint.commit,
+    }
+    log(string.format('/diff git command cwd=%s cmd=%s', workspace, shell_command_text(parent_cmd)), vim.log.levels.DEBUG)
+    local parent_output, parent_err = run_command(parent_cmd, workspace)
+    if parent_err then
+      append_entry('error', 'Diff failed: ' .. parent_err)
+      return true
+    end
+    local parent_commit = vim.trim(parent_output or ''):match('^(%S+)')
+    from_commit = parent_commit or empty_tree_hash
+    to_commit = from_checkpoint.commit
+  end
+
+  local summary_label
+  if diff_mode == 'single' then
+    summary_label = string.format('Checkpoint diff %s', from_checkpoint.id)
+  else
+    summary_label = string.format('Checkpoint diff %s -> %s', from_checkpoint.id, to_checkpoint.id)
+  end
+
+  if parsed_args.difftool.requested then
+    if parsed_args.difftool.name then
+      local named_tool = vim.trim(parsed_args.difftool.name)
+      if named_tool:lower() == 'codediff' then
+        log(string.format('/diff launch mode=%s from=%s to=%s difftool=%s', diff_mode, from_commit, to_commit, named_tool), vim.log.levels.DEBUG)
+        local ok_tool, tool_err = open_codediff_tool(named_tool, checkpoint_repo_dir, checkpoint_git_dir, workspace, from_commit, to_commit, summary_label)
+        if not ok_tool then
+          append_entry('error', 'Diff unavailable: ' .. tool_err)
+        end
+        return true
+      end
+
+      log(string.format('/diff launch mode=%s from=%s to=%s difftool=%s', diff_mode, from_commit, to_commit, parsed_args.difftool.name), vim.log.levels.DEBUG)
+      local ok_tool, tool_err = open_external_difftool(parsed_args.difftool.name, checkpoint_repo_dir, from_commit, to_commit)
+      if not ok_tool then
+        append_entry('error', 'Diff unavailable: ' .. tool_err)
+        return true
+      end
+      append_entry('system', string.format('Opened %s in %s', summary_label, parsed_args.difftool.name))
+      return true
+    end
+
+    local changed_files, changed_err = build_changed_files(checkpoint_git_dir, workspace, from_commit, to_commit)
+    if changed_err then
+      append_entry('error', 'Diff failed: ' .. changed_err)
+      return true
+    end
+    if vim.tbl_isempty(changed_files) then
+      if diff_mode == 'single' then
+        append_entry('system', string.format('No differences in checkpoint %s', from_checkpoint.id))
+        return true
+      end
+      append_entry('system', string.format('No differences between checkpoints %s and %s', from_checkpoint.id, to_checkpoint.id))
+      return true
+    end
+
+    vim.ui.select(changed_files, {
+      prompt = summary_label .. ' (native diff file)',
+    }, function(path)
+      if not path then
+        return
+      end
+
+      log(string.format('/diff native vim diff file=%s from=%s to=%s', path, from_commit, to_commit), vim.log.levels.DEBUG)
+      local from_lines, from_err = checkpoint_file_lines(checkpoint_git_dir, workspace, from_commit, path)
+      if from_err then
+        append_entry('error', 'Diff failed: ' .. from_err)
+        return
+      end
+
+      local to_lines, to_err = checkpoint_file_lines(checkpoint_git_dir, workspace, to_commit, path)
+      if to_err then
+        append_entry('error', 'Diff failed: ' .. to_err)
+        return
+      end
+
+      local from_label = diff_mode == 'single' and (from_commit == empty_tree_hash and 'empty' or 'parent') or from_checkpoint.id
+      local to_label = to_checkpoint and to_checkpoint.id or from_checkpoint.id
+      open_native_diff(path, from_label, to_label, from_lines, to_lines)
+      append_entry('system', string.format('Opened %s in native vim diff', summary_label))
+    end)
+    return true
+  end
+
+  local stat_cmd = {
     'git',
     '--no-pager',
     '--git-dir=' .. checkpoint_git_dir,
     '--work-tree=' .. workspace,
     'diff',
     '--stat',
-    from_checkpoint.commit,
-    to_checkpoint.commit,
+    from_commit,
+    to_commit,
     '--',
     '.',
-  }, workspace)
+  }
+  log(string.format('/diff git command cwd=%s cmd=%s', workspace, shell_command_text(stat_cmd)), vim.log.levels.DEBUG)
+  local output, diff_err = run_command(stat_cmd, workspace)
   if diff_err then
     append_entry('error', 'Diff failed: ' .. diff_err)
     return true
   end
   if output == '' then
+    if diff_mode == 'single' then
+      append_entry('system', string.format('No differences in checkpoint %s', from_checkpoint.id))
+      return true
+    end
     append_entry('system', string.format('No differences between checkpoints %s and %s', from_checkpoint.id, to_checkpoint.id))
     return true
   end
-
-  append_entry('system', string.format('Checkpoint diff %s -> %s:\n%s', from_checkpoint.id, to_checkpoint.id, output))
+  append_entry('system', string.format('%s:\n%s', summary_label, output))
   return true
 end
 

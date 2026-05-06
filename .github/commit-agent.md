@@ -14,9 +14,10 @@ Edit the commands and guidance below to match your workflow.
 ## Commit message preferences
 
 - use conventional-commit prefixes when they fit the staged diff
-- keep the subject line specific and imperative
+- keep the subject line specific, imperative, and present tense
 - keep the subject line under 72 characters when practical
 - add a body for non-obvious rationale, follow-up work, or notable tradeoffs
+- when the user asks to commit, apply the generated message with a non-interactive `git commit`
 
 ## Feedback expectations
 

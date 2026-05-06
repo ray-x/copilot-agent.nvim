@@ -5,7 +5,7 @@ GitHub Copilot's agentic runtime, natively in Neovim. A lightweight Go bridge to
 ## Demo video
 
 One minute video to create a terminal version of flappy bird:
-https://gist.github.com/user-attachments/assets/5091ddcb-84f8-4c1a-b8a7-ea4bef6393f4
+https://gist.github.com/user-attachments/assets/5091ddcb-84f8-4c1a-b8a7-ea4bef6393f4.mp4
 
 ## Advanced Agentic Features
 

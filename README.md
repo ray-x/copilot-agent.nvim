@@ -398,41 +398,41 @@ The input buffer supports built-in slash commands handled by the plugin before t
 
 Supported slash commands:
 
-| Command                | Arguments                            | What it does                                                                        |
-| ---------------------- | ------------------------------------ | ----------------------------------------------------------------------------------- |
-| `/add-dir`             | `[path]`                             | Add a directory to the session's allowed-directory list; prompts if omitted         |
-| `/agent`               | `[name\|default\|clear]`             | Pick a discovered custom agent, or reset back to the default agent                  |
-| `/allow-all`           | —                                    | Switch permission mode to `approve-all`                                             |
-| `/ask`                 | `[question]`                         | Ask a side question in a temporary read-only session and show the answer separately |
-| `/clear`               | —                                    | Clear the current conversation and start a fresh session                            |
-| `/compact`             | —                                    | Compact session history and refresh context usage                                   |
-| `/context`             | —                                    | Show current context-window token usage                                             |
-| `/cwd`                 | `[path]`                             | Show or change the working directory used for future session actions                |
-| `/diff`                | `[vNNN\|from to\|from..to] [--difftool [name]]` | Show a checkpoint diff summary (default shows latest checkpoint changes), or open a visual diff via `--difftool` (`Diffview`, `Fugitive`, or native vim diff when no name is provided) |
-| `/env`                 | —                                    | Show the current environment, service, session, model, and mode snapshot            |
-| `/fleet`               | `[prompt]`                           | Start fleet mode for the active session                                             |
-| `/init`                | `[args]`                             | Run the project initialization helper                                               |
-| `/instructions`        | `[name]`                             | Open a discovered instructions file from the repository                             |
-| `/list-dir`            | —                                    | List allowed directories for the current session                                    |
-| `/list-dirs`           | —                                    | Alias for `/list-dir`                                                               |
-| `/lsp`                 | `[create\|status\|show\|test\|help]` | Bootstrap or inspect project LSP config for Copilot CLI                             |
-| `/mcp`                 | `[name]`                             | Open a discovered MCP config file                                                   |
-| `/model`               | `[id]`                               | Pick or switch the active model                                                     |
-| `/new`                 | —                                    | Start a fresh session                                                               |
-| `/plan`                | `[draft text]`                       | Switch the input buffer to plan mode and optionally prefill the prompt              |
-| `/rename`              | `[name]`                             | Rename the active session                                                           |
-| `/research`            | `[topic]`                            | Send a research-oriented prompt that can use GitHub and web sources                 |
-| `/reset-allowed-tools` | —                                    | Clear remembered tool approvals for the current session                             |
-| `/resume`              | `[session-id]`                       | Resume or switch to another saved session; prompts if omitted                       |
-| `/review`              | `[focus]`                            | Ask Copilot to review the current changes, optionally with extra focus text         |
-| `/rewind`              | `[checkpoint]`                       | Rewind the session to a checkpoint such as `v003`                                   |
-| `/search`              | `[text]`                             | Search the current transcript and jump to a matching entry                          |
-| `/session`             | `[session-id\|new\|clear]`           | Switch sessions, or use `new` / `clear` as shortcuts                                |
-| `/share`               | `[markdown\|html] [path]`            | Export the current transcript as Markdown or HTML                                   |
-| `/skills`              | `[name]`                             | Open a discovered skill from the repository                                         |
-| `/tasks`               | `[filter]`                           | Show background task and sub-agent activity                                         |
-| `/undo`                | —                                    | Restore the latest checkpoint for the current session                               |
-| `/usage`               | —                                    | Show session usage, discovery counts, and context-window stats                      |
+| Command                | Arguments                                       | What it does                                                                                                                                                                           |
+| ---------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/add-dir`             | `[path]`                                        | Add a directory to the session's allowed-directory list; prompts if omitted                                                                                                            |
+| `/agent`               | `[name\|default\|clear]`                        | Pick a discovered custom agent, or reset back to the default agent                                                                                                                     |
+| `/allow-all`           | —                                               | Switch permission mode to `approve-all`                                                                                                                                                |
+| `/ask`                 | `[question]`                                    | Ask a side question in a temporary read-only session and show the answer separately                                                                                                    |
+| `/clear`               | —                                               | Clear the current conversation and start a fresh session                                                                                                                               |
+| `/compact`             | —                                               | Compact session history and refresh context usage                                                                                                                                      |
+| `/context`             | —                                               | Show current context-window token usage                                                                                                                                                |
+| `/cwd`                 | `[path]`                                        | Show or change the working directory used for future session actions                                                                                                                   |
+| `/diff`                | `[vNNN\|from to\|from..to] [--difftool [name]]` | Show a checkpoint diff summary (default shows latest checkpoint changes), or open a visual diff via `--difftool` (`CodeDiff`, `Fugitive`, or native vim diff when no name is provided) |
+| `/env`                 | —                                               | Show the current environment, service, session, model, and mode snapshot                                                                                                               |
+| `/fleet`               | `[prompt]`                                      | Start fleet mode for the active session                                                                                                                                                |
+| `/init`                | `[args]`                                        | Run the project initialization helper                                                                                                                                                  |
+| `/instructions`        | `[name]`                                        | Open a discovered instructions file from the repository                                                                                                                                |
+| `/list-dir`            | —                                               | List allowed directories for the current session                                                                                                                                       |
+| `/list-dirs`           | —                                               | Alias for `/list-dir`                                                                                                                                                                  |
+| `/lsp`                 | `[create\|status\|show\|test\|help]`            | Bootstrap or inspect project LSP config for Copilot CLI                                                                                                                                |
+| `/mcp`                 | `[name]`                                        | Open a discovered MCP config file                                                                                                                                                      |
+| `/model`               | `[id]`                                          | Pick or switch the active model                                                                                                                                                        |
+| `/new`                 | —                                               | Start a fresh session                                                                                                                                                                  |
+| `/plan`                | `[draft text]`                                  | Switch the input buffer to plan mode and optionally prefill the prompt                                                                                                                 |
+| `/rename`              | `[name]`                                        | Rename the active session                                                                                                                                                              |
+| `/research`            | `[topic]`                                       | Send a research-oriented prompt that can use GitHub and web sources                                                                                                                    |
+| `/reset-allowed-tools` | —                                               | Clear remembered tool approvals for the current session                                                                                                                                |
+| `/resume`              | `[session-id]`                                  | Resume or switch to another saved session; prompts if omitted                                                                                                                          |
+| `/review`              | `[focus]`                                       | Ask Copilot to review the current changes, optionally with extra focus text                                                                                                            |
+| `/rewind`              | `[checkpoint]`                                  | Rewind the session to a checkpoint such as `v003`                                                                                                                                      |
+| `/search`              | `[text]`                                        | Search the current transcript and jump to a matching entry                                                                                                                             |
+| `/session`             | `[session-id\|new\|clear]`                      | Switch sessions, or use `new` / `clear` as shortcuts                                                                                                                                   |
+| `/share`               | `[markdown\|html] [path]`                       | Export the current transcript as Markdown or HTML                                                                                                                                      |
+| `/skills`              | `[name]`                                        | Open a discovered skill from the repository                                                                                                                                            |
+| `/tasks`               | `[filter]`                                      | Show background task and sub-agent activity                                                                                                                                            |
+| `/undo`                | —                                               | Restore the latest checkpoint for the current session                                                                                                                                  |
+| `/usage`               | —                                               | Show session usage, discovery counts, and context-window stats                                                                                                                         |
 
 ### Attaching Files and Images
 
@@ -605,7 +605,7 @@ chat window
 🤖agent (loop·approve-all)  ✅approve-all  ✅ready  default  󱃕 Instruction: 0 󱜙 Agent: 0 󱨚 Skill: 0  MCP: 0  session: [#20260501 0905]
 ```
 
-As the session becomes active, the statusline updates live with readiness (`⏳working`, `📝sync`, `🧩2 tasks`, `❓input`, `✅ready`), the current tool/intent, token usage, pending attachments, and the active session label.
+As the session becomes active, the statusline updates live with readiness (`⏳working`, `📝sync`, `🧩2 tasks`, `❓input`, `✅ready`), the current tool/intent, context tokens, quota remaining from `assistant.usage` events, pending attachments, and the active session label.
 
 ### Use statusline API
 
@@ -621,7 +621,7 @@ require("lualine").setup {
       require("copilot_agent").statusline_attachments, -- 📎3 (when attachments pending)
       require("copilot_agent").statusline_tool,        -- 🔧 read_file (active tool)
       require("copilot_agent").statusline_intent,      -- current agent intent
-      require("copilot_agent").statusline_context,     -- 12k/200k (token usage)
+      require("copilot_agent").statusline_context,     -- 12k/200k plus quota remaining when available
     }
   }
 }

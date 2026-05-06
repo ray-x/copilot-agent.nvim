@@ -22,6 +22,8 @@ local DEFAULT_REASONING_MAX_LINES = 5 -- Show a short rolling reasoning preview 
 local MAX_REASONING_PREVIEW_LINES = 20 -- Cap reasoning preview growth so the overlay cannot take over the entire window.
 local LOG_PREVIEW_MIN_CHARS = 16 -- Preserve enough context for truncated log previews to stay informative.
 local ACTIVITY_PREVIEW_MAX_WIDTH = 32 -- Keep activity snippets compact enough for statusline and overlay summaries.
+local USAGE_ACTIVITY_PREVIEW_MAX_WIDTH = 64 -- Usage summaries need more room so cost/tokens/quota stay visible in collapsed activity lines.
+local REPORT_INTENT_ACTIVITY_PREVIEW_MAX_WIDTH = 64 -- Keep report_intent summaries readable when they are the highest-priority visible activity.
 local OVERLAY_WRAP_MIN_WIDTH = 20 -- Prevent pathological wrapping in very narrow windows.
 local OVERLAY_WRAP_FALLBACK_WIDTH = 80 -- Use a terminal-friendly default width before the chat window is available.
 local OVERLAY_MIN_WINDOW_WIDTH = 24 -- Reserve enough width for overlay headings and short tool labels.
@@ -219,7 +221,58 @@ local function tool_is_displayable_in_overlay(name)
   return false
 end
 
-local function activity_overlay_lines(_)
+local function tail_lines(lines, max_lines)
+  max_lines = math.max(0, math.floor(tonumber(max_lines) or 0))
+  if max_lines <= 0 or #lines == 0 then
+    return {}
+  end
+  if #lines <= max_lines then
+    return lines
+  end
+
+  local trimmed = {}
+  for idx = #lines - max_lines + 1, #lines do
+    trimmed[#trimmed + 1] = lines[idx]
+  end
+  return trimmed
+end
+
+local function normalize_activity_overlay_result_lines(text)
+  text = type(text) == 'string' and text:gsub('\r\n?', '\n') or ''
+  if text == '' then
+    return {}
+  end
+
+  local lines = {}
+  for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
+    line = sanitize_display_text(line)
+    if line ~= '' then
+      lines[#lines + 1] = line
+    end
+  end
+  return lines
+end
+
+local function wrap_activity_overlay_result_lines(lines)
+  local wrapped = {}
+  local max_w = activity_overlay_width()
+  for _, line in ipairs(lines or {}) do
+    local segments = wrap_overlay_text(line, max_w, {
+      collapse_whitespace = false,
+      min_width = 1,
+      trim_chunks = true,
+    })
+    if #segments == 0 then
+      segments = { '' }
+    end
+    for _, segment in ipairs(segments) do
+      wrapped[#wrapped + 1] = segment
+    end
+  end
+  return wrapped
+end
+
+local function activity_overlay_lines(max_lines)
   local overlay_tool = state.overlay_tool_display
   if type(overlay_tool) ~= 'table' or not tool_is_displayable_in_overlay(overlay_tool.tool) then
     return {}
@@ -242,7 +295,17 @@ local function activity_overlay_lines(_)
     return {}
   end
   wrapped[1] = prefix .. wrapped[1]
-  return wrapped
+
+  local result_lines = wrap_activity_overlay_result_lines(normalize_activity_overlay_result_lines(overlay_tool.result_text))
+  if type(max_lines) == 'number' then
+    max_lines = math.max(1, math.floor(max_lines))
+    if #wrapped >= max_lines then
+      return { unpack(wrapped, 1, max_lines) }
+    end
+    result_lines = tail_lines(result_lines, max_lines - #wrapped)
+  end
+
+  return vim.list_extend(wrapped, result_lines)
 end
 
 local function append_overlay_chunk(chunks, text, highlight)
@@ -1256,24 +1319,57 @@ local function is_activity_detail_line(line)
   return false
 end
 
+local function is_report_intent_activity_line(line)
+  if type(line) ~= 'string' or line == '' then
+    return false
+  end
+  return line:match('^Used%s+report_intent$') ~= nil
+    or line:match('^Used%s+report_intent%s+') ~= nil
+end
+
 local function activity_preview_text(line)
   if type(line) ~= 'string' or line == '' then
     return ''
   end
+  if is_report_intent_activity_line(line) then
+    return vim.trim(line)
+  end
+  if line:match('^Usage:%s+') then
+    return vim.trim((line:gsub('^Usage:%s*', '', 1)))
+  end
   local detail = line:match('^[^—]+ — (.+)$')
   return vim.trim(detail or line)
+end
+
+local function activity_preview_priority(line)
+  if type(line) ~= 'string' or line == '' then
+    return 0
+  end
+  if line:match('^Usage:%s+') then
+    return 1
+  end
+  if is_report_intent_activity_line(line) then
+    return 3
+  end
+  if is_activity_detail_line(line) then
+    return 4
+  end
+  return 2
 end
 
 local function collapsed_activity_line(content)
   local lines = normalize_content_lines(split_lines(sanitize_display_text(content)))
   local count = 0
   local preview_source
+  local preview_priority = 0
   local fallback_line
   for _, line in ipairs(lines) do
     if type(line) == 'string' and line ~= '' then
       count = count + 1
       fallback_line = fallback_line or line
-      if not preview_source and is_activity_detail_line(line) then
+      local priority = activity_preview_priority(line)
+      if not preview_source or priority > preview_priority then
+        preview_priority = priority
         preview_source = line
       end
     end
@@ -1283,7 +1379,14 @@ local function collapsed_activity_line(content)
     return 'Activity: hidden'
   end
   local count_summary = count == 1 and '1 item hidden' or tostring(count) .. ' items hidden'
-  local preview = truncate_display_text(activity_preview_text(preview_source or fallback_line), ACTIVITY_PREVIEW_MAX_WIDTH)
+  local source = preview_source or fallback_line
+  local preview_max_width = ACTIVITY_PREVIEW_MAX_WIDTH
+  if source and source:match('^Usage:%s+') then
+    preview_max_width = USAGE_ACTIVITY_PREVIEW_MAX_WIDTH
+  elseif is_report_intent_activity_line(source) then
+    preview_max_width = REPORT_INTENT_ACTIVITY_PREVIEW_MAX_WIDTH
+  end
+  local preview = truncate_display_text(activity_preview_text(source), preview_max_width)
   if preview == '' then
     return 'Activity: ' .. count_summary
   end
@@ -1362,6 +1465,84 @@ local function append_markdown_field(lines, label, value)
   lines[#lines + 1] = string.format('- **%s:** %s', label, value)
 end
 
+local function format_activity_metric(value, decimals)
+  local n = tonumber(value)
+  if not n then
+    return nil
+  end
+
+  decimals = math.max(0, math.floor(tonumber(decimals) or 0))
+  if decimals <= 0 then
+    return tostring(math.floor(n + 0.5))
+  end
+
+  local rendered = string.format('%.' .. tostring(decimals) .. 'f', n)
+  rendered = rendered:gsub('(%..-)0+$', '%1'):gsub('%.$', '')
+  return rendered
+end
+
+local function format_activity_percentage(value)
+  local n = tonumber(value)
+  if not n then
+    return nil
+  end
+  if n >= 0 and n <= 1 then
+    n = n * 100
+  end
+
+  local rounded = math.floor(n + 0.5)
+  if math.abs(n - rounded) < 0.05 then
+    return tostring(rounded) .. '%'
+  end
+  return string.format('%.1f%%', n)
+end
+
+local function append_usage_details(lines, item, usage_idx)
+  local usage = type(item) == 'table' and type(item.usage) == 'table' and item.usage or nil
+  if not usage then
+    return false
+  end
+
+  append_markdown_heading(lines, string.format('## Usage %d — %s', usage_idx, sanitize_display_text(usage.model or item.summary or ('Model call ' .. tostring(usage_idx)))))
+  append_markdown_field(lines, 'Model', usage.model)
+  append_markdown_field(lines, 'Initiator', usage.initiator)
+  append_markdown_field(lines, 'Reasoning effort', usage.reasoning_effort)
+  append_markdown_field(lines, 'Cost', format_activity_metric(usage.cost, 2))
+  append_markdown_field(lines, 'Input tokens', format_activity_metric(usage.input_tokens, 0))
+  append_markdown_field(lines, 'Output tokens', format_activity_metric(usage.output_tokens, 0))
+  append_markdown_field(lines, 'Reasoning tokens', format_activity_metric(usage.reasoning_tokens, 0))
+  append_markdown_field(lines, 'Cache read tokens', format_activity_metric(usage.cache_read_tokens, 0))
+  append_markdown_field(lines, 'Cache write tokens', format_activity_metric(usage.cache_write_tokens, 0))
+  append_markdown_field(lines, 'Duration', usage.duration_ms and (format_activity_metric(usage.duration_ms, 0) .. ' ms') or nil)
+  append_markdown_field(lines, 'Time to first token', usage.ttft_ms and (format_activity_metric(usage.ttft_ms, 1) .. ' ms') or nil)
+  append_markdown_field(lines, 'Inter-token latency', usage.inter_token_latency_ms and (format_activity_metric(usage.inter_token_latency_ms, 2) .. ' ms') or nil)
+
+  local quotas = usage.quotas or {}
+  if #quotas > 0 then
+    append_markdown_heading(lines, '### Quotas')
+    for _, quota in ipairs(quotas) do
+      local parts = {}
+      local remaining = format_activity_percentage(quota.remaining_percentage)
+      if remaining then
+        parts[#parts + 1] = remaining .. ' remaining'
+      end
+      if quota.is_unlimited == true then
+        parts[#parts + 1] = 'unlimited entitlement'
+      elseif quota.used_requests ~= nil or quota.entitlement_requests ~= nil then
+        parts[#parts + 1] = string.format('%s / %s used', format_activity_metric(quota.used_requests, 0) or '0', format_activity_metric(quota.entitlement_requests, 0) or '?')
+      end
+      if quota.overage and quota.overage > 0 then
+        parts[#parts + 1] = 'overage ' .. (format_activity_metric(quota.overage, 1) or tostring(quota.overage))
+      end
+      if quota.reset_date then
+        parts[#parts + 1] = 'resets ' .. sanitize_display_text(quota.reset_date)
+      end
+      lines[#lines + 1] = string.format('- **%s:** %s', sanitize_display_text(quota.id or 'quota'), table.concat(parts, ', '))
+    end
+  end
+  return true
+end
+
 local function build_activity_details_lines(entry)
   local lines = { '# Activity details' }
   local summary = normalize_activity_detail_text(entry and entry.content or '')
@@ -1374,6 +1555,7 @@ local function build_activity_details_lines(entry)
 
   local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
   local tool_count = 0
+  local usage_count = 0
   for _, item in ipairs(items) do
     if type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output or item.complete_data) then
       tool_count = tool_count + 1
@@ -1395,9 +1577,12 @@ local function build_activity_details_lines(entry)
       append_markdown_code_block(lines, item.output_text and '### Output' or '### Partial output', item.output_text or item.partial_output)
       append_markdown_inspect_block(lines, '### Telemetry', item.tool_telemetry)
     end
+    if append_usage_details(lines, item, usage_count + 1) then
+      usage_count = usage_count + 1
+    end
   end
 
-  if summary == nil and tool_count == 0 then
+  if summary == nil and tool_count == 0 and usage_count == 0 then
     lines[#lines + 1] = ''
     lines[#lines + 1] = 'No activity details available.'
   end
@@ -2587,6 +2772,7 @@ function M.clear_transcript()
   state.overlay_tool_display = nil
   state.overlay_tool_queue = {}
   state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+  state.post_tool_use_hooks = {}
   state.recent_activity_lines = {}
   state.recent_activity_items = {}
   state.recent_activity_tool_calls = {}
@@ -2597,6 +2783,7 @@ function M.clear_transcript()
   state.chat_tail_spacer_lines = 0
   state.overlay_gutter_restore_view = nil
   state.current_intent = nil
+  state.last_assistant_usage = nil
   state.context_tokens = nil
   state.context_limit = nil
   state.history_checkpoint_ids = nil

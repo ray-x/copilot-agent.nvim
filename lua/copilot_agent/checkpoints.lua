@@ -490,6 +490,7 @@ local function apply_snapshot(snapshot)
   state.overlay_tool_display = nil
   state.overlay_tool_queue = {}
   state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+  state.post_tool_use_hooks = {}
   state.recent_activity_lines = {}
   state.recent_activity_items = {}
   state.recent_activity_tool_calls = {}
@@ -502,6 +503,7 @@ local function apply_snapshot(snapshot)
   state.active_assistant_merge_group = nil
   state.assistant_merge_group_serial = 0
   state.current_intent = nil
+  state.last_assistant_usage = nil
   state.context_tokens = nil
   state.context_limit = nil
   state.chat_busy = false

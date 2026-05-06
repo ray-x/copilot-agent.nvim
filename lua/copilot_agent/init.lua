@@ -64,6 +64,7 @@ function M.setup(opts)
   state.overlay_tool_display = nil
   state.overlay_tool_queue = {}
   state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+  state.post_tool_use_hooks = {}
   state.recent_activity_lines = {}
   state.recent_activity_items = {}
   state.recent_activity_tool_calls = {}
@@ -77,6 +78,7 @@ function M.setup(opts)
   state.reasoning_entry_key = nil
   state.reasoning_text = ''
   state.reasoning_lines = {}
+  state.last_assistant_usage = nil
   state.dashboard_winid = nil
   state.dashboard_prompt_bufnr = nil
   state.dashboard_prompt_winid = nil
@@ -324,6 +326,9 @@ M.statusline_model = sl.statusline_model
 M.statusline_busy = sl.statusline_busy
 M.statusline_attachments = sl.statusline_attachments
 M.statusline_permission = sl.statusline_permission
+M.statusline_tool = sl.statusline_tool
+M.statusline_intent = sl.statusline_intent
+M.statusline_context = sl.statusline_context
 M.statusline = sl.statusline_component
 
 -- ── LSP / install / clipboard (delegated to lsp module) ──────────────────────

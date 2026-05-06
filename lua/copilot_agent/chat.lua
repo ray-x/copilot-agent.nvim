@@ -960,6 +960,7 @@ function M.ask(prompt, opts)
           state.overlay_tool_display = nil
           state.overlay_tool_queue = {}
           state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+          state.post_tool_use_hooks = {}
           state.recent_activity_lines = {}
           state.recent_activity_items = {}
           state.recent_activity_tool_calls = {}

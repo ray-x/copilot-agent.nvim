@@ -538,6 +538,69 @@ local function overlay_run_id_for_tool_call(tool_call_id)
   return nil
 end
 
+local function overlay_run_id_for_tool_identity(tool_call_id, tool_name)
+  local run_id = overlay_run_id_for_tool_call(tool_call_id)
+  if run_id then
+    return run_id
+  end
+
+  local current = state.overlay_tool_display
+  if not current then
+    return nil
+  end
+
+  local current_tool = sanitize_permission_text(current.tool)
+  local desired_tool = sanitize_permission_text(tool_name)
+  if current_tool and desired_tool and current_tool:lower() == desired_tool:lower() then
+    return current.run_id
+  end
+  if not desired_tool and not tool_call_id then
+    return current.run_id
+  end
+  return nil
+end
+
+local function begin_overlay_tool_post_result(run_id, hook_invocation_id)
+  if type(run_id) ~= 'number' then
+    return
+  end
+
+  local current = state.overlay_tool_display
+  if not current or current.run_id ~= run_id then
+    return
+  end
+
+  cancel_overlay_tool_schedule()
+  current.last_activity_ms = overlay_now_ms()
+  current.post_tool_use_pending = true
+  current.post_tool_use_hook_invocation_id = sanitize_permission_text(hook_invocation_id)
+end
+
+local function set_overlay_tool_result_text(run_id, result_text)
+  if type(run_id) ~= 'number' then
+    return
+  end
+
+  local current = state.overlay_tool_display
+  if not current or current.run_id ~= run_id then
+    return
+  end
+
+  current.last_activity_ms = overlay_now_ms()
+  current.post_tool_use_pending = nil
+  current.post_tool_use_hook_invocation_id = nil
+  if type(result_text) == 'string' then
+    result_text = result_text:gsub('\r\n?', '\n')
+    if result_text == '' then
+      result_text = nil
+    end
+  else
+    result_text = nil
+  end
+  current.result_text = result_text
+  current.result_updated_ms = current.result_text and current.last_activity_ms or nil
+end
+
 local function touch_overlay_tool_activity(run_id)
   if type(run_id) ~= 'number' then
     return
@@ -1009,6 +1072,13 @@ local function normalize_activity_output_text(text)
   return text
 end
 
+local function activity_output_is_list(value)
+  if vim.islist then
+    return vim.islist(value)
+  end
+  return vim.tbl_islist(value)
+end
+
 local function append_unique_activity_output(parts, text)
   text = normalize_activity_output_text(text)
   if not text then
@@ -1045,6 +1115,138 @@ local function extract_tool_result_contents_text(contents)
   return table.concat(parts, '\n\n')
 end
 
+local function inspect_activity_output_value(value)
+  local ok, inspected = pcall(vim.inspect, value)
+  if not ok then
+    return nil
+  end
+  return normalize_activity_output_text(inspected)
+end
+
+local extract_activity_output_value_text
+
+local structured_tool_result_types = {
+  success = true,
+  failed = true,
+  error = true,
+}
+
+local function extract_structured_tool_result_text(value, depth, visited)
+  if type(value) ~= 'table' then
+    return nil, false
+  end
+
+  local result_type = sanitize_permission_text(value.resultType)
+  if type(result_type) == 'string' then
+    result_type = result_type:lower()
+  end
+  local data = type(value.data) == 'table' and value.data or nil
+  local handled = structured_tool_result_types[result_type] == true
+    or (data ~= nil and (data.sessionLog ~= nil or data.textResultForLlm ~= nil))
+  if not handled then
+    return nil, false
+  end
+
+  local parts = {}
+  if data then
+    append_unique_activity_output(parts, extract_activity_output_value_text(data.sessionLog, depth + 1, visited))
+    append_unique_activity_output(parts, extract_activity_output_value_text(data.textResultForLlm, depth + 1, visited))
+  end
+  if #parts == 0 then
+    return nil, true
+  end
+  return table.concat(parts, '\n\n'), true
+end
+
+extract_activity_output_value_text = function(value, depth, visited)
+  depth = math.max(1, math.floor(tonumber(depth) or 1))
+  if value == nil or depth > 5 then
+    return nil
+  end
+
+  local value_type = type(value)
+  if value_type == 'string' then
+    return normalize_activity_output_text(value)
+  end
+  if value_type == 'number' or value_type == 'boolean' then
+    return tostring(value)
+  end
+  if value_type ~= 'table' then
+    return nil
+  end
+
+  visited = visited or {}
+  if visited[value] then
+    return nil
+  end
+  visited[value] = true
+
+  local structured_tool_result_text, structured_tool_result_handled = extract_structured_tool_result_text(value, depth, visited)
+  if structured_tool_result_handled then
+    visited[value] = nil
+    return structured_tool_result_text
+  end
+
+  local parts = {}
+  if activity_output_is_list(value) then
+    append_unique_activity_output(parts, extract_tool_result_contents_text(value))
+    if #parts == 0 then
+      for _, item in ipairs(value) do
+        append_unique_activity_output(parts, extract_activity_output_value_text(item, depth + 1, visited))
+      end
+    end
+  else
+    for _, key in ipairs({
+      'modifiedResult',
+      'toolResult',
+      'detailedContent',
+      'content',
+      'text',
+      'summary',
+      'message',
+      'stdout',
+      'stderr',
+      'output',
+      'result',
+      'additionalContext',
+      'description',
+    }) do
+      append_unique_activity_output(parts, extract_activity_output_value_text(value[key], depth + 1, visited))
+    end
+    if type(value.contents) == 'table' then
+      append_unique_activity_output(parts, extract_tool_result_contents_text(value.contents))
+    end
+    if type(value.resource) == 'table' then
+      append_unique_activity_output(parts, extract_activity_output_value_text(value.resource, depth + 1, visited))
+    end
+    if type(value.error) == 'table' then
+      append_unique_activity_output(parts, extract_activity_output_value_text(value.error.message, depth + 1, visited))
+    elseif value.error ~= nil then
+      append_unique_activity_output(parts, extract_activity_output_value_text(value.error, depth + 1, visited))
+    end
+    if #parts == 0 then
+      for _, key in ipairs(activity_nested_keys) do
+        if type(value[key]) == 'table' then
+          append_unique_activity_output(parts, extract_activity_output_value_text(value[key], depth + 1, visited))
+        end
+      end
+    end
+    if #parts == 0 then
+      for _, nested in pairs(value) do
+        if type(nested) == 'table' then
+          append_unique_activity_output(parts, extract_activity_output_value_text(nested, depth + 1, visited))
+        end
+      end
+    end
+  end
+
+  visited[value] = nil
+  if #parts > 0 then
+    return table.concat(parts, '\n\n')
+  end
+  return inspect_activity_output_value(value)
+end
+
 local function extract_tool_execution_output_text(data)
   data = type(data) == 'table' and data or {}
   local result = type(data.result) == 'table' and data.result or nil
@@ -1064,6 +1266,247 @@ local function extract_tool_execution_output_text(data)
     append_unique_activity_output(parts, data.error.message)
   end
 
+  if #parts == 0 then
+    return nil
+  end
+  return table.concat(parts, '\n\n')
+end
+
+local assistant_usage = {
+  quota_priority = {
+    premium_interactions = 1,
+    chat = 2,
+    completions = 3,
+  },
+}
+
+function assistant_usage.number(value)
+  if type(value) == 'number' then
+    return value
+  end
+  if type(value) == 'string' then
+    return tonumber(value)
+  end
+  return nil
+end
+
+function assistant_usage.normalize_percentage(value)
+  local n = assistant_usage.number(value)
+  if not n then
+    return nil
+  end
+  if n >= 0 and n <= 1 then
+    n = n * 100
+  end
+  return math.max(0, n)
+end
+
+function assistant_usage.format_decimal(value, decimals)
+  local n = assistant_usage.number(value)
+  if not n then
+    return nil
+  end
+
+  decimals = math.max(0, math.floor(tonumber(decimals) or 0))
+  if decimals <= 0 then
+    return tostring(math.floor(n + 0.5))
+  end
+
+  local rendered = string.format('%.' .. tostring(decimals) .. 'f', n)
+  rendered = rendered:gsub('(%..-)0+$', '%1'):gsub('%.$', '')
+  return rendered
+end
+
+function assistant_usage.format_summary_tokens(value)
+  local n = assistant_usage.number(value)
+  if not n then
+    return nil
+  end
+  if n < 1000 then
+    return tostring(math.floor(n + 0.5))
+  end
+  return string.format('%.0fk', n / 1000)
+end
+
+function assistant_usage.format_summary_duration(duration_ms)
+  local n = assistant_usage.number(duration_ms)
+  if not n then
+    return nil
+  end
+  if n >= 1000 then
+    return assistant_usage.format_decimal(n / 1000, 1) .. 's'
+  end
+  return assistant_usage.format_decimal(n, 0) .. 'ms'
+end
+
+function assistant_usage.format_percentage(value)
+  local n = assistant_usage.normalize_percentage(value)
+  if not n then
+    return nil
+  end
+
+  local rounded = math.floor(n + 0.5)
+  if math.abs(n - rounded) < 0.05 then
+    return tostring(rounded) .. '%'
+  end
+  return string.format('%.1f%%', n)
+end
+
+function assistant_usage.quota_display_name(quota_id)
+  quota_id = sanitize_permission_text(quota_id)
+  if not quota_id then
+    return nil
+  end
+  if quota_id == 'premium_interactions' then
+    return 'premium'
+  end
+  return quota_id:gsub('_', ' ')
+end
+
+function assistant_usage.normalize_quotas(quota_snapshots)
+  local quotas = {}
+  if type(quota_snapshots) ~= 'table' then
+    return quotas, nil
+  end
+
+  for quota_id, snapshot in pairs(quota_snapshots) do
+    if type(snapshot) == 'table' then
+      quotas[#quotas + 1] = {
+        id = sanitize_permission_text(quota_id) or tostring(quota_id),
+        display_name = assistant_usage.quota_display_name(quota_id),
+        entitlement_requests = assistant_usage.number(snapshot.entitlementRequests),
+        is_unlimited = snapshot.isUnlimitedEntitlement == true,
+        overage = assistant_usage.number(snapshot.overage),
+        overage_allowed = snapshot.overageAllowedWithExhaustedQuota == true,
+        remaining_percentage = assistant_usage.normalize_percentage(snapshot.remainingPercentage),
+        reset_date = sanitize_permission_text(snapshot.resetDate),
+        usage_allowed = snapshot.usageAllowedWithExhaustedQuota == true,
+        used_requests = assistant_usage.number(snapshot.usedRequests),
+      }
+    end
+  end
+
+  table.sort(quotas, function(a, b)
+    local a_overage = (tonumber(a.overage) or 0) > 0
+    local b_overage = (tonumber(b.overage) or 0) > 0
+    if a_overage ~= b_overage then
+      return a_overage
+    end
+    if a.is_unlimited ~= b.is_unlimited then
+      return not a.is_unlimited
+    end
+    local a_remaining = a.remaining_percentage ~= nil and a.remaining_percentage or math.huge
+    local b_remaining = b.remaining_percentage ~= nil and b.remaining_percentage or math.huge
+    if a_remaining ~= b_remaining then
+      return a_remaining < b_remaining
+    end
+    local a_priority = assistant_usage.quota_priority[a.id] or math.huge
+    local b_priority = assistant_usage.quota_priority[b.id] or math.huge
+    if a_priority ~= b_priority then
+      return a_priority < b_priority
+    end
+    return tostring(a.id or '') < tostring(b.id or '')
+  end)
+
+  return quotas, quotas[1]
+end
+
+function assistant_usage.normalize(data)
+  data = type(data) == 'table' and data or {}
+  local model = sanitize_permission_text(data.model)
+  if not model then
+    return nil
+  end
+
+  local quotas, primary_quota = assistant_usage.normalize_quotas(data.quotaSnapshots)
+  local remaining_percentage = primary_quota and primary_quota.remaining_percentage or nil
+  local overage = primary_quota and primary_quota.overage or nil
+  return {
+    model = model,
+    initiator = sanitize_permission_text(data.initiator),
+    reasoning_effort = sanitize_permission_text(data.reasoningEffort),
+    cost = assistant_usage.number(data.cost),
+    input_tokens = assistant_usage.number(data.inputTokens),
+    output_tokens = assistant_usage.number(data.outputTokens),
+    reasoning_tokens = assistant_usage.number(data.reasoningTokens),
+    cache_read_tokens = assistant_usage.number(data.cacheReadTokens),
+    cache_write_tokens = assistant_usage.number(data.cacheWriteTokens),
+    duration_ms = assistant_usage.number(data.duration),
+    ttft_ms = assistant_usage.number(data.ttftMs),
+    inter_token_latency_ms = assistant_usage.number(data.interTokenLatencyMs),
+    api_call_id = sanitize_permission_text(data.apiCallId),
+    provider_call_id = sanitize_permission_text(data.providerCallId),
+    remaining_percentage = remaining_percentage,
+    overage = overage,
+    quotas = quotas,
+    primary_quota = primary_quota and vim.deepcopy(primary_quota) or nil,
+  }
+end
+
+function assistant_usage.summarize(usage)
+  if type(usage) ~= 'table' or type(usage.model) ~= 'string' or usage.model == '' then
+    return nil
+  end
+
+  local parts = { usage.model }
+  local cost = assistant_usage.format_decimal(usage.cost, 2)
+  if cost then
+    parts[#parts + 1] = 'cost ' .. cost
+  end
+  local input_tokens = assistant_usage.format_summary_tokens(usage.input_tokens)
+  if input_tokens then
+    parts[#parts + 1] = input_tokens .. ' in'
+  end
+  local output_tokens = assistant_usage.format_summary_tokens(usage.output_tokens)
+  if output_tokens then
+    parts[#parts + 1] = output_tokens .. ' out'
+  end
+  local duration = assistant_usage.format_summary_duration(usage.duration_ms)
+  if duration then
+    parts[#parts + 1] = duration
+  end
+  local primary_quota = type(usage.primary_quota) == 'table' and usage.primary_quota or nil
+  if primary_quota and primary_quota.remaining_percentage ~= nil then
+    parts[#parts + 1] = string.format('%s %s', primary_quota.display_name or primary_quota.id or 'quota', assistant_usage.format_percentage(primary_quota.remaining_percentage) or '?')
+  end
+  return 'Usage: ' .. table.concat(parts, ' · ')
+end
+
+local function extract_post_tool_use_tool_detail(tool_name, input)
+  if type(input) ~= 'table' then
+    return nil
+  end
+
+  local payload = {
+    input = input.toolArgs,
+    toolArgs = input.toolArgs,
+    payload = input.toolArgs,
+  }
+  return extract_shell_tool_detail(tool_name, payload)
+    or summarize_shell_command_for_activity(payload)
+    or find_activity_string(input, { 'summary', 'description' })
+end
+
+local function extract_post_tool_use_result_text(start_input, hook_output, fallback_output_text)
+  local raw_result_text = type(start_input) == 'table' and extract_activity_output_value_text(start_input.toolResult, 1, {}) or nil
+  raw_result_text = raw_result_text or normalize_activity_output_text(fallback_output_text)
+
+  if hook_output == nil then
+    return raw_result_text
+  end
+  if type(hook_output) ~= 'table' then
+    return extract_activity_output_value_text(hook_output, 1, {}) or raw_result_text
+  end
+  if hook_output.suppressOutput == true then
+    return extract_activity_output_value_text(hook_output.additionalContext, 1, {}) or 'Output suppressed by postToolUse hook.'
+  end
+
+  local parts = {}
+  append_unique_activity_output(parts, extract_activity_output_value_text(hook_output.modifiedResult, 1, {}))
+  if #parts == 0 then
+    append_unique_activity_output(parts, raw_result_text)
+  end
+  append_unique_activity_output(parts, extract_activity_output_value_text(hook_output.additionalContext, 1, {}))
   if #parts == 0 then
     return nil
   end
@@ -1183,6 +1626,154 @@ local function capture_tool_execution_complete(data)
   item.output_text = extract_tool_execution_output_text(data) or item.output_text or item.partial_output
 end
 
+function assistant_usage.current_turn_accepts()
+  return state.chat_busy == true
+    or state.pending_checkpoint_turn ~= nil
+    or type(state.active_turn_assistant_index) == 'number'
+    or type(state.live_assistant_entry_index) == 'number'
+    or (type(state.active_turn_assistant_message_id) == 'string' and state.active_turn_assistant_message_id ~= '')
+    or #(state.recent_activity_lines or {}) > 0
+    or #(state.recent_activity_items or {}) > 0
+end
+
+function assistant_usage.append_to_last_activity_entry(summary, item)
+  local entry = type(state.entries) == 'table' and state.entries[#state.entries] or nil
+  if type(entry) ~= 'table' or entry.kind ~= 'activity' then
+    return false
+  end
+
+  local content = normalize_activity_output_text(entry.content or '')
+  entry.content = content and (content .. '\n' .. summary) or summary
+  if type(entry.activity_items) ~= 'table' then
+    entry.activity_items = {}
+  end
+  entry.activity_items[#entry.activity_items + 1] = vim.deepcopy(item)
+  schedule_render()
+  return true
+end
+
+function assistant_usage.capture(data)
+  local usage = assistant_usage.normalize(data)
+  if not usage then
+    return nil
+  end
+
+  state.last_assistant_usage = vim.deepcopy(usage)
+  local summary = assistant_usage.summarize(usage)
+  if not summary then
+    return usage
+  end
+
+  local item = {
+    kind = 'usage',
+    summary = summary,
+    usage = vim.deepcopy(usage),
+  }
+  if assistant_usage.current_turn_accepts() then
+    remember_recent_activity_line(summary)
+    remember_recent_activity_item(item)
+    return usage
+  end
+  if assistant_usage.append_to_last_activity_entry(summary, item) then
+    return usage
+  end
+
+  append_entry('activity', summary, nil, {
+    activity_items = { item },
+  })
+  return usage
+end
+
+local function capture_post_tool_use_start(data)
+  data = type(data) == 'table' and data or {}
+  if data.hookType ~= 'postToolUse' then
+    return
+  end
+
+  local input = type(data.input) == 'table' and data.input or {}
+  local tool_name = sanitize_permission_text(input.toolName) or find_activity_string(input, { 'toolName' })
+  local tool_call_id = find_activity_string(input, { 'toolCallId', 'tool_call_id' })
+  local detail = extract_post_tool_use_tool_detail(tool_name, input)
+  local item, idx = ensure_recent_tool_activity_item(tool_call_id, tool_name, detail)
+  local prior_output_text = type(item) == 'table' and item.output_text or nil
+
+  if item then
+    item.tool_name = item.tool_name or tool_name
+    item.tool_call_id = item.tool_call_id or tool_call_id
+    item.tool_detail = item.tool_detail or detail
+    item.post_tool_use_start_data = vim.deepcopy(data)
+    item.post_tool_use_raw_result_text = extract_activity_output_value_text(input.toolResult, 1, {}) or normalize_activity_output_text(prior_output_text)
+    item.output_text = nil
+  end
+
+  local hook_id = sanitize_permission_text(data.hookInvocationId)
+  if not hook_id then
+    return
+  end
+  if type(state.post_tool_use_hooks) ~= 'table' then
+    state.post_tool_use_hooks = {}
+  end
+  state.post_tool_use_hooks[hook_id] = {
+    recent_item_index = idx,
+    tool_call_id = tool_call_id,
+    tool_name = tool_name,
+    tool_detail = detail,
+    start_input = vim.deepcopy(input),
+    prior_output_text = normalize_activity_output_text(prior_output_text),
+  }
+end
+
+local function capture_post_tool_use_end(data)
+  data = type(data) == 'table' and data or {}
+  if data.hookType ~= 'postToolUse' then
+    return
+  end
+
+  local hook_id = sanitize_permission_text(data.hookInvocationId)
+  local hook_state = type(state.post_tool_use_hooks) == 'table' and hook_id and state.post_tool_use_hooks[hook_id] or nil
+  local item, idx
+  if hook_state and type(hook_state.recent_item_index) == 'number' then
+    local items = type(state.recent_activity_items) == 'table' and state.recent_activity_items or {}
+    if type(items[hook_state.recent_item_index]) == 'table' then
+      item = items[hook_state.recent_item_index]
+      idx = hook_state.recent_item_index
+    end
+  end
+  if not item then
+    item, idx = find_recent_tool_activity_item(hook_state and hook_state.tool_call_id or nil)
+  end
+
+  local start_input = hook_state and hook_state.start_input or nil
+  if not start_input and item and type(item.post_tool_use_start_data) == 'table' and type(item.post_tool_use_start_data.input) == 'table' then
+    start_input = item.post_tool_use_start_data.input
+  end
+
+  local fallback_output_text = hook_state and hook_state.prior_output_text or (item and item.post_tool_use_raw_result_text or nil)
+  local result_text = nil
+  if data.success == true then
+    result_text = extract_post_tool_use_result_text(start_input, data.output, fallback_output_text)
+  end
+  local error_message = type(data.error) == 'table' and normalize_activity_output_text(data.error.message) or nil
+
+  if hook_state then
+    hook_state.recent_item_index = idx
+    hook_state.success = data.success == true
+    hook_state.result_text = result_text
+    hook_state.error_message = error_message
+    hook_state.end_data = vim.deepcopy(data)
+  end
+
+  if item then
+    item.tool_name = item.tool_name or (hook_state and hook_state.tool_name or nil)
+    item.tool_detail = item.tool_detail or (hook_state and hook_state.tool_detail or nil)
+    item.post_tool_use_end_data = vim.deepcopy(data)
+    item.output_text = result_text
+    if error_message then
+      item.error_message = error_message
+    end
+  end
+end
+
 summarize_tool_activity = function(tool_name, data)
   local tool = sanitize_permission_text(tool_name)
   if not tool then
@@ -1191,7 +1782,11 @@ summarize_tool_activity = function(tool_name, data)
 
   local normalized = tool:lower()
   if normalized == 'report_intent' then
-    return nil
+    local detail = find_activity_string(data, { 'intent', 'description', 'summary', 'intention' })
+    if detail and detail ~= '' then
+      return 'Used report_intent ' .. detail
+    end
+    return 'Used report_intent'
   end
 
   if normalized == 'apply_patch' then
@@ -1275,6 +1870,21 @@ local function capture_turn_activity_summary(event_type, data)
 
   if event_type == 'tool.execution_complete' then
     capture_tool_execution_complete(data)
+    return
+  end
+
+  if event_type == 'assistant.usage' then
+    assistant_usage.capture(data)
+    return
+  end
+
+  if event_type == 'hook.start' and data.hookType == 'postToolUse' then
+    capture_post_tool_use_start(data)
+    return
+  end
+
+  if event_type == 'hook.end' and data.hookType == 'postToolUse' then
+    capture_post_tool_use_end(data)
     return
   end
 
@@ -1400,7 +2010,8 @@ local function complete_overlay_tool(run_id)
 
   current.last_activity_ms = overlay_now_ms()
   current.completed = true
-  local elapsed = overlay_now_ms() - (tonumber(current.display_started_ms) or 0)
+  current.post_tool_use_pending = nil
+  local elapsed = overlay_now_ms() - (tonumber(current.result_updated_ms) or tonumber(current.display_started_ms) or 0)
   local remaining = math.max(0, min_overlay_tool_duration_ms() - elapsed)
   schedule_overlay_tool_clear(remaining, run_id)
 end
@@ -2038,6 +2649,7 @@ local function clear_live_turn_state(reason, opts)
   state.recent_activity_lines = {}
   state.recent_activity_items = {}
   state.recent_activity_tool_calls = {}
+  state.post_tool_use_hooks = {}
   state.active_tool = nil
   state.active_tool_run_id = nil
   state.active_tool_detail = nil
@@ -2065,6 +2677,9 @@ local function handle_host_event(event_name, payload)
     clear_reasoning_preview('session attached')
     sync_model_state(data.model, data.reasoningEffort)
     sync_config_counts(data)
+    state.last_assistant_usage = nil
+    state.context_tokens = nil
+    state.context_limit = nil
     state.session_name = session_names.resolve(data.summary, data.sessionId or state.session_id)
     refresh_statuslines()
     append_entry('system', 'Connected to session ' .. (data.sessionId or state.session_id or '<unknown>'))
@@ -2082,6 +2697,9 @@ local function handle_host_event(event_name, payload)
     state.agent_count = 0
     state.skill_count = 0
     state.mcp_count = 0
+    state.last_assistant_usage = nil
+    state.context_tokens = nil
+    state.context_limit = nil
     state.session_name = nil
     state.pending_user_input = nil
     reset_live_activity_state()
@@ -2738,6 +3356,7 @@ local function handle_session_event(payload)
     state.recent_activity_lines = {}
     state.recent_activity_items = {}
     state.recent_activity_tool_calls = {}
+    state.post_tool_use_hooks = {}
     if not preserve_reasoning then
       state.active_turn_assistant_index = nil
       state.live_assistant_entry_index = nil
@@ -2813,6 +3432,60 @@ local function handle_session_event(payload)
     return
   end
 
+  if event_type == 'hook.start' and data.hookType == 'postToolUse' then
+    local hook_id = sanitize_permission_text(data.hookInvocationId)
+    local hook_state = type(state.post_tool_use_hooks) == 'table' and hook_id and state.post_tool_use_hooks[hook_id] or nil
+    local tool_name = first_non_empty(hook_state and hook_state.tool_name or nil, type(data.input) == 'table' and data.input.toolName or nil, state.active_tool)
+    local run_id = overlay_run_id_for_tool_identity(hook_state and hook_state.tool_call_id or nil, tool_name)
+    if hook_state then
+      hook_state.run_id = run_id
+    end
+    log(
+      string.format(
+        'hook.start postToolUse hook=%s tool=%s run_id=%s payload=%s',
+        tostring(hook_id or '<none>'),
+        tostring(tool_name or '<none>'),
+        tostring(run_id or '<none>'),
+        serialize_log_value(data, { max_len = 1600 })
+      ),
+      vim.log.levels.DEBUG
+    )
+    begin_overlay_tool_post_result(run_id, hook_id)
+    refresh_reasoning_overlay()
+    return
+  end
+
+  if event_type == 'hook.end' and data.hookType == 'postToolUse' then
+    local hook_id = sanitize_permission_text(data.hookInvocationId)
+    local hook_state = type(state.post_tool_use_hooks) == 'table' and hook_id and state.post_tool_use_hooks[hook_id] or nil
+    local tool_name = first_non_empty(hook_state and hook_state.tool_name or nil, state.active_tool)
+    local run_id = overlay_run_id_for_tool_identity(hook_state and hook_state.tool_call_id or nil, tool_name)
+    local overlay_result_text = nil
+    if hook_state and hook_state.success == true then
+      overlay_result_text = hook_state.result_text
+    elseif hook_state and hook_state.error_message then
+      overlay_result_text = 'postToolUse hook failed: ' .. hook_state.error_message
+    end
+    log(
+      string.format(
+        'hook.end postToolUse hook=%s tool=%s run_id=%s success=%s payload=%s',
+        tostring(hook_id or '<none>'),
+        tostring(tool_name or '<none>'),
+        tostring(run_id or '<none>'),
+        tostring(hook_state and hook_state.success or false),
+        serialize_log_value(data, { max_len = 1600 })
+      ),
+      vim.log.levels.DEBUG
+    )
+    set_overlay_tool_result_text(run_id, overlay_result_text)
+    complete_overlay_tool(run_id)
+    if hook_id and type(state.post_tool_use_hooks) == 'table' then
+      state.post_tool_use_hooks[hook_id] = nil
+    end
+    refresh_reasoning_overlay()
+    return
+  end
+
   if event_type == 'session.model_change' then
     sync_model_state(data.model or data.newModel, data.reasoningEffort or data.newReasoningEffort)
     refresh_statuslines()
@@ -2822,6 +3495,26 @@ local function handle_session_event(payload)
   if event_type == 'session.usage_info' then
     state.context_tokens = data.currentTokens
     state.context_limit = data.tokenLimit
+    refresh_statuslines()
+    return
+  end
+
+  if event_type == 'assistant.usage' then
+    local usage = state.last_assistant_usage or assistant_usage.capture(data)
+    local primary_quota = usage and usage.primary_quota or nil
+    log(
+      string.format(
+        'assistant.usage model=%s cost=%s input=%s output=%s duration_ms=%s quota=%s payload=%s',
+        tostring(usage and usage.model or data.model or '<none>'),
+        tostring(usage and assistant_usage.format_decimal(usage.cost, 2) or assistant_usage.format_decimal(data.cost, 2) or '<none>'),
+        tostring(usage and assistant_usage.format_summary_tokens(usage.input_tokens) or assistant_usage.format_summary_tokens(data.inputTokens) or '<none>'),
+        tostring(usage and assistant_usage.format_summary_tokens(usage.output_tokens) or assistant_usage.format_summary_tokens(data.outputTokens) or '<none>'),
+        tostring(usage and assistant_usage.format_decimal(usage.duration_ms, 0) or assistant_usage.format_decimal(data.duration, 0) or '<none>'),
+        tostring(primary_quota and (primary_quota.display_name or primary_quota.id or '<none>') or '<none>'),
+        serialize_log_value(data, { max_len = 1600 })
+      ),
+      vim.log.levels.DEBUG
+    )
     refresh_statuslines()
     return
   end

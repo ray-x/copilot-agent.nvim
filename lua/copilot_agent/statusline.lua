@@ -163,6 +163,50 @@ local function format_tokens(n)
   return string.format('%.0fk', n / 1000)
 end
 
+local function format_usage_percentage(value)
+  local n = tonumber(value)
+  if not n then
+    return nil
+  end
+  if n >= 0 and n <= 1 then
+    n = n * 100
+  end
+
+  local rounded = math.floor(n + 0.5)
+  if math.abs(n - rounded) < 0.05 then
+    return tostring(rounded) .. '%'
+  end
+  return string.format('%.1f%%', n)
+end
+
+local function quota_display_name(quota_id)
+  if type(quota_id) ~= 'string' or quota_id == '' then
+    return nil
+  end
+  if quota_id == 'premium_interactions' then
+    return 'premium'
+  end
+  return quota_id:gsub('_', ' ')
+end
+
+local function statusline_quota()
+  local usage = type(state.last_assistant_usage) == 'table' and state.last_assistant_usage or nil
+  local quota = usage and type(usage.primary_quota) == 'table' and usage.primary_quota or nil
+  if not quota then
+    return ''
+  end
+
+  local label = quota_display_name(quota.id)
+  local remaining = format_usage_percentage(quota.remaining_percentage)
+  if not label and not remaining then
+    return ''
+  end
+  if label and remaining then
+    return '💳' .. label .. ' ' .. remaining
+  end
+  return '💳' .. (label or remaining or '')
+end
+
 function M.statusline_tool()
   if state.active_tool and state.active_tool ~= '' then
     return '🔧' .. state.active_tool
@@ -200,10 +244,17 @@ function M.statusline_reasoning(max_len)
 end
 
 function M.statusline_context()
+  local parts = {}
   if state.context_tokens and state.context_limit and state.context_limit > 0 then
-    return '📊' .. format_tokens(state.context_tokens) .. '/' .. format_tokens(state.context_limit)
+    parts[#parts + 1] = '📊' .. format_tokens(state.context_tokens) .. '/' .. format_tokens(state.context_limit)
   end
-  return ''
+
+  local quota = statusline_quota()
+  if quota ~= '' then
+    parts[#parts + 1] = quota
+  end
+
+  return table.concat(parts, ' ')
 end
 
 function M.statusline_attachments()
@@ -345,11 +396,43 @@ local function build_parts(...)
   return parts
 end
 
+local function sanitize_statusline_option_text(text, opts)
+  if type(text) ~= 'string' or text == '' then
+    return ''
+  end
+
+  opts = opts or {}
+  local placeholders = {}
+  local placeholder_index = 0
+  local function protect(token)
+    placeholder_index = placeholder_index + 1
+    local key = string.format('__COPILOT_AGENT_STATUSLINE_TOKEN_%d__', placeholder_index)
+    placeholders[#placeholders + 1] = { key = key, token = token }
+    return key
+  end
+
+  if opts.allow_highlights then
+    text = text:gsub('%%#.-#', protect)
+    text = text:gsub('%%%*', protect)
+  end
+
+  text = text:gsub('[%z\001-\031\127]+', ' ')
+  text = text:gsub('%%', '%%%%')
+
+  for _, entry in ipairs(placeholders) do
+    text = text:gsub(entry.key, function()
+      return entry.token
+    end)
+  end
+
+  return text
+end
+
 local function statusline_visible_text(text)
   if type(text) ~= 'string' or text == '' then
     return ''
   end
-  return text:gsub('%%#.-#', ''):gsub('%%%*', '')
+  return text:gsub('%%#.-#', ''):gsub('%%%*', ''):gsub('[%z\001-\031\127]+', ' ')
 end
 
 local function statusline_text_width(text)
@@ -469,20 +552,22 @@ end
 
 function M.statusline_component()
   local width = statusline_window_width()
-  return fit_statusline_parts(
-    build_parts(
-      statusline_part('mode', M.statusline_mode),
-      statusline_part('permission', M.statusline_permission),
-      statusline_part('busy', M.statusline_busy),
-      statusline_part('model', M.statusline_model),
-      statusline_part('tool', M.statusline_tool),
-      statusline_part('intent', M.statusline_intent),
-      statusline_part('context', M.statusline_context),
-      statusline_part('config', M.statusline_config, width),
-      statusline_part('attachments', M.statusline_attachments)
-    ),
-    width,
-    ' '
+  return sanitize_statusline_option_text(
+    fit_statusline_parts(
+      build_parts(
+        statusline_part('mode', M.statusline_mode),
+        statusline_part('permission', M.statusline_permission),
+        statusline_part('busy', M.statusline_busy),
+        statusline_part('model', M.statusline_model),
+        statusline_part('tool', M.statusline_tool),
+        statusline_part('intent', M.statusline_intent),
+        statusline_part('context', M.statusline_context),
+        statusline_part('config', M.statusline_config, width),
+        statusline_part('attachments', M.statusline_attachments)
+      ),
+      width,
+      ' '
+    )
   )
 end
 
@@ -529,6 +614,7 @@ function M.refresh_input_statusline()
       math.max(1, width - 1),
       '  '
     )
+  line = sanitize_statusline_option_text(line, { allow_highlights = true })
   vim.wo[input_winid].statusline = line
   state.input_statusline_managed = true
   refresh_separator()
@@ -567,6 +653,7 @@ function M.refresh_chat_statusline()
       math.max(1, width - 1),
       '  '
     )
+  line = sanitize_statusline_option_text(line, { allow_highlights = true })
   vim.wo[chat_winid].statusline = line
   state.chat_statusline_managed = true
 end

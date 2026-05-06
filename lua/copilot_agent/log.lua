@@ -16,8 +16,8 @@ local LOG_CALLER_STACK_START = 3 -- Skip the logger helpers themselves when reso
 local LOG_CALLER_STACK_END = 12 -- Stop the stack walk before deep wrapper chains add unnecessary overhead.
 local MIN_FILE_LOG_BATCH_FLUSH_INTERVAL_MS = 50 -- Avoid sub-frame timers that can spin the event loop when users misconfigure batch intervals.
 local DEFAULT_FILE_LOG_BATCH_FLUSH_INTERVAL_MS = 2000 -- Keep file IO amortized while still surfacing logs quickly enough for interactive debugging.
-local MIN_FILE_LOG_BATCH_MAX_ENTRIES = 1 -- Batch size must be positive so queued lines are always flushable.
-local DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES = 20 -- Big enough to reduce file churn during token streaming without delaying logs excessively.
+local MIN_FILE_LOG_BATCH_MAX_ENTRIES = 5 -- Batch size must be positive so queued lines are always flushable.
+local DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES = 30 -- Big enough to reduce file churn during token streaming without delaying logs excessively.
 
 local _log_levels = {
   TRACE = vim.log.levels.TRACE,
@@ -69,8 +69,16 @@ local function resolve_file_log_batch_config()
 
   return {
     enabled = file_log_batch.enabled ~= false,
-    flush_interval_ms = normalize_integer(file_log_batch.flush_interval_ms, DEFAULT_FILE_LOG_BATCH_FLUSH_INTERVAL_MS, MIN_FILE_LOG_BATCH_FLUSH_INTERVAL_MS),
-    max_entries = normalize_integer(file_log_batch.max_entries, DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES, MIN_FILE_LOG_BATCH_MAX_ENTRIES),
+    flush_interval_ms = normalize_integer(
+      file_log_batch.flush_interval_ms,
+      DEFAULT_FILE_LOG_BATCH_FLUSH_INTERVAL_MS,
+      MIN_FILE_LOG_BATCH_FLUSH_INTERVAL_MS
+    ),
+    max_entries = normalize_integer(
+      file_log_batch.max_entries,
+      DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES,
+      MIN_FILE_LOG_BATCH_MAX_ENTRIES
+    ),
   }
 end
 
@@ -99,7 +107,12 @@ local function drain_log_queue()
   local grouped_paths = {}
 
   for _, entry in ipairs(queue) do
-    if type(entry) == 'table' and type(entry.path) == 'string' and entry.path ~= '' and type(entry.line) == 'string' then
+    if
+      type(entry) == 'table'
+      and type(entry.path) == 'string'
+      and entry.path ~= ''
+      and type(entry.line) == 'string'
+    then
       if not grouped_lines[entry.path] then
         grouped_lines[entry.path] = {}
         grouped_paths[#grouped_paths + 1] = entry.path
@@ -150,8 +163,10 @@ end
 
 function M.serialize_log_value(value, opts)
   opts = opts or {}
-  local max_len = math.max(MIN_SERIALIZED_LOG_LENGTH, math.floor(tonumber(opts.max_len) or DEFAULT_SERIALIZED_LOG_LENGTH))
-  local inspect_depth = math.max(MIN_SERIALIZED_LOG_DEPTH, math.floor(tonumber(opts.depth) or DEFAULT_SERIALIZED_LOG_DEPTH))
+  local max_len =
+    math.max(MIN_SERIALIZED_LOG_LENGTH, math.floor(tonumber(opts.max_len) or DEFAULT_SERIALIZED_LOG_LENGTH))
+  local inspect_depth =
+    math.max(MIN_SERIALIZED_LOG_DEPTH, math.floor(tonumber(opts.depth) or DEFAULT_SERIALIZED_LOG_DEPTH))
   local text
 
   if type(value) == 'string' then

@@ -164,7 +164,6 @@ describe('home path display sanitization', function()
     local text = table.concat(lines, '\n')
     assert_true(text:find('📎 ~/notes/todo.md', 1, true) ~= nil)
   end)
-
 end)
 
 describe('M.setup', function()
@@ -840,6 +839,7 @@ describe('statusline API', function()
     agent.state.pending_workspace_updates = 0
     agent.state.background_tasks = {}
     agent.state.pending_user_input = nil
+    pcall(vim.cmd, 'tabonly | only')
   end)
 
   it('statusline_mode returns a string', function()
@@ -882,19 +882,79 @@ describe('statusline API', function()
     assert_true(#v > 0)
   end)
 
+  it('sanitizes percent signs and control bytes before writing statuslines', function()
+    local statusline = require('copilot_agent.statusline')
+    local original_columns = vim.o.columns
+    local original_laststatus = vim.o.laststatus
+    vim.o.columns = 240
+    vim.o.laststatus = 3
+    local ok, err = pcall(function()
+      agent.open_chat()
+
+      agent.state.active_tool = 'bash 100% done\0 now'
+      agent.state.current_intent = 'plan\nnext\tstep'
+
+      local exported = agent.statusline()
+      assert_true(exported:find('100%% done  now', 1, true) ~= nil)
+      assert_true(exported:find('plan next step', 1, true) ~= nil)
+      assert_true(exported:find('\0', 1, true) == nil)
+
+      local refreshed, refresh_err = pcall(statusline.refresh_chat_statusline)
+      assert_true(refreshed, refresh_err)
+
+      local assigned = vim.wo[agent.state.chat_winid].statusline
+      assert_true(assigned:find('100%% done  now', 1, true) ~= nil)
+      assert_true(assigned:find('plan next step', 1, true) ~= nil)
+      assert_true(assigned:find('\0', 1, true) == nil)
+    end)
+    vim.o.columns = original_columns
+    vim.o.laststatus = original_laststatus
+    assert_true(ok, err)
+  end)
+
+  it('preserves highlight markers in local statuslines', function()
+    local input = require('copilot_agent.input')
+    local statusline = require('copilot_agent.statusline')
+    local original_columns = vim.o.columns
+    local original_laststatus = vim.o.laststatus
+    vim.o.columns = 240
+    vim.o.laststatus = 3
+
+    local ok, err = pcall(function()
+      agent.open_chat()
+      input.open_input_window()
+
+      agent.state.instruction_count = 1
+      agent.state.agent_count = 5
+      statusline.refresh_chat_statusline()
+      statusline.refresh_input_statusline()
+
+      local highlighted = '%#CopilotAgentStatuslineCount#1%*'
+      local raw = '#CopilotAgentStatuslineCount#1*'
+      assert_true(vim.wo[agent.state.chat_winid].statusline:find(highlighted, 1, true) ~= nil)
+      assert_true(vim.wo[agent.state.chat_winid].statusline:find(raw, 1, true) == nil)
+      assert_true(vim.wo[agent.state.input_winid].statusline:find(highlighted, 1, true) ~= nil)
+      assert_true(vim.wo[agent.state.input_winid].statusline:find(raw, 1, true) == nil)
+    end)
+
+    vim.o.columns = original_columns
+    vim.o.laststatus = original_laststatus
+    assert_true(ok, err)
+  end)
+
   it('chat and input statuslines show responsive session labels and formatted ids', function()
+    local input = require('copilot_agent.input')
     local statusline = require('copilot_agent.statusline')
     local original_laststatus = vim.o.laststatus
     local expected_id = '#' .. expected_local_session_id('nvim', 1717245296):gsub('T', ' ', 1)
     local expected_short_id = '#' .. expected_short_local_session_id('nvim', 1717245296)
-    local chat_winid = vim.api.nvim_get_current_win()
     local original_get_width = vim.api.nvim_win_get_width
     local widths = {}
-    vim.cmd('belowright new')
-    local input_winid = vim.api.nvim_get_current_win()
+    agent.open_chat()
+    input.open_input_window()
+    local chat_winid = agent.state.chat_winid
+    local input_winid = agent.state.input_winid
 
-    agent.state.chat_winid = chat_winid
-    agent.state.input_winid = input_winid
     agent.state.session_id = 'nvim-1717245296789000000'
     agent.state.session_name = nil
     vim.o.laststatus = 1
@@ -955,6 +1015,9 @@ describe('statusline plugin config', function()
   it('supports selecting statusline components', function()
     package.loaded['copilot_agent'] = nil
     local agent = require('copilot_agent')
+    local input = require('copilot_agent.input')
+    local original_columns = vim.o.columns
+    local original_laststatus = vim.o.laststatus
     agent.setup({
       auto_create_session = false,
       statusline = {
@@ -979,12 +1042,13 @@ describe('statusline plugin config', function()
     })
 
     local statusline = require('copilot_agent.statusline')
-    local chat_winid = vim.api.nvim_get_current_win()
-    vim.cmd('belowright new')
-    local input_winid = vim.api.nvim_get_current_win()
+    agent.open_chat()
+    input.open_input_window()
+    local chat_winid = agent.state.chat_winid
+    local input_winid = agent.state.input_winid
 
-    agent.state.chat_winid = chat_winid
-    agent.state.input_winid = input_winid
+    vim.o.columns = 200
+    vim.o.laststatus = 3
     agent.state.session_id = 'nvim-1717245296789000000'
 
     statusline.refresh_chat_statusline()
@@ -998,6 +1062,9 @@ describe('statusline plugin config', function()
     assert_true(vim.wo[input_winid].statusline:find('✅ready', 1, true) ~= nil)
     assert_true(agent.statusline():find('󱃕', 1, true) == nil)
     assert_true(agent.statusline():find('✅ready', 1, true) ~= nil)
+
+    vim.o.columns = original_columns
+    vim.o.laststatus = original_laststatus
   end)
 end)
 
@@ -1079,6 +1146,57 @@ describe('model state sync', function()
     assert_eq('claude-opus-4.7', agent.state.current_model)
     assert_eq('claude-opus-4.7', agent.state.config.session.model)
     assert_eq('medium', agent.state.reasoning_effort)
+  end)
+
+  it('tracks assistant usage metrics and appends quota remaining to the statusline context', function()
+    agent.state.context_tokens = 145411
+    agent.state.context_limit = 200000
+
+    events.handle_session_event({
+      type = 'assistant.usage',
+      data = {
+        model = 'gpt-5.4',
+        cost = 1,
+        duration = 3019,
+        inputTokens = 145411,
+        outputTokens = 86,
+        cacheReadTokens = 145280,
+        quotaSnapshots = {
+          premium_interactions = {
+            entitlementRequests = 300,
+            isUnlimitedEntitlement = false,
+            overage = 194.8,
+            overageAllowedWithExhaustedQuota = true,
+            remainingPercentage = 0,
+            resetDate = '2026-06-01T00:00:00Z',
+            usageAllowedWithExhaustedQuota = true,
+            usedRequests = 300,
+          },
+          chat = {
+            entitlementRequests = -1,
+            isUnlimitedEntitlement = true,
+            overage = 0,
+            overageAllowedWithExhaustedQuota = false,
+            remainingPercentage = 100,
+            resetDate = '2026-06-01T00:00:00Z',
+            usageAllowedWithExhaustedQuota = false,
+            usedRequests = 0,
+          },
+        },
+      },
+    })
+
+    local usage = agent.state.last_assistant_usage
+    assert_not_nil(usage)
+    assert_eq('gpt-5.4', usage.model)
+    assert_eq(145411, usage.input_tokens)
+    assert_eq(86, usage.output_tokens)
+    assert_eq(194.8, usage.overage)
+    assert_eq(0, usage.remaining_percentage)
+    assert_eq('premium_interactions', usage.primary_quota.id)
+    assert_eq(0, usage.primary_quota.remaining_percentage)
+    assert_eq('📊145k/200k 💳premium 0%', require('copilot_agent.statusline').statusline_context())
+    assert_eq('📊145k/200k 💳premium 0%', agent.statusline_context())
   end)
 
   it('tracks rolling reasoning deltas and exposes them through the public API', function()
@@ -1524,6 +1642,447 @@ describe('model state sync', function()
     vim.wait(3200)
     extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
     assert_eq(0, #extmarks)
+  end)
+
+  it('shows postToolUse output in activity virtual text only after the hook completes', function()
+    agent.open_chat()
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'git',
+        arguments = { 'status', '--short' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'hook.start',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-1',
+        input = {
+          toolName = 'bash',
+          toolArgs = {
+            command = 'git',
+            args = { 'status', '--short' },
+          },
+          toolResult = 'M README.md\nM lua/copilot_agent/events.lua',
+        },
+      },
+    })
+
+    vim.wait(200)
+
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    local preview = trimmed_virt_lines(virt_lines)
+    assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+    assert_eq(nil, preview[2])
+
+    events.handle_session_event({
+      type = 'hook.end',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-1',
+        success = true,
+        output = {},
+      },
+    })
+
+    vim.wait(200)
+
+    extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    virt_lines = extmarks[1][4].virt_lines or {}
+    preview = trimmed_virt_lines(virt_lines)
+    assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+    assert_eq('M README.md', preview[2])
+    assert_eq('M lua/copilot_agent/events.lua', preview[3])
+  end)
+
+  it('prefers modified postToolUse output over the raw tool result in activity virtual text', function()
+    agent.open_chat()
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'git',
+        arguments = { 'status', '--short' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'hook.start',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-2',
+        input = {
+          toolName = 'bash',
+          toolArgs = {
+            command = 'git',
+            args = { 'status', '--short' },
+          },
+          toolResult = 'secret-token',
+        },
+      },
+    })
+    events.handle_session_event({
+      type = 'hook.end',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-2',
+        success = true,
+        output = {
+          modifiedResult = '[REDACTED]',
+          additionalContext = 'Sensitive output redacted.',
+        },
+      },
+    })
+
+    vim.wait(200)
+
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    local preview = trimmed_virt_lines(virt_lines)
+    local joined = table.concat(preview, '\n')
+    assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+    assert_eq('[REDACTED]', preview[2])
+    assert_eq('Sensitive output redacted.', preview[3])
+    assert_true(joined:find('secret-token', 1, true) == nil)
+  end)
+
+  it('keeps only the newest postToolUse result lines in the activity overlay', function()
+    agent.open_chat()
+
+    local original_max_lines = agent.state.config.chat.reasoning.max_lines
+    agent.state.config.chat.reasoning.max_lines = 4
+    local ok, err = pcall(function()
+      local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+      events.handle_session_event({
+        type = 'tool.execution_start',
+        data = {
+          toolName = 'bash',
+          command = 'git',
+          arguments = { 'status', '--short' },
+        },
+      })
+      events.handle_session_event({
+        type = 'tool.execution_complete',
+        data = {},
+      })
+      events.handle_session_event({
+        type = 'hook.start',
+        data = {
+          hookType = 'postToolUse',
+          hookInvocationId = 'hook-post-tool-use-3',
+          input = {
+            toolName = 'bash',
+            toolArgs = {
+              command = 'git',
+              args = { 'status', '--short' },
+            },
+            toolResult = 'one\ntwo\nthree\nfour\nfive',
+          },
+        },
+      })
+      events.handle_session_event({
+        type = 'hook.end',
+        data = {
+          hookType = 'postToolUse',
+          hookInvocationId = 'hook-post-tool-use-3',
+          success = true,
+          output = {},
+        },
+      })
+
+      vim.wait(200)
+
+      local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+      assert_eq(1, #extmarks)
+
+      local virt_lines = extmarks[1][4].virt_lines or {}
+      local preview = trimmed_virt_lines(virt_lines)
+      assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+      assert_eq('three', preview[2])
+      assert_eq('four', preview[3])
+      assert_eq('five', preview[4])
+      assert_eq(nil, preview[5])
+    end)
+    agent.state.config.chat.reasoning.max_lines = original_max_lines
+    if not ok then
+      error(err)
+    end
+  end)
+
+  it('shows structured toolResult session logs before textResultForLlm and rolls older lines out', function()
+    agent.open_chat()
+
+    local original_max_lines = agent.state.config.chat.reasoning.max_lines
+    agent.state.config.chat.reasoning.max_lines = 4
+    local ok, err = pcall(function()
+      local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+      events.handle_session_event({
+        type = 'tool.execution_start',
+        data = {
+          toolName = 'bash',
+          command = 'git',
+          arguments = { 'status', '--short' },
+        },
+      })
+      events.handle_session_event({
+        type = 'tool.execution_complete',
+        data = {},
+      })
+      events.handle_session_event({
+        type = 'hook.start',
+        data = {
+          hookType = 'postToolUse',
+          hookInvocationId = 'hook-post-tool-use-structured-toolresult',
+          input = {
+            toolName = 'bash',
+            toolArgs = {
+              command = 'git',
+              args = { 'status', '--short' },
+            },
+            toolResult = {
+              resultType = 'success',
+              data = {
+                sessionLog = { 'one', 'two', 'three' },
+                textResultForLlm = 'final answer',
+              },
+            },
+          },
+        },
+      })
+      events.handle_session_event({
+        type = 'hook.end',
+        data = {
+          hookType = 'postToolUse',
+          hookInvocationId = 'hook-post-tool-use-structured-toolresult',
+          success = true,
+          output = {},
+        },
+      })
+
+      vim.wait(200)
+
+      local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+      assert_eq(1, #extmarks)
+
+      local virt_lines = extmarks[1][4].virt_lines or {}
+      local preview = trimmed_virt_lines(virt_lines)
+      assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+      assert_eq('two', preview[2])
+      assert_eq('three', preview[3])
+      assert_eq('final answer', preview[4])
+      assert_eq(nil, preview[5])
+    end)
+    agent.state.config.chat.reasoning.max_lines = original_max_lines
+    if not ok then
+      error(err)
+    end
+  end)
+
+  it('shows textResultForLlm when structured toolResult has no sessionLog', function()
+    agent.open_chat()
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'git',
+        arguments = { 'status', '--short' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'hook.start',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-text-result-only',
+        input = {
+          toolName = 'bash',
+          toolArgs = {
+            command = 'git',
+            args = { 'status', '--short' },
+          },
+          toolResult = {
+            resultType = 'success',
+            data = {
+              textResultForLlm = 'llm-only answer',
+            },
+          },
+        },
+      },
+    })
+    events.handle_session_event({
+      type = 'hook.end',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-text-result-only',
+        success = true,
+        output = {},
+      },
+    })
+
+    vim.wait(200)
+
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    local preview = trimmed_virt_lines(virt_lines)
+    assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+    assert_eq('llm-only answer', preview[2])
+    assert_eq(nil, preview[3])
+  end)
+
+  it('shows nothing for structured toolResult objects without sessionLog or textResultForLlm', function()
+    agent.open_chat()
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'git',
+        arguments = { 'status', '--short' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'hook.start',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-empty-structured-result',
+        input = {
+          toolName = 'bash',
+          toolArgs = {
+            command = 'git',
+            args = { 'status', '--short' },
+          },
+          toolResult = {
+            resultType = 'error',
+            data = {
+              ignored = 'metadata only',
+            },
+          },
+        },
+      },
+    })
+    events.handle_session_event({
+      type = 'hook.end',
+      data = {
+        hookType = 'postToolUse',
+        hookInvocationId = 'hook-post-tool-use-empty-structured-result',
+        success = true,
+        output = {},
+      },
+    })
+
+    vim.wait(200)
+
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+    assert_eq(1, #extmarks)
+
+    local virt_lines = extmarks[1][4].virt_lines or {}
+    local preview = trimmed_virt_lines(virt_lines)
+    assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+    assert_eq(nil, preview[2])
+  end)
+
+  it('unwraps nested postToolUse result wrappers instead of showing inspect braces', function()
+    agent.open_chat()
+
+    local original_max_lines = agent.state.config.chat.reasoning.max_lines
+    agent.state.config.chat.reasoning.max_lines = 4
+    local ok, err = pcall(function()
+      local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
+      events.handle_session_event({
+        type = 'tool.execution_start',
+        data = {
+          toolName = 'bash',
+          command = 'git',
+          arguments = { 'status', '--short' },
+        },
+      })
+      events.handle_session_event({
+        type = 'tool.execution_complete',
+        data = {},
+      })
+      events.handle_session_event({
+        type = 'hook.start',
+        data = {
+          hookType = 'postToolUse',
+          hookInvocationId = 'hook-post-tool-use-nested-wrapper',
+          input = {
+            toolName = 'bash',
+            toolArgs = {
+              command = 'git',
+              args = { 'status', '--short' },
+            },
+            toolResult = 'raw tool output',
+          },
+        },
+      })
+      events.handle_session_event({
+        type = 'hook.end',
+        data = {
+          hookType = 'postToolUse',
+          hookInvocationId = 'hook-post-tool-use-nested-wrapper',
+          success = true,
+          output = {
+            modifiedResult = {
+              wrapper = {
+                output = { 'one', 'two', 'three', 'four', 'five' },
+              },
+            },
+          },
+        },
+      })
+
+      vim.wait(200)
+
+      local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.chat_bufnr, ns, 0, -1, { details = true })
+      assert_eq(1, #extmarks)
+
+      local virt_lines = extmarks[1][4].virt_lines or {}
+      local preview = trimmed_virt_lines(virt_lines)
+      local joined = table.concat(preview, '\n')
+      assert_eq('Activity: 🔧 bash — git status --short', preview[1])
+      assert_eq('three', preview[2])
+      assert_eq('four', preview[3])
+      assert_eq('five', preview[4])
+      assert_eq(nil, preview[5])
+      assert_true(joined:find('}', 1, true) == nil)
+      assert_true(joined:find('"', 1, true) == nil)
+    end)
+    agent.state.config.chat.reasoning.max_lines = original_max_lines
+    if not ok then
+      error(err)
+    end
   end)
 
   it('clears shell activity when a new assistant turn starts before execution completes', function()
@@ -2170,7 +2729,6 @@ describe('model state sync', function()
     extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
     assert_eq(0, #extmarks)
   end)
-
 end)
 
 describe('statusline config counts', function()
@@ -3400,10 +3958,7 @@ describe('diff command', function()
     assert_eq('/tmp/checkpoint-workspace', captured_commands[1].cwd)
     assert_eq('/tmp/checkpoint-workspace', captured_commands[2].cwd)
     assert_eq('system', agent.state.entries[#agent.state.entries].kind)
-    assert_eq(
-      'Checkpoint diff v002:\nlua/copilot_agent/init.lua | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)',
-      agent.state.entries[#agent.state.entries].content
-    )
+    assert_eq('Checkpoint diff v002:\nlua/copilot_agent/init.lua | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)', agent.state.entries[#agent.state.entries].content)
   end)
 
   it('uses latest checkpoint parent->checkpoint commits for /diff with no args', function()
@@ -3465,10 +4020,7 @@ describe('diff command', function()
     assert_eq('/tmp/checkpoint-workspace', captured_commands[1].cwd)
     assert_eq('/tmp/checkpoint-workspace', captured_commands[2].cwd)
     assert_eq('system', agent.state.entries[#agent.state.entries].kind)
-    assert_eq(
-      'Checkpoint diff v003:\nlua/copilot_agent/slash.lua | 3 ++-\n1 file changed, 2 insertions(+), 1 deletion(-)',
-      agent.state.entries[#agent.state.entries].content
-    )
+    assert_eq('Checkpoint diff v003:\nlua/copilot_agent/slash.lua | 3 ++-\n1 file changed, 2 insertions(+), 1 deletion(-)', agent.state.entries[#agent.state.entries].content)
   end)
 
   it('opens Diffview when /diff is given --difftool Diffview', function()
@@ -3571,7 +4123,15 @@ describe('diff command', function()
       'add',
       '--detach',
       '--force',
-    }, { system_commands[3].args[1], system_commands[3].args[2], system_commands[3].args[3], system_commands[3].args[4], system_commands[3].args[5], system_commands[3].args[6], system_commands[3].args[7] })
+    }, {
+      system_commands[3].args[1],
+      system_commands[3].args[2],
+      system_commands[3].args[3],
+      system_commands[3].args[4],
+      system_commands[3].args[5],
+      system_commands[3].args[6],
+      system_commands[3].args[7],
+    })
     assert_eq('bbb222', system_commands[3].args[9])
     assert_true(system_commands[3].args[8]:find('/copilot%-agent/difftool%-worktrees/', 1) ~= nil)
     assert.same({
@@ -3822,17 +4382,24 @@ describe('lsp slash command', function()
   it('reports status, show, test, and help through notifications', function()
     local config_path = temp_workspace .. '/.github/lsp.json'
     vim.fn.mkdir(temp_workspace .. '/.github', 'p')
-    vim.fn.writefile(vim.split(vim.json.encode({
-      lspServers = {
-        gopls = {
-          command = 'gopls',
-          args = {},
-          fileExtensions = {
-            ['.go'] = 'go',
+    vim.fn.writefile(
+      vim.split(
+        vim.json.encode({
+          lspServers = {
+            gopls = {
+              command = 'gopls',
+              args = {},
+              fileExtensions = {
+                ['.go'] = 'go',
+              },
+            },
           },
-        },
-      },
-    }, { indent = '  ' }), '\n', { plain = true }), config_path)
+        }, { indent = '  ' }),
+        '\n',
+        { plain = true }
+      ),
+      config_path
+    )
 
     assert_true(slash.execute('/lsp status'))
     assert_true(notifications[#notifications].message:find('LSP status', 1, true) ~= nil)
@@ -6054,6 +6621,304 @@ describe('chat input behavior', function()
       },
       output_text = 'full diff output\nsecond line',
     }, entry.activity_items[1])
+  end)
+
+  it('merges late assistant usage into the trailing activity block and previews it in collapsed transcript view', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'git',
+        arguments = { 'status', '--short' },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.usage',
+      data = {
+        model = 'gpt-5.4',
+        cost = 1,
+        duration = 3019,
+        inputTokens = 145411,
+        outputTokens = 86,
+        quotaSnapshots = {
+          premium_interactions = {
+            entitlementRequests = 300,
+            isUnlimitedEntitlement = false,
+            overage = 194.8,
+            overageAllowedWithExhaustedQuota = true,
+            remainingPercentage = 0,
+            resetDate = '2026-06-01T00:00:00Z',
+            usageAllowedWithExhaustedQuota = true,
+            usedRequests = 300,
+          },
+        },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-after-usage',
+        content = 'Usage is visible in the transcript now.',
+      },
+    })
+
+    vim.wait(250)
+
+    local activity_entries = {}
+    for _, entry in ipairs(agent.state.entries) do
+      if entry.kind == 'activity' then
+        activity_entries[#activity_entries + 1] = entry
+      end
+    end
+    assert_eq(1, #activity_entries)
+    assert_eq(
+      table.concat({
+        'Ran bash — git status --short',
+        'Usage: gpt-5.4 · cost 1 · 145k in · 86 out · 3s · premium 0%',
+      }, '\n'),
+      activity_entries[1].content
+    )
+    assert_eq('tool', activity_entries[1].activity_items[1].kind)
+    assert_eq('usage', activity_entries[1].activity_items[2].kind)
+    assert_eq(194.8, activity_entries[1].activity_items[2].usage.overage)
+    assert_eq(0, activity_entries[1].activity_items[2].usage.remaining_percentage)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Activity: git status --short (2 items hidden)',
+      '',
+      'Assistant:',
+      '  Usage is visible in the transcript now.',
+      '',
+    }, { unpack(lines, #lines - 4, #lines) })
+
+    assert_true(render.toggle_activity_entries())
+    local joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
+    assert_true(joined:find('Ran bash — git status --short', 1, true) ~= nil)
+    assert_true(joined:find('Usage: gpt-5.4 · cost 1 · 145k in · 86 out · 3s · premium 0%', 1, true) ~= nil)
+  end)
+
+  it('shows report_intent details when no higher-priority activity exists', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'report_intent',
+        intent = 'Finalizing process',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.usage',
+      data = {
+        model = 'gpt-5.3-codex',
+        cost = 1,
+        inputTokens = 149,
+        outputTokens = 17,
+        duration = 901,
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-after-report-intent',
+        content = 'Intent summary rendered.',
+      },
+    })
+
+    vim.wait(250)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Activity: Used report_intent Finalizing process (2 items hidden)',
+      '',
+      'Assistant:',
+      '  Intent summary rendered.',
+      '',
+    }, { unpack(lines, #lines - 4, #lines) })
+  end)
+
+  it('prefers tool execution over report_intent and usage in collapsed activity preview', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'report_intent',
+        intent = 'Validating statusline fix',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        command = 'rg',
+        arguments = { 'activity', 'lua/copilot_agent' },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.usage',
+      data = {
+        model = 'gpt-5.3-codex',
+        cost = 1,
+        inputTokens = 149,
+        outputTokens = 17,
+        duration = 901,
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-after-priority',
+        content = 'Priority summary rendered.',
+      },
+    })
+
+    vim.wait(250)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    assert.same({
+      'Activity: rg activity lua/copilot_agent (3 items hidden)',
+      '',
+      'Assistant:',
+      '  Priority summary rendered.',
+      '',
+    }, { unpack(lines, #lines - 4, #lines) })
+  end)
+
+  it('shows assistant usage metrics and quotas in the activity details viewer', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+    local chat_bufnr = agent.state.chat_bufnr
+    local chat_winid = agent.state.chat_winid
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'assistant.usage',
+      data = {
+        model = 'gpt-5.4',
+        initiator = 'agent',
+        cost = 1,
+        duration = 3019,
+        inputTokens = 145411,
+        outputTokens = 86,
+        cacheReadTokens = 145280,
+        quotaSnapshots = {
+          premium_interactions = {
+            entitlementRequests = 300,
+            isUnlimitedEntitlement = false,
+            overage = 194.8,
+            overageAllowedWithExhaustedQuota = true,
+            remainingPercentage = 0,
+            resetDate = '2026-06-01T00:00:00Z',
+            usageAllowedWithExhaustedQuota = true,
+            usedRequests = 300,
+          },
+        },
+      },
+    })
+
+    vim.wait(250)
+
+    local activity_idx = #agent.state.entries
+    local activity_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == activity_idx then
+        activity_row = row
+        break
+      end
+    end
+    assert_not_nil(activity_row)
+
+    local original_open_win = vim.api.nvim_open_win
+    local viewer_buf
+    vim.api.nvim_open_win = function(buf, enter, config)
+      local winid = original_open_win(buf, enter, config)
+      if buf ~= chat_bufnr then
+        viewer_buf = buf
+      end
+      return winid
+    end
+
+    vim.api.nvim_win_set_cursor(chat_winid, { activity_row + 1, 0 })
+    local opened = render.show_activity_details_under_cursor(chat_winid)
+    vim.api.nvim_open_win = original_open_win
+
+    assert_true(opened)
+    assert_not_nil(viewer_buf)
+    local joined = table.concat(vim.api.nvim_buf_get_lines(viewer_buf, 0, -1, false), '\n')
+    assert_true(joined:find('## Usage 1 — gpt-5.4', 1, true) ~= nil)
+    assert_true(joined:find('- **Cost:** 1', 1, true) ~= nil)
+    assert_true(joined:find('- **Input tokens:** 145411', 1, true) ~= nil)
+    assert_true(joined:find('- **Output tokens:** 86', 1, true) ~= nil)
+    assert_true(joined:find('- **Cache read tokens:** 145280', 1, true) ~= nil)
+    assert_true(joined:find('- **Duration:** 3019 ms', 1, true) ~= nil)
+    assert_true(joined:find('- **premium_interactions:** 0% remaining, 300 / 300 used, overage 194.8, resets 2026-06-01T00:00:00Z', 1, true) ~= nil)
   end)
 
   it('opens a floating activity details viewer for the activity block under the cursor', function()

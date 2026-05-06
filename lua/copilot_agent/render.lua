@@ -50,13 +50,11 @@ local ACTIVITY_DETAIL_PREFIXES = {
   'Started ',
 }
 
-local SPINNER_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local CHAT_HL_NS = vim.api.nvim_create_namespace('copilot_agent_chat')
 local REASONING_NS = vim.api.nvim_create_namespace('copilot_agent_reasoning')
 local RENDER_DEBOUNCE_MS = 150 -- Batch transcript redraws so UI updates stay smooth during bursts of events.
 local STREAM_DEBOUNCE_MS = 80 -- Coalesce token streaming updates without making responses feel laggy.
 local REASONING_DEBOUNCE_MS = 80 -- Refresh reasoning overlay at the same cadence as streamed transcript updates.
-local SPINNER_INTERVAL_MS = 500 -- Half-second spinner cadence keeps motion visible without looking noisy.
 local CHAT_SCROLL_GUARD_MS = 80 -- Ignore WinScrolled events triggered by our own transcript repositioning.
 local OVERLAY_BOTTOM_GUTTER_MIN_LINES = 5 -- Keep at least a few transcript lines visible below the activity overlay.
 local OVERLAY_TAIL_SPACER_LINES = 3 -- Leave spacer rows so bottom-anchored virtual lines do not sit flush with content.
@@ -819,14 +817,6 @@ local function plain_separator_chunks()
   }
 end
 
-local function active_thinking_entry_index()
-  local key = state.thinking_entry_key
-  if type(key) ~= 'string' or key == '' then
-    return nil
-  end
-  return state.assistant_entries[key]
-end
-
 local function pending_assistant_entry_key()
   if type(state.pending_assistant_entry_key) == 'string' and state.pending_assistant_entry_key ~= '' then
     return state.pending_assistant_entry_key
@@ -1323,8 +1313,7 @@ local function is_report_intent_activity_line(line)
   if type(line) ~= 'string' or line == '' then
     return false
   end
-  return line:match('^Used%s+report_intent$') ~= nil
-    or line:match('^Used%s+report_intent%s+') ~= nil
+  return line:match('^Used%s+report_intent$') ~= nil or line:match('^Used%s+report_intent%s+') ~= nil
 end
 
 local function activity_preview_text(line)
@@ -1632,7 +1621,7 @@ end
 -- entry_lines: format one entry into a list of display lines.
 -- align: when true (default), apply align_tables. Pass false during streaming
 --        to skip the O(n) table scan on every incremental update.
-function M.entry_lines(entry, idx, align)
+function M.entry_lines(entry, _idx, align)
   if align == nil then
     align = true
   end

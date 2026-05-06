@@ -884,8 +884,14 @@ function M.ask(prompt, opts)
   opts = opts or {}
   local text = prompt
   if text == nil or text == '' then
-    require('copilot_agent').open_chat({ replace_current = opts.replace_current })
-    require('copilot_agent.input').open_input_window()
+    M.ensure_chat_window({ replace_current = opts.replace_current })
+    if state.session_id then
+      require('copilot_agent.input').open_input_window()
+    else
+      require('copilot_agent.session').with_session(function() end, {
+        open_input_on_session_ready = true,
+      })
+    end
     return
   end
 

@@ -144,6 +144,51 @@ func TestFirstNonEmptyNoArgs(t *testing.T) {
 	}
 }
 
+func TestSessionIDPrefixForWorkingDirectoryUsesRepoFolder(t *testing.T) {
+	t.Parallel()
+
+	if got := sessionIDPrefixForWorkingDirectory("/tmp/go.nvim"); got != "go-nvim" {
+		t.Fatalf("expected go-nvim, got %q", got)
+	}
+}
+
+func TestSessionIDPrefixForWorkingDirectoryTruncatesToEightCharacters(t *testing.T) {
+	t.Parallel()
+
+	if got := sessionIDPrefixForWorkingDirectory("/tmp/copilot-agent.nvim"); got != "copilot" {
+		t.Fatalf("expected copilot, got %q", got)
+	}
+}
+
+func TestSessionIDPrefixForWorkingDirectorySanitizesAndFallsBack(t *testing.T) {
+	t.Parallel()
+
+	if got := sessionIDPrefixForWorkingDirectory("/tmp/My Repo!"); got != "my-repo" {
+		t.Fatalf("expected my-repo, got %q", got)
+	}
+	if got := sessionIDPrefixForWorkingDirectory("/tmp/!!!"); got != sessionIDPrefix {
+		t.Fatalf("expected fallback prefix %q, got %q", sessionIDPrefix, got)
+	}
+}
+
+func TestNewSessionIDUsesSanitizedRepoPrefix(t *testing.T) {
+	t.Parallel()
+
+	sessionID := newSessionID("/tmp/copilot-agent.nvim")
+	if !strings.HasPrefix(sessionID, "copilot-") {
+		t.Fatalf("expected copilot-prefixed session ID, got %q", sessionID)
+	}
+	suffix := strings.TrimPrefix(sessionID, "copilot-")
+	if suffix == "" {
+		t.Fatalf("expected timestamp suffix in %q", sessionID)
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			t.Fatalf("expected numeric timestamp suffix in %q", sessionID)
+		}
+	}
+}
+
 // ── queryBool ─────────────────────────────────────────────────────────────────
 
 func TestQueryBoolRecognisesTrueValues(t *testing.T) {

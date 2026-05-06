@@ -1141,8 +1141,7 @@ local function extract_structured_tool_result_text(value, depth, visited)
     result_type = result_type:lower()
   end
   local data = type(value.data) == 'table' and value.data or nil
-  local handled = structured_tool_result_types[result_type] == true
-    or (data ~= nil and (data.sessionLog ~= nil or data.textResultForLlm ~= nil))
+  local handled = structured_tool_result_types[result_type] == true or (data ~= nil and (data.sessionLog ~= nil or data.textResultForLlm ~= nil))
   if not handled then
     return nil, false
   end
@@ -1482,9 +1481,7 @@ local function extract_post_tool_use_tool_detail(tool_name, input)
     toolArgs = input.toolArgs,
     payload = input.toolArgs,
   }
-  return extract_shell_tool_detail(tool_name, payload)
-    or summarize_shell_command_for_activity(payload)
-    or find_activity_string(input, { 'summary', 'description' })
+  return extract_shell_tool_detail(tool_name, payload) or summarize_shell_command_for_activity(payload) or find_activity_string(input, { 'summary', 'description' })
 end
 
 local function extract_post_tool_use_result_text(start_input, hook_output, fallback_output_text)

@@ -5569,6 +5569,28 @@ describe('chat session activation', function()
     assert_true(captured_opts.open_input_on_session_ready)
   end)
 
+  it('re-requests session activation instead of opening input when no session is active', function()
+    local original_with_session = session.with_session
+    local captured_opts = {}
+
+    session.with_session = function(_, opts)
+      captured_opts[#captured_opts + 1] = opts
+    end
+
+    agent.state.config.auto_create_session = true
+    agent.open_chat()
+    agent.ask()
+
+    session.with_session = original_with_session
+
+    assert_eq(2, #captured_opts)
+    assert_true(type(captured_opts[1]) == 'table')
+    assert_true(captured_opts[1].open_input_on_session_ready)
+    assert_true(type(captured_opts[2]) == 'table')
+    assert_true(captured_opts[2].open_input_on_session_ready)
+    assert_true(not (agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid)))
+  end)
+
   it('opens chat from a floating current window by splitting a normal window instead', function()
     local float_buf = vim.api.nvim_create_buf(false, true)
     local float_win = vim.api.nvim_open_win(float_buf, true, {
@@ -5611,6 +5633,23 @@ describe('chat session activation', function()
 
     assert_true(type(captured_opts) == 'table')
     assert_eq(false, captured_opts.activate_input_on_session_ready)
+  end)
+
+  it('opens input immediately when a session is already active', function()
+    local input = require('copilot_agent.input')
+    local original_open_input_window = input.open_input_window
+    local opened = false
+
+    agent.state.session_id = 'session-123'
+    input.open_input_window = function()
+      opened = true
+    end
+
+    agent.ask()
+
+    input.open_input_window = original_open_input_window
+
+    assert_true(opened)
   end)
 
   it('opens the input window when the selected session becomes ready', function()

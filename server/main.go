@@ -45,6 +45,7 @@ const (
 	permissionRequestIDPrefix  = "perm"
 	userInputRequestIDPrefix   = "input"
 	sessionIDPrefix            = "nvim"
+	sessionIDPrefixMaxLen      = 8
 )
 
 type createSessionRequest struct {
@@ -420,8 +421,15 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var workingDirectory string
 	if req.SessionID == "" {
-		req.SessionID = newSessionID()
+		resolvedWorkingDirectory, err := s.resolveSessionWorkingDirectory(req.WorkingDirectory)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		workingDirectory = resolvedWorkingDirectory
+		req.SessionID = newSessionID(workingDirectory)
 	}
 
 	if req.PermissionMode == "" {
@@ -437,10 +445,13 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workingDirectory, err := s.resolveSessionWorkingDirectory(req.WorkingDirectory)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	if workingDirectory == "" {
+		var err error
+		workingDirectory, err = s.resolveSessionWorkingDirectory(req.WorkingDirectory)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	streaming := boolOrDefault(req.Streaming, true)
@@ -1918,6 +1929,42 @@ func isValidPermissionMode(value string) bool {
 	}
 }
 
-func newSessionID() string {
-	return fmt.Sprintf("%s-%d", sessionIDPrefix, time.Now().UnixNano())
+func sessionIDPrefixForWorkingDirectory(workingDirectory string) string {
+	repo := strings.TrimSpace(filepath.Base(filepath.Clean(workingDirectory)))
+	if repo == "" || repo == "." || repo == string(filepath.Separator) {
+		return sessionIDPrefix
+	}
+
+	var builder strings.Builder
+	lastSeparator := false
+	for _, r := range strings.ToLower(repo) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastSeparator = false
+		case r == '-' || r == '_':
+			if builder.Len() > 0 && !lastSeparator {
+				builder.WriteRune(r)
+				lastSeparator = true
+			}
+		default:
+			if builder.Len() > 0 && !lastSeparator {
+				builder.WriteByte('-')
+				lastSeparator = true
+			}
+		}
+	}
+
+	prefix := strings.Trim(builder.String(), "-_")
+	if len(prefix) > sessionIDPrefixMaxLen {
+		prefix = strings.TrimRight(prefix[:sessionIDPrefixMaxLen], "-_")
+	}
+	if prefix == "" {
+		return sessionIDPrefix
+	}
+	return prefix
+}
+
+func newSessionID(workingDirectory string) string {
+	return fmt.Sprintf("%s-%d", sessionIDPrefixForWorkingDirectory(workingDirectory), time.Now().UnixNano())
 }

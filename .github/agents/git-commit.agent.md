@@ -76,6 +76,9 @@ Message rules:
 - keep the subject concise and specific
 - use the staged diff, not the working tree, to describe the commit
 - add a body when the reason or scope is not obvious from the subject alone
+- when a body is present, separate it from the subject with a blank line and use real newline characters, never literal `\n` escape sequences
+- prefer a short markdown-style bullet list in the body when summarizing several distinct changes
+- wrap body lines to a readable width instead of emitting one long line
 
 If the user provides a draft message, review it against the staged diff and suggest a better version when it is vague, misleading, too broad, or misclassified.
 
@@ -108,5 +111,5 @@ If checks fail only because a required tool is missing, say that plainly and sto
 4. stop and report actionable issues if checks fail
 5. generate or refine the commit message from the staged diff
 6. if the user asked only for a message, return the proposed subject and body without committing
-7. if the user explicitly asked to create/apply the commit, run `git commit` non-interactively using the generated message after checks pass
+7. if the user explicitly asked to create/apply the commit, preserve multiline formatting exactly: prefer writing the full message to a temporary file and use `git commit -F <file>` or `git commit --amend -F <file>` instead of shell-escaping newlines into a single argument
 8. report the created commit SHA and final subject line after the commit succeeds

@@ -31,6 +31,22 @@ local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
 local session_label_max_len = 32
 local is_list = vim.islist or vim.tbl_islist
 local separator_ns = vim.api.nvim_create_namespace('copilot_agent_input_separator')
+local mcp_action_lookup = {
+  add = true,
+  show = true,
+  edit = true,
+  delete = true,
+  disable = true,
+  enable = true,
+  reload = true,
+}
+local mcp_name_action_lookup = {
+  show = true,
+  edit = true,
+  delete = true,
+  disable = true,
+  enable = true,
+}
 
 local function conversation_separator_text(width)
   width = math.max(tonumber(width) or 0, 12)
@@ -151,6 +167,7 @@ local function command_completion_context(before)
         kind = command,
         start = start_pos,
         ['end'] = end_pos,
+        raw_query = raw_query,
         query = vim.trim(raw_query),
         at_token_end = (end_pos or start_pos) == #before,
       }
@@ -202,6 +219,18 @@ local function lsp_action_items()
     'show',
     'test',
     'help',
+  }
+end
+
+local function mcp_action_items()
+  return {
+    'add',
+    'show',
+    'edit',
+    'delete',
+    'disable',
+    'enable',
+    'reload',
   }
 end
 
@@ -425,14 +454,50 @@ local function input_omnifunc(findstart, base)
       end
     end
   elseif command_context and command_context.kind == 'mcp' then
-    local query = command_context.query:lower()
-    for _, name in ipairs(discovered_mcp_names()) do
-      if query == '' or vim.startswith(name:lower(), query) then
-        table.insert(items, {
-          word = '/mcp ' .. name,
-          abbr = name,
-          menu = '[mcp]',
-        })
+    local raw_query = command_context.raw_query or command_context.query
+    local query = vim.trim(raw_query or '')
+    local tokens = query == '' and {} or vim.split(query, '%s+', { trimempty = true })
+    local has_trailing_space = type(raw_query) == 'string' and raw_query:match('%s$') ~= nil
+    local action = (#tokens > 0 and tokens[1]:lower()) or ''
+    local completing_name = mcp_name_action_lookup[action] and (#tokens > 1 or has_trailing_space)
+
+    if completing_name then
+      local name_query = ''
+      if #tokens > 1 and not has_trailing_space then
+        name_query = tokens[#tokens]:lower()
+      end
+      for _, name in ipairs(discovered_mcp_names()) do
+        if name_query == '' or vim.startswith(name:lower(), name_query) then
+          table.insert(items, {
+            word = '/mcp ' .. action .. ' ' .. name,
+            abbr = name,
+            menu = '[mcp]',
+          })
+        end
+      end
+    else
+      local action_query = action
+      for _, item in ipairs(mcp_action_items()) do
+        if action_query == '' or vim.startswith(item, action_query) then
+          table.insert(items, {
+            word = '/mcp ' .. item,
+            abbr = item,
+            menu = '[mcp]',
+          })
+        end
+      end
+
+      if #tokens == 0 or not mcp_action_lookup[action] then
+        local name_query = (#tokens > 0 and action or ''):lower()
+        for _, name in ipairs(discovered_mcp_names()) do
+          if name_query == '' or vim.startswith(name:lower(), name_query) then
+            table.insert(items, {
+              word = name,
+              abbr = name,
+              menu = '[mcp]',
+            })
+          end
+        end
       end
     end
   elseif command_context and command_context.kind == 'instructions' then

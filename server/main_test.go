@@ -192,11 +192,22 @@ func TestNewSessionIDUsesSanitizedRepoPrefix(t *testing.T) {
 func TestShouldReplayHistoryEventSkipsPermissionEvents(t *testing.T) {
 	t.Parallel()
 
-	if shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.requested"}) {
+	if shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.requested"}, false) {
 		t.Fatal("expected permission.requested to be skipped during history replay")
 	}
-	if shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.completed"}) {
+	if shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.completed"}, false) {
 		t.Fatal("expected permission.completed to be skipped during history replay")
+	}
+}
+
+func TestShouldReplayHistoryEventAllowsPermissionEventsWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	if !shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.requested"}, true) {
+		t.Fatal("expected permission.requested to replay when explicitly enabled")
+	}
+	if !shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.completed"}, true) {
+		t.Fatal("expected permission.completed to replay when explicitly enabled")
 	}
 }
 
@@ -206,14 +217,14 @@ func TestShouldReplayHistoryEventSkipsEmptyAssistantMessages(t *testing.T) {
 	if shouldReplayHistoryEvent(copilot.SessionEvent{
 		Type: copilot.SessionEventTypeAssistantMessage,
 		Data: &copilot.AssistantMessageData{},
-	}) {
+	}, false) {
 		t.Fatal("expected empty assistant message without tool requests to be skipped")
 	}
 
 	if !shouldReplayHistoryEvent(copilot.SessionEvent{
 		Type: copilot.SessionEventTypeAssistantMessage,
 		Data: &copilot.AssistantMessageData{Content: "hello"},
-	}) {
+	}, false) {
 		t.Fatal("expected assistant message with content to be replayed")
 	}
 }
@@ -480,6 +491,29 @@ func TestCountDiscoverableConfigCountsMCPServers(t *testing.T) {
 	}
 	if mcp != 3 {
 		t.Fatalf("expected 3 MCP servers, got %d", mcp)
+	}
+}
+
+func TestCountDiscoverableConfigCountsMCPWithoutGithubDir(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"fff":{}}}`), 0o644); err != nil {
+		t.Fatalf("write root mcp config: %v", err)
+	}
+
+	instructions, agents, skills, mcp := countDiscoverableConfig(root)
+	if instructions != 0 {
+		t.Fatalf("expected 0 instructions, got %d", instructions)
+	}
+	if agents != 0 {
+		t.Fatalf("expected 0 agents, got %d", agents)
+	}
+	if skills != 0 {
+		t.Fatalf("expected 0 skills, got %d", skills)
+	}
+	if mcp != 1 {
+		t.Fatalf("expected 1 MCP server, got %d", mcp)
 	}
 }
 

@@ -108,6 +108,7 @@ local defaults = {
     agent = nil,
     streaming = true,
     enable_config_discovery = true,
+    replay_permission_history = false, -- false = skip permission.requested/completed during session-history replay for faster loads; true = replay them too
     -- 'prompt' (default): show a picker when multiple sessions exist for this project.
     -- 'auto': silently resume the most recent matching session without prompting.
     auto_resume = 'prompt',

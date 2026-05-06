@@ -28,6 +28,7 @@ local append_entry = render.append_entry
 local refresh_statuslines = sl.refresh_statuslines
 local request = http.request
 local split_lines = utils.split_lines
+local is_list = vim.islist or vim.tbl_islist
 
 local M = {}
 local SEARCH_LABEL_MAX_LEN = 72 -- Long search hits should stay scannable inside vim.ui.select pickers.
@@ -1325,8 +1326,536 @@ local function instructions_command(args)
   return open_discovered_item('instruction', discovery.instruction_items(), args)
 end
 
+local function mcp_config_paths()
+  local wd = working_directory()
+  return {
+    root = wd .. '/.mcp.json',
+    vscode = wd .. '/.vscode/mcp.json',
+  }
+end
+
+local function encode_json_pretty(value)
+  if vim.json and type(vim.json.encode) == 'function' then
+    return vim.json.encode(value, { indent = '  ' })
+  end
+  return http.encode_json(value)
+end
+
+local function read_mcp_config(path)
+  if vim.fn.filereadable(path) ~= 1 then
+    return nil, nil
+  end
+
+  local decoded, decode_err = http.decode_json(table.concat(vim.fn.readfile(path), '\n'), { log = false })
+  if type(decoded) ~= 'table' then
+    return nil, 'Failed to parse ' .. vim.fn.fnamemodify(path, ':~:.') .. ': ' .. tostring(decode_err)
+  end
+  return decoded, nil
+end
+
+local function write_mcp_config(path, payload)
+  local parent = vim.fn.fnamemodify(path, ':h')
+  if parent ~= '' then
+    vim.fn.mkdir(parent, 'p')
+  end
+
+  local encoded = encode_json_pretty(payload)
+  local ok, err = pcall(vim.fn.writefile, vim.split(encoded, '\n', { plain = true }), path)
+  if not ok then
+    return nil, err
+  end
+  return true
+end
+
+local function load_mcp_sources()
+  local sources = {}
+  local paths = mcp_config_paths()
+  for _, path in ipairs({ paths.root, paths.vscode }) do
+    local payload, err = read_mcp_config(path)
+    if err then
+      return nil, err
+    end
+    if payload then
+      sources[#sources + 1] = { path = path, payload = payload }
+    end
+  end
+  return sources, nil
+end
+
+local function collect_mcp_entries(sources)
+  local entries = {}
+  for _, source in ipairs(sources or {}) do
+    for _, container in ipairs({ 'mcpServers', 'servers' }) do
+      local servers = source.payload[container]
+      if type(servers) == 'table' then
+        if is_list and is_list(servers) then
+          for index, entry in ipairs(servers) do
+            local name = nil
+            local disabled = false
+            if type(entry) == 'string' then
+              name = entry
+            elseif type(entry) == 'table' then
+              name = entry.name or entry.id
+              disabled = entry.disabled == true
+            end
+            if type(name) == 'string' and name ~= '' then
+              entries[#entries + 1] = {
+                name = name,
+                path = source.path,
+                container = container,
+                list = true,
+                index = index,
+                disabled = disabled,
+              }
+            end
+          end
+        else
+          for name, entry in pairs(servers) do
+            if type(name) == 'string' and name ~= '' then
+              entries[#entries + 1] = {
+                name = name,
+                path = source.path,
+                container = container,
+                list = false,
+                key = name,
+                disabled = type(entry) == 'table' and entry.disabled == true,
+              }
+            end
+          end
+        end
+      end
+    end
+  end
+
+  table.sort(entries, function(left, right)
+    if left.name ~= right.name then
+      return left.name < right.name
+    end
+    if left.path ~= right.path then
+      return left.path < right.path
+    end
+    if left.container ~= right.container then
+      return left.container < right.container
+    end
+    return (left.index or 0) < (right.index or 0)
+  end)
+  return entries
+end
+
+local function find_mcp_entries(entries, target_name)
+  local needle = vim.trim(target_name or '')
+  if needle == '' then
+    return entries
+  end
+
+  needle = needle:lower()
+  local matches = {}
+  for _, entry in ipairs(entries or {}) do
+    if entry.name:lower() == needle then
+      matches[#matches + 1] = entry
+    end
+  end
+  return matches
+end
+
+local function mcp_entry_label(entry)
+  local status = entry.disabled and 'disabled' or 'enabled'
+  return string.format('%s (%s)  [%s]', entry.name, status, vim.fn.fnamemodify(entry.path, ':~:.'))
+end
+
+local function mcp_source_map(sources)
+  local map = {}
+  for _, source in ipairs(sources or {}) do
+    map[source.path] = source
+  end
+  return map
+end
+
+local function ensure_root_mcp_config()
+  local path = mcp_config_paths().root
+  local payload, err = read_mcp_config(path)
+  if err then
+    return nil, nil, err
+  end
+  return path, payload or {}, nil
+end
+
+local function mcp_show_command(target_name)
+  local sources, source_err = load_mcp_sources()
+  if source_err then
+    append_entry('error', source_err)
+    return true
+  end
+
+  local entries = collect_mcp_entries(sources)
+  if vim.tbl_isempty(entries) then
+    append_entry('system', 'No MCP servers configured in .mcp.json or .vscode/mcp.json')
+    return true
+  end
+
+  local selected = find_mcp_entries(entries, target_name)
+  if vim.tbl_isempty(selected) then
+    append_entry('error', 'Unknown MCP server: ' .. target_name)
+    return true
+  end
+
+  local lines = {}
+  if vim.trim(target_name or '') == '' then
+    lines[#lines + 1] = 'Discovered MCP servers:'
+  else
+    lines[#lines + 1] = 'MCP server "' .. target_name .. '":'
+  end
+
+  for _, entry in ipairs(selected) do
+    lines[#lines + 1] = '  - ' .. mcp_entry_label(entry)
+  end
+
+  append_entry('system', table.concat(lines, '\n'))
+  return true
+end
+
+local function mcp_edit_command(target_name)
+  target_name = vim.trim(target_name or '')
+
+  if target_name == '' then
+    local items = discovery.mcp_items()
+    if not vim.tbl_isempty(items) then
+      return open_discovered_item('MCP config', items, '')
+    end
+
+    local path, payload, ensure_err = ensure_root_mcp_config()
+    if ensure_err then
+      append_entry('error', ensure_err)
+      return true
+    end
+
+    if type(payload.mcpServers) ~= 'table' or (is_list and is_list(payload.mcpServers)) then
+      payload.mcpServers = {}
+    end
+    if vim.fn.filereadable(path) ~= 1 then
+      local ok, write_err = write_mcp_config(path, payload)
+      if not ok then
+        append_entry('error', 'Failed to write ' .. vim.fn.fnamemodify(path, ':~:.') .. ': ' .. tostring(write_err))
+        return true
+      end
+      append_entry('system', 'Created ' .. vim.fn.fnamemodify(path, ':~:.') .. ' for MCP configuration')
+    end
+    open_path(path)
+    return true
+  end
+
+  local sources, source_err = load_mcp_sources()
+  if source_err then
+    append_entry('error', source_err)
+    return true
+  end
+
+  local entries = find_mcp_entries(collect_mcp_entries(sources), target_name)
+  if vim.tbl_isempty(entries) then
+    append_entry('error', 'Unknown MCP server: ' .. target_name)
+    return true
+  end
+  if #entries == 1 then
+    open_path(entries[1].path)
+    return true
+  end
+
+  vim.ui.select(entries, {
+    prompt = 'Select MCP config to edit',
+    format_item = mcp_entry_label,
+  }, function(choice)
+    if choice then
+      open_path(choice.path)
+    end
+  end)
+  return true
+end
+
+local function parse_add_mcp_args(args)
+  local name, rest = vim.trim(args or ''):match('^(%S+)%s*(.*)$')
+  if not name then
+    return nil, nil, {}
+  end
+  local parts = {}
+  if vim.trim(rest or '') ~= '' then
+    parts = vim.split(vim.trim(rest), '%s+', { trimempty = true })
+  end
+
+  local command = parts[1]
+  local command_args = {}
+  if #parts > 1 then
+    for idx = 2, #parts do
+      command_args[#command_args + 1] = parts[idx]
+    end
+  end
+  return name, command, command_args
+end
+
+local function mcp_add_command(args)
+  local name, command, command_args = parse_add_mcp_args(args)
+  if not name then
+    append_entry('error', 'Usage: /mcp add <name> [command [arg...]]')
+    return true
+  end
+
+  local sources, source_err = load_mcp_sources()
+  if source_err then
+    append_entry('error', source_err)
+    return true
+  end
+  local existing = find_mcp_entries(collect_mcp_entries(sources), name)
+  if not vim.tbl_isempty(existing) then
+    append_entry('error', 'MCP server "' .. name .. '" already exists')
+    return true
+  end
+
+  local path, payload, ensure_err = ensure_root_mcp_config()
+  if ensure_err then
+    append_entry('error', ensure_err)
+    return true
+  end
+
+  local container
+  local list_container = false
+  if type(payload.mcpServers) == 'table' and not (is_list and is_list(payload.mcpServers)) then
+    container = payload.mcpServers
+  elseif type(payload.servers) == 'table' then
+    container = payload.servers
+    list_container = is_list and is_list(container)
+  else
+    payload.mcpServers = {}
+    container = payload.mcpServers
+  end
+
+  if list_container then
+    local list_entry = { name = name }
+    if command then
+      list_entry.command = command
+      list_entry.args = command_args
+    end
+    table.insert(container, list_entry)
+  else
+    local map_entry = {}
+    if command then
+      map_entry.command = command
+      map_entry.args = command_args
+    end
+    container[name] = map_entry
+  end
+
+  local ok, write_err = write_mcp_config(path, payload)
+  if not ok then
+    append_entry('error', 'Failed to write ' .. vim.fn.fnamemodify(path, ':~:.') .. ': ' .. tostring(write_err))
+    return true
+  end
+
+  open_path(path)
+  append_entry('system', 'Added MCP server "' .. name .. '" to ' .. vim.fn.fnamemodify(path, ':~:.'))
+  return true
+end
+
+local function mcp_delete_command(target_name)
+  target_name = vim.trim(target_name or '')
+  if target_name == '' then
+    append_entry('error', 'Usage: /mcp delete <name>')
+    return true
+  end
+
+  local sources, source_err = load_mcp_sources()
+  if source_err then
+    append_entry('error', source_err)
+    return true
+  end
+
+  local entries = find_mcp_entries(collect_mcp_entries(sources), target_name)
+  if vim.tbl_isempty(entries) then
+    append_entry('error', 'Unknown MCP server: ' .. target_name)
+    return true
+  end
+
+  local source_map = mcp_source_map(sources)
+  local list_removals = {}
+  local changed_paths = {}
+  for _, entry in ipairs(entries) do
+    local source = source_map[entry.path]
+    if source then
+      local servers = source.payload[entry.container]
+      if type(servers) == 'table' then
+        if entry.list then
+          local group_key = entry.path .. '\0' .. entry.container
+          local group = list_removals[group_key]
+          if not group then
+            group = { source = source, container = entry.container, indices = {} }
+            list_removals[group_key] = group
+          end
+          group.indices[#group.indices + 1] = entry.index
+        else
+          servers[entry.key] = nil
+          changed_paths[entry.path] = true
+        end
+      end
+    end
+  end
+
+  for _, removal in pairs(list_removals) do
+    local servers = removal.source.payload[removal.container]
+    table.sort(removal.indices, function(left, right)
+      return left > right
+    end)
+    for _, index in ipairs(removal.indices) do
+      table.remove(servers, index)
+    end
+    changed_paths[removal.source.path] = true
+  end
+
+  for path in pairs(changed_paths) do
+    local ok, write_err = write_mcp_config(path, source_map[path].payload)
+    if not ok then
+      append_entry('error', 'Failed to write ' .. vim.fn.fnamemodify(path, ':~:.') .. ': ' .. tostring(write_err))
+      return true
+    end
+  end
+
+  append_entry('system', string.format('Deleted MCP server "%s" from %d entr%s', target_name, #entries, #entries == 1 and 'y' or 'ies'))
+  return true
+end
+
+local function mcp_set_disabled(target_name, disabled)
+  target_name = vim.trim(target_name or '')
+  if target_name == '' then
+    append_entry('error', string.format('Usage: /mcp %s <name>', disabled and 'disable' or 'enable'))
+    return true
+  end
+
+  local sources, source_err = load_mcp_sources()
+  if source_err then
+    append_entry('error', source_err)
+    return true
+  end
+
+  local entries = find_mcp_entries(collect_mcp_entries(sources), target_name)
+  if vim.tbl_isempty(entries) then
+    append_entry('error', 'Unknown MCP server: ' .. target_name)
+    return true
+  end
+
+  local source_map = mcp_source_map(sources)
+  local changed_paths = {}
+  for _, entry in ipairs(entries) do
+    local source = source_map[entry.path]
+    local servers = source and source.payload[entry.container] or nil
+    if type(servers) ~= 'table' then
+      append_entry('error', 'Invalid MCP config shape in ' .. vim.fn.fnamemodify(entry.path, ':~:.'))
+      return true
+    end
+
+    if entry.list then
+      local current = servers[entry.index]
+      if type(current) == 'string' then
+        servers[entry.index] = { name = entry.name, disabled = disabled }
+      elseif type(current) == 'table' then
+        current.disabled = disabled
+      else
+        append_entry('error', 'Cannot update MCP server "' .. entry.name .. '" in ' .. vim.fn.fnamemodify(entry.path, ':~:.'))
+        return true
+      end
+    else
+      local current = servers[entry.key]
+      if type(current) ~= 'table' then
+        append_entry('error', 'Cannot update MCP server "' .. entry.name .. '" in ' .. vim.fn.fnamemodify(entry.path, ':~:.'))
+        return true
+      end
+      current.disabled = disabled
+    end
+    changed_paths[entry.path] = true
+  end
+
+  for path in pairs(changed_paths) do
+    local ok, write_err = write_mcp_config(path, source_map[path].payload)
+    if not ok then
+      append_entry('error', 'Failed to write ' .. vim.fn.fnamemodify(path, ':~:.') .. ': ' .. tostring(write_err))
+      return true
+    end
+  end
+
+  append_entry('system', string.format('%s MCP server "%s" in %d entr%s', disabled and 'Disabled' or 'Enabled', target_name, #entries, #entries == 1 and 'y' or 'ies'))
+  return true
+end
+
+local function mcp_reload_command(args)
+  if vim.trim(args or '') ~= '' then
+    append_entry('error', 'Usage: /mcp reload')
+    return true
+  end
+  if state.creating_session then
+    append_entry('system', 'Session attach is already in progress')
+    return true
+  end
+
+  local session_id = state.session_id
+  if not session_id then
+    append_entry('system', 'No active session. MCP changes will apply when the next session starts.')
+    return true
+  end
+
+  append_entry('system', 'Reloading MCP config for session ' .. session_id .. '…')
+  state.session_id = nil
+  state.session_name = nil
+  state.session_working_directory = nil
+  refresh_statuslines()
+  state.creating_session = true
+
+  session.disconnect_session(session_id, false, function(disconnect_err)
+    if disconnect_err then
+      state.creating_session = false
+      append_entry('error', 'MCP reload failed: ' .. disconnect_err)
+      return
+    end
+    session.resume_session(session_id, function(_, resume_err)
+      if resume_err then
+        append_entry('error', 'MCP reload failed: ' .. resume_err)
+        return
+      end
+      append_entry('system', 'Reloaded MCP config for session ' .. session_id)
+    end)
+  end)
+
+  return true
+end
+
 local function mcp_command(args)
-  return open_discovered_item('MCP config', discovery.mcp_items(), args)
+  args = vim.trim(args or '')
+  if args == '' then
+    return mcp_edit_command('')
+  end
+
+  local action, rest = args:match('^(%S+)%s*(.*)$')
+  action = (action or ''):lower()
+  rest = vim.trim(rest or '')
+
+  if action == 'add' then
+    return mcp_add_command(rest)
+  end
+  if action == 'show' then
+    return mcp_show_command(rest)
+  end
+  if action == 'edit' then
+    return mcp_edit_command(rest)
+  end
+  if action == 'delete' then
+    return mcp_delete_command(rest)
+  end
+  if action == 'disable' then
+    return mcp_set_disabled(rest, true)
+  end
+  if action == 'enable' then
+    return mcp_set_disabled(rest, false)
+  end
+  if action == 'reload' then
+    return mcp_reload_command(rest)
+  end
+
+  return mcp_edit_command(args)
 end
 
 local function lsp_status_message()

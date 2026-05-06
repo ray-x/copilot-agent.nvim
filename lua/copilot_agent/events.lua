@@ -3748,15 +3748,20 @@ function M.start_event_stream(session_id)
   preload_history_checkpoint_ids(session_id)
   refresh_statuslines()
 
+  local replay_permission_history = state.config.session and state.config.session.replay_permission_history == true
+  local history_query = string.format('/sessions/%s/events?history=true', session_id)
+  if replay_permission_history then
+    history_query = history_query .. '&replay_permission_history=true'
+  end
   local args = {
     state.config.curl_bin,
     '-sS',
     '-N',
     '-H',
     'Accept: text/event-stream',
-    build_url(string.format('/sessions/%s/events?history=true', session_id)),
+    build_url(history_query),
   }
-  log(string.format('sse.stream start session_id=%s url=%s', tostring(session_id or '<none>'), build_url(string.format('/sessions/%s/events?history=true', session_id))), vim.log.levels.DEBUG)
+  log(string.format('sse.stream start session_id=%s url=%s', tostring(session_id or '<none>'), build_url(history_query)), vim.log.levels.DEBUG)
 
   -- Batch incoming SSE chunks to avoid flooding the Neovim event loop.
   -- on_stdout fires for every curl output chunk (potentially hundreds/sec);

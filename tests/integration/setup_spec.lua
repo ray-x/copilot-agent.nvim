@@ -201,6 +201,11 @@ describe('M.setup', function()
     assert_eq('approve-all', agent.state.permission_mode)
   end)
 
+  it('session.replay_permission_history defaults to false', function()
+    agent.setup({ auto_create_session = false })
+    assert_false(agent.state.config.session.replay_permission_history)
+  end)
+
   it('session_id is nil after setup', function()
     agent.setup({ auto_create_session = false })
     assert_eq(nil, agent.state.session_id)
@@ -2265,6 +2270,37 @@ describe('model state sync', function()
 
     local after = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
     assert_true(after:find('history replay line', 1, true) ~= nil)
+  end)
+
+  it('filters permission history replay by default and allows opting back in', function()
+    local original_jobstart = vim.fn.jobstart
+    local original_jobstop = vim.fn.jobstop
+    local original_replay_permission_history = agent.state.config.session.replay_permission_history
+    local original_history_loading = agent.state.history_loading
+    local started = {}
+
+    vim.fn.jobstart = function(args, opts)
+      started[#started + 1] = { args = args, opts = opts }
+      return #started
+    end
+    vim.fn.jobstop = function()
+      return 1
+    end
+
+    events.start_event_stream('session-default')
+    assert_true(started[1].args[6]:find('history=true', 1, true) ~= nil)
+    assert_true(started[1].args[6]:find('replay_permission_history=true', 1, true) == nil)
+
+    agent.state.events_job_id = nil
+    agent.state.config.session.replay_permission_history = true
+    events.start_event_stream('session-permissions')
+    assert_true(started[2].args[6]:find('replay_permission_history=true', 1, true) ~= nil)
+
+    vim.fn.jobstart = original_jobstart
+    vim.fn.jobstop = original_jobstop
+    agent.state.config.session.replay_permission_history = original_replay_permission_history
+    agent.state.history_loading = original_history_loading
+    agent.state.events_job_id = nil
   end)
 
   it('replaces activity immediately when a new shell command starts after the previous one finishes', function()
@@ -4441,6 +4477,117 @@ describe('lsp slash command', function()
     assert_true(slash.execute('/lsp help'))
     assert_true(notifications[#notifications].message:find('/lsp create', 1, true) ~= nil)
     assert_true(notifications[#notifications].message:find(':CopilotAgentLsp still starts the plugin helper LSP', 1, true) ~= nil)
+  end)
+end)
+
+describe('mcp slash command', function()
+  local agent
+  local slash
+  local session
+  local temp_workspace
+  local root_mcp
+  local vscode_mcp
+  local original_disconnect_session
+  local original_resume_session
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    agent = require('copilot_agent')
+    temp_workspace = vim.fn.tempname()
+    root_mcp = temp_workspace .. '/.mcp.json'
+    vscode_mcp = temp_workspace .. '/.vscode/mcp.json'
+
+    vim.fn.mkdir(temp_workspace .. '/.vscode', 'p')
+    vim.fn.writefile({ '{"mcpServers":{"local":{"command":"uvx","args":["local-tool"]}}}' }, root_mcp)
+    vim.fn.writefile({ '{"servers":[{"name":"browser","command":"browser-mcp"}]}' }, vscode_mcp)
+
+    agent.setup({
+      auto_create_session = false,
+      notify = false,
+      session = {
+        working_directory = function()
+          return temp_workspace
+        end,
+      },
+    })
+    agent.state.entries = {}
+    agent.state.creating_session = false
+    slash = require('copilot_agent.slash')
+    session = require('copilot_agent.session')
+    original_disconnect_session = session.disconnect_session
+    original_resume_session = session.resume_session
+  end)
+
+  after_each(function()
+    session.disconnect_session = original_disconnect_session
+    session.resume_session = original_resume_session
+    vim.fn.delete(temp_workspace, 'rf')
+  end)
+
+  it('supports show, add, disable, enable, delete, and edit actions', function()
+    assert_true(slash.execute('/mcp show'))
+    local show_message = agent.state.entries[#agent.state.entries].content
+    assert_true(show_message:find('local', 1, true) ~= nil)
+    assert_true(show_message:find('browser', 1, true) ~= nil)
+
+    assert_true(slash.execute('/mcp add docs docs-mcp --stdio'))
+    local added = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+    assert_eq('docs-mcp', added.mcpServers.docs.command)
+    assert.same({ '--stdio' }, added.mcpServers.docs.args)
+
+    assert_true(slash.execute('/mcp disable docs'))
+    local disabled = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+    assert_true(disabled.mcpServers.docs.disabled == true)
+
+    assert_true(slash.execute('/mcp enable docs'))
+    local enabled = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+    assert_false(enabled.mcpServers.docs.disabled == true)
+
+    local original_cmd = vim.cmd
+    local edit_command = nil
+    vim.cmd = function(command)
+      edit_command = command
+    end
+    assert_true(slash.execute('/mcp edit docs'))
+    vim.cmd = original_cmd
+    assert_true(type(edit_command) == 'string' and edit_command:find('edit ', 1, true) == 1)
+    assert_true(edit_command:find(vim.fn.fnameescape(root_mcp), 1, true) ~= nil)
+
+    assert_true(slash.execute('/mcp delete docs'))
+    local deleted = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+    assert_eq(nil, deleted.mcpServers.docs)
+  end)
+
+  it('reconnects the current session for /mcp reload', function()
+    local calls = {}
+    agent.state.session_id = 'session-123'
+    agent.state.creating_session = false
+    session.disconnect_session = function(session_id, delete_state, callback)
+      calls[#calls + 1] = { kind = 'disconnect', session_id = session_id, delete_state = delete_state }
+      callback(nil)
+    end
+    session.resume_session = function(session_id, callback)
+      calls[#calls + 1] = { kind = 'resume', session_id = session_id }
+      agent.state.session_id = session_id
+      callback(session_id, nil)
+    end
+
+    assert_true(slash.execute('/mcp reload'))
+    assert_eq('disconnect', calls[1].kind)
+    assert_eq('session-123', calls[1].session_id)
+    assert_eq(false, calls[1].delete_state)
+    assert_eq('resume', calls[2].kind)
+    assert_eq('session-123', calls[2].session_id)
+    assert_true(agent.state.entries[#agent.state.entries].content:find('Reloaded MCP config', 1, true) ~= nil)
+  end)
+
+  it('reports when /mcp reload is called without an active session', function()
+    agent.state.session_id = nil
+    agent.state.creating_session = false
+    assert_true(slash.execute('/mcp reload'))
+    assert_true(agent.state.entries[#agent.state.entries].content:find('No active session', 1, true) ~= nil)
   end)
 end)
 
@@ -8124,6 +8271,7 @@ describe('chat input behavior', function()
     local resume_words = completion_words('/resume ')
     local session_words = completion_words('/session ')
     local mcp_words = completion_words('/mcp ')
+    local mcp_show_words = completion_words('/mcp show ')
     local instruction_words = completion_words('/instructions ')
 
     assert_true(vim.tbl_contains(agent_words, 'Code Review Engineer'))
@@ -8142,9 +8290,19 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(resume_words, '/resume live-456'))
     assert_true(vim.tbl_contains(session_words, '/session session-123'))
     assert_true(vim.tbl_contains(session_words, '/session live-456'))
-    assert_true(vim.tbl_contains(mcp_words, '/mcp local'))
-    assert_true(vim.tbl_contains(mcp_words, '/mcp docs'))
-    assert_true(vim.tbl_contains(mcp_words, '/mcp browser'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp add'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp show'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp edit'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp delete'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp disable'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp enable'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp reload'))
+    assert_true(vim.tbl_contains(mcp_words, 'local'))
+    assert_true(vim.tbl_contains(mcp_words, 'docs'))
+    assert_true(vim.tbl_contains(mcp_words, 'browser'))
+    assert_true(vim.tbl_contains(mcp_show_words, '/mcp show local'))
+    assert_true(vim.tbl_contains(mcp_show_words, '/mcp show docs'))
+    assert_true(vim.tbl_contains(mcp_show_words, '/mcp show browser'))
     assert_true(vim.tbl_contains(instruction_words, '/instructions .github/copilot-instructions.md'))
   end)
 
@@ -8284,6 +8442,40 @@ describe('chat input behavior', function()
 
     local replaced = line:sub(1, replace_start) .. selected .. line:sub(#line + 1)
     assert_eq(prefix .. 'Git Commit Agent', replaced)
+  end)
+
+  it('replaces /mcp completion text with only the selected mcp name', function()
+    local vscode_dir = vim.fn.fnamemodify(vscode_mcp, ':h')
+    root_mcp_backup = vim.fn.filereadable(root_mcp) == 1 and vim.fn.readfile(root_mcp) or nil
+    vscode_mcp_backup = vim.fn.filereadable(vscode_mcp) == 1 and vim.fn.readfile(vscode_mcp) or nil
+    vim.fn.mkdir(vscode_dir, 'p')
+    vim.fn.writefile({ '{"mcpServers":{"local":{},"docs":{}}}' }, root_mcp)
+    vim.fn.writefile({ '{"servers":[{"name":"browser"}]}' }, vscode_mcp)
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local line = prefix .. '/mcp bro'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local replace_start = input._input_omnifunc(1, '')
+    local items = input._input_omnifunc(0, '')
+    local selected
+    for _, item in ipairs(items) do
+      if item.word == 'browser' then
+        selected = item.word
+        break
+      end
+    end
+
+    assert_eq(#prefix, replace_start)
+    assert_eq('browser', selected)
+
+    local replaced = line:sub(1, replace_start) .. selected .. line:sub(#line + 1)
+    assert_eq(prefix .. 'browser', replaced)
   end)
 end)
 

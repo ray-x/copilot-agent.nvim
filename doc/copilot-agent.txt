@@ -127,6 +127,7 @@ optional — defaults are shown below: >lua
       agent                    = nil,   -- nil = "default"; or "coding", etc.
       streaming                = true,
       enable_config_discovery  = true,  -- respects .github/copilot-instructions.md
+      replay_permission_history = false, -- replay permission.requested/completed on resume
       auto_resume              = "prompt",  -- "prompt" (default) | "auto"
     },
 
@@ -532,6 +533,13 @@ session.enable_config_discovery ~
   Type: boolean
   Default: `true`
   Respect `.github/copilot-instructions.md` and similar project files.
+
+session.replay_permission_history ~
+  Type: boolean
+  Default: `false`
+  Replay `permission.requested` / `permission.completed` events when loading
+  prior session history. Leave this off for faster resume on large sessions;
+  enable it if you want to review historical permission prompts in the chat.
 
 session.auto_resume ~
   Type: string  ("prompt" | "auto")

@@ -441,6 +441,13 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if existing, ok := s.getManagedSession(req.SessionID); ok {
+		if req.PermissionMode != "" && req.PermissionMode != existing.permissionMode {
+			existing.permissionMode = req.PermissionMode
+			existing.broadcastHostEvent("host.permission_mode_changed", map[string]any{
+				"sessionId": req.SessionID,
+				"mode":      req.PermissionMode,
+			})
+		}
 		writeJSON(w, http.StatusOK, existing.summary())
 		return
 	}
@@ -804,13 +811,15 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	if queryBool(r, "history") {
+		replayPermissionHistory := queryBool(r, "replay_permission_history")
 		events, err := managed.session.GetMessages(r.Context())
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("get history: %v", err))
 			return
 		}
+		replayedCount := 0
 		for _, event := range events {
-			if !shouldReplayHistoryEvent(event) {
+			if !shouldReplayHistoryEvent(event, replayPermissionHistory) {
 				continue
 			}
 			payload, err := (&event).Marshal()
@@ -820,11 +829,12 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err := writeSSE(w, "session.event", payload); err != nil {
 				return
 			}
+			replayedCount++
 		}
 		// Signal that history replay is complete so clients can batch-render once.
 		if err := writeSSE(w, "host.history_done", mustJSON(hostEvent{
 			Timestamp: time.Now().UTC(),
-			Data:      map[string]any{"sessionId": managed.session.SessionID, "count": len(events)},
+			Data:      map[string]any{"sessionId": managed.session.SessionID, "count": replayedCount},
 		})); err != nil {
 			return
 		}
@@ -855,8 +865,11 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func shouldReplayHistoryEvent(event copilot.SessionEvent) bool {
+func shouldReplayHistoryEvent(event copilot.SessionEvent, replayPermissionHistory bool) bool {
 	if event.Type == "permission.requested" || event.Type == "permission.completed" {
+		if replayPermissionHistory {
+			return true
+		}
 		return false
 	}
 	if event.Type != copilot.SessionEventTypeAssistantMessage {
@@ -1334,46 +1347,44 @@ func countDiscoverableConfig(workingDirectory string) (instructionCount, agentCo
 	}
 
 	githubDir := filepath.Join(workingDirectory, ".github")
-	if _, err := os.Stat(githubDir); err != nil {
-		return 0, 0, 0, 0
-	}
-
-	if fileExists(filepath.Join(githubDir, "copilot-instructions.md")) {
-		instructionCount++
-	}
-
-	instructionsDir := filepath.Join(githubDir, "instructions")
-	_ = filepath.WalkDir(instructionsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".instructions.md") {
+	if _, err := os.Stat(githubDir); err == nil {
+		if fileExists(filepath.Join(githubDir, "copilot-instructions.md")) {
 			instructionCount++
 		}
-		return nil
-	})
 
-	agentsDir := filepath.Join(githubDir, "agents")
-	_ = filepath.WalkDir(agentsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
+		instructionsDir := filepath.Join(githubDir, "instructions")
+		_ = filepath.WalkDir(instructionsDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d == nil || d.IsDir() {
+				return nil
+			}
+			if strings.HasSuffix(d.Name(), ".instructions.md") {
+				instructionCount++
+			}
 			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".agent.md") {
-			agentCount++
-		}
-		return nil
-	})
+		})
 
-	skillsDir := filepath.Join(githubDir, "skills")
-	_ = filepath.WalkDir(skillsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
+		agentsDir := filepath.Join(githubDir, "agents")
+		_ = filepath.WalkDir(agentsDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d == nil || d.IsDir() {
+				return nil
+			}
+			if strings.HasSuffix(d.Name(), ".agent.md") {
+				agentCount++
+			}
 			return nil
-		}
-		if d.Name() == "SKILL.md" || d.Name() == "skill.md" {
-			skillCount++
-		}
-		return nil
-	})
+		})
+
+		skillsDir := filepath.Join(githubDir, "skills")
+		_ = filepath.WalkDir(skillsDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d == nil || d.IsDir() {
+				return nil
+			}
+			if d.Name() == "SKILL.md" || d.Name() == "skill.md" {
+				skillCount++
+			}
+			return nil
+		})
+	}
 
 	mcpCount += countMCPServersInFile(filepath.Join(workingDirectory, ".mcp.json"))
 	mcpCount += countMCPServersInFile(filepath.Join(workingDirectory, ".vscode", "mcp.json"))

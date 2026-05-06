@@ -810,13 +810,8 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, event := range events {
-			// Skip empty assistant messages during history replay too.
-			if event.Type == copilot.SessionEventTypeAssistantMessage {
-				if data, ok := event.Data.(*copilot.AssistantMessageData); ok {
-					if strings.TrimSpace(data.Content) == "" && len(data.ToolRequests) == 0 {
-						continue
-					}
-				}
+			if !shouldReplayHistoryEvent(event) {
+				continue
 			}
 			payload, err := (&event).Marshal()
 			if err != nil {
@@ -858,6 +853,20 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func shouldReplayHistoryEvent(event copilot.SessionEvent) bool {
+	if event.Type == "permission.requested" || event.Type == "permission.completed" {
+		return false
+	}
+	if event.Type != copilot.SessionEventTypeAssistantMessage {
+		return true
+	}
+	data, ok := event.Data.(*copilot.AssistantMessageData)
+	if !ok {
+		return true
+	}
+	return strings.TrimSpace(data.Content) != "" || len(data.ToolRequests) > 0
 }
 
 func (s *service) handleAnswerUserInput(w http.ResponseWriter, r *http.Request) {

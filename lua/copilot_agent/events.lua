@@ -134,6 +134,9 @@ local function log_debug_trace(message, payload, opts)
   if not should_log(level) then
     return
   end
+  if type(payload) == 'function' then
+    payload = payload()
+  end
   local suffix = payload == nil and '' or ' ' .. serialize_log_value(payload, opts)
   log(message .. suffix, level)
 end
@@ -221,7 +224,9 @@ local function log_session_event_payload(event_name, raw_data)
 
   local decoded = decode_json_silently(raw_data)
   if type(decoded) == 'table' then
-    log_debug_trace('sse.event raw event=' .. tostring(event_name) .. ' payload=', sanitize_session_log_value(decoded), {
+    log_debug_trace('sse.event raw event=' .. tostring(event_name) .. ' payload=', function()
+      return sanitize_session_log_value(decoded)
+    end, {
       max_len = TRACE_LOG_MAX_CHARS,
       depth = TRACE_LOG_DEPTH,
     })
@@ -1567,7 +1572,6 @@ local function capture_tool_execution_start(data)
       tool_name = sanitize_permission_text(data.toolName),
       tool_call_id = tool_call_id,
       tool_detail = detail,
-      start_data = vim.deepcopy(data),
       progress_messages = {},
     })
     return
@@ -1578,7 +1582,6 @@ local function capture_tool_execution_start(data)
   item.tool_name = sanitize_permission_text(data.toolName)
   item.tool_call_id = tool_call_id or item.tool_call_id
   item.tool_detail = detail or item.tool_detail
-  item.start_data = vim.deepcopy(data)
   item.progress_messages = item.progress_messages or {}
   if tool_call_id then
     ensure_recent_activity_items()
@@ -1616,10 +1619,9 @@ local function capture_tool_execution_complete(data)
   if not item then
     return
   end
-  item.complete_data = vim.deepcopy(data)
   item.success = data.success == true
   item.error_message = type(data.error) == 'table' and normalize_activity_output_text(data.error.message) or nil
-  item.tool_telemetry = type(data.toolTelemetry) == 'table' and vim.deepcopy(data.toolTelemetry) or nil
+  item.tool_telemetry = type(data.toolTelemetry) == 'table' and data.toolTelemetry or nil
   item.output_text = extract_tool_execution_output_text(data) or item.output_text or item.partial_output
 end
 
@@ -1698,7 +1700,7 @@ local function capture_post_tool_use_start(data)
     item.tool_name = item.tool_name or tool_name
     item.tool_call_id = item.tool_call_id or tool_call_id
     item.tool_detail = item.tool_detail or detail
-    item.post_tool_use_start_data = vim.deepcopy(data)
+    item.start_input = input
     item.post_tool_use_raw_result_text = extract_activity_output_value_text(input.toolResult, 1, {}) or normalize_activity_output_text(prior_output_text)
     item.output_text = nil
   end
@@ -1715,7 +1717,7 @@ local function capture_post_tool_use_start(data)
     tool_call_id = tool_call_id,
     tool_name = tool_name,
     tool_detail = detail,
-    start_input = vim.deepcopy(input),
+    start_input = input,
     prior_output_text = normalize_activity_output_text(prior_output_text),
   }
 end
@@ -1741,8 +1743,8 @@ local function capture_post_tool_use_end(data)
   end
 
   local start_input = hook_state and hook_state.start_input or nil
-  if not start_input and item and type(item.post_tool_use_start_data) == 'table' and type(item.post_tool_use_start_data.input) == 'table' then
-    start_input = item.post_tool_use_start_data.input
+  if not start_input and item and type(item.start_input) == 'table' then
+    start_input = item.start_input
   end
 
   local fallback_output_text = hook_state and hook_state.prior_output_text or (item and item.post_tool_use_raw_result_text or nil)
@@ -1757,13 +1759,11 @@ local function capture_post_tool_use_end(data)
     hook_state.success = data.success == true
     hook_state.result_text = result_text
     hook_state.error_message = error_message
-    hook_state.end_data = vim.deepcopy(data)
   end
 
   if item then
     item.tool_name = item.tool_name or (hook_state and hook_state.tool_name or nil)
     item.tool_detail = item.tool_detail or (hook_state and hook_state.tool_detail or nil)
-    item.post_tool_use_end_data = vim.deepcopy(data)
     item.output_text = result_text
     if error_message then
       item.error_message = error_message
@@ -2663,7 +2663,9 @@ local function clear_live_turn_state(reason, opts)
 end
 
 local function handle_host_event(event_name, payload)
-  log_debug_trace('host.event received event=' .. tostring(event_name) .. ' payload=', payload, { max_len = 2400 })
+  log_debug_trace('host.event received event=' .. tostring(event_name) .. ' payload=', function()
+    return payload
+  end, { max_len = 2400 })
   if event_name == 'host.user_input_requested' then
     handle_user_input(payload)
     return
@@ -3157,7 +3159,9 @@ end
 local function handle_session_event(payload)
   local event_type = payload and payload.type or nil
   local data = payload and payload.data or {}
-  log_debug_trace('session.event received type=' .. tostring(event_type) .. ' data=', sanitize_session_log_value(data), { max_len = 2400, depth = 8 })
+  log_debug_trace('session.event received type=' .. tostring(event_type) .. ' data=', function()
+    return sanitize_session_log_value(data)
+  end, { max_len = 2400, depth = 8 })
   capture_turn_activity_summary(event_type, data)
 
   if event_type == 'assistant.message_delta' then
@@ -3656,7 +3660,9 @@ local function handle_session_event(payload)
     return
   end
 
-  log('session.event unhandled type=' .. tostring(event_type) .. ' data=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 1600, depth = 8 }), vim.log.levels.DEBUG)
+  if should_log(vim.log.levels.DEBUG) then
+    log('session.event unhandled type=' .. tostring(event_type) .. ' data=' .. serialize_log_value(sanitize_session_log_value(data), { max_len = 1600, depth = 8 }), vim.log.levels.DEBUG)
+  end
 end
 
 local function flush_sse_event()

@@ -189,6 +189,35 @@ func TestNewSessionIDUsesSanitizedRepoPrefix(t *testing.T) {
 	}
 }
 
+func TestShouldReplayHistoryEventSkipsPermissionEvents(t *testing.T) {
+	t.Parallel()
+
+	if shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.requested"}) {
+		t.Fatal("expected permission.requested to be skipped during history replay")
+	}
+	if shouldReplayHistoryEvent(copilot.SessionEvent{Type: "permission.completed"}) {
+		t.Fatal("expected permission.completed to be skipped during history replay")
+	}
+}
+
+func TestShouldReplayHistoryEventSkipsEmptyAssistantMessages(t *testing.T) {
+	t.Parallel()
+
+	if shouldReplayHistoryEvent(copilot.SessionEvent{
+		Type: copilot.SessionEventTypeAssistantMessage,
+		Data: &copilot.AssistantMessageData{},
+	}) {
+		t.Fatal("expected empty assistant message without tool requests to be skipped")
+	}
+
+	if !shouldReplayHistoryEvent(copilot.SessionEvent{
+		Type: copilot.SessionEventTypeAssistantMessage,
+		Data: &copilot.AssistantMessageData{Content: "hello"},
+	}) {
+		t.Fatal("expected assistant message with content to be replayed")
+	}
+}
+
 // ── queryBool ─────────────────────────────────────────────────────────────────
 
 func TestQueryBoolRecognisesTrueValues(t *testing.T) {

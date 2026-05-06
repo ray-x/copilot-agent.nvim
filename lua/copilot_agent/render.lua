@@ -1546,7 +1546,7 @@ local function build_activity_details_lines(entry)
   local tool_count = 0
   local usage_count = 0
   for _, item in ipairs(items) do
-    if type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output or item.complete_data) then
+    if type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output) then
       tool_count = tool_count + 1
       local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Tool ' .. tostring(tool_count))
       append_markdown_heading(lines, string.format('## Tool %d — %s', tool_count, title))
@@ -2642,6 +2642,10 @@ function M.append_entry(kind, content, attachments, opts)
     state.chat_auto_scroll_enabled = true
   end
   state.stream_line_start = nil
+
+  if state.history_loading then
+    return idx
+  end
 
   -- Try incremental append instead of full re-render.
   local bufnr = state.chat_bufnr

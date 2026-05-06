@@ -2243,6 +2243,30 @@ describe('model state sync', function()
     assert_eq(0, #extmarks)
   end)
 
+  it('defers chat buffer updates until history replay completes', function()
+    local render = require('copilot_agent.render')
+    render.clear_transcript()
+    agent.open_chat()
+    render.render_chat()
+
+    local bufnr = agent.state.chat_bufnr
+    local before = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+    agent.state.history_loading = true
+    local idx = render.append_entry('assistant', 'history replay line')
+    local during = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+    assert_eq(1, idx)
+    assert.same(before, during)
+    assert_eq('history replay line', agent.state.entries[idx].content)
+
+    agent.state.history_loading = false
+    render.render_chat()
+
+    local after = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
+    assert_true(after:find('history replay line', 1, true) ~= nil)
+  end)
+
   it('replaces activity immediately when a new shell command starts after the previous one finishes', function()
     agent.open_chat()
 
@@ -6635,25 +6659,8 @@ describe('chat input behavior', function()
       tool_name = 'bash',
       tool_call_id = 'tool-123',
       tool_detail = 'git diff --stat',
-      start_data = {
-        toolName = 'bash',
-        toolCallId = 'tool-123',
-        command = 'git',
-        arguments = { 'diff', '--stat' },
-      },
       progress_messages = { 'Collecting diff output' },
       partial_output = 'partial line 1\n',
-      complete_data = {
-        success = true,
-        toolCallId = 'tool-123',
-        result = {
-          content = 'diff summary',
-          detailedContent = 'full diff output\nsecond line',
-        },
-        toolTelemetry = {
-          filesChanged = 3,
-        },
-      },
       success = true,
       tool_telemetry = {
         filesChanged = 3,
@@ -8530,24 +8537,7 @@ describe('checkpoint id replay', function()
       tool_name = 'bash',
       tool_call_id = 'tool-456',
       tool_detail = 'rg activity lua',
-      start_data = {
-        toolName = 'bash',
-        toolCallId = 'tool-456',
-        command = 'rg',
-        arguments = { 'activity', 'lua' },
-      },
       progress_messages = {},
-      complete_data = {
-        success = true,
-        toolCallId = 'tool-456',
-        result = {
-          content = 'rg summary',
-          contents = {
-            { type = 'terminal', text = 'lua/copilot_agent/events.lua:1:match' },
-            { type = 'text', text = '1 match found' },
-          },
-        },
-      },
       success = true,
       output_text = 'lua/copilot_agent/events.lua:1:match\n\n1 match found',
     }, entry.activity_items[1])

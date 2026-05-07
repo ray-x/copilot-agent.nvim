@@ -303,6 +303,7 @@ local function discovered_mcp_names()
 
   read_config(wd .. '/.mcp.json')
   read_config(wd .. '/.vscode/mcp.json')
+  read_config(vim.fn.expand('~/.copilot/mcp-config.json'))
 
   table.sort(items)
   return items

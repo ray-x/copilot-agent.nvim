@@ -113,6 +113,99 @@ describe('plugin load', function()
   end)
 end)
 
+describe('assistant tool-call transcript filtering', function()
+  local agent, events, render, state
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.config'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    package.loaded['copilot_agent.render'] = nil
+
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, auto_start = false, notify = false })
+    events = require('copilot_agent.events')
+    render = require('copilot_agent.render')
+    state = require('copilot_agent.config').state
+    render.clear_transcript()
+    state.history_loading = false
+    state.stream_line_start = 1
+  end)
+
+  it('suppresses streamed multi_tool_use scaffolding before it reaches the transcript', function()
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-tool-delta',
+        deltaContent = 'to=multi_tool_use.parallel {"tool_uses":[{"recipient_name":"functions.report_intent"}]}',
+      },
+    })
+
+    assert_eq(1, #state.entries)
+    assert_eq('', state.entries[1].content)
+  end)
+
+  it('drops leaked tool-call deltas without erasing previously rendered assistant text', function()
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-preserve-message',
+        deltaContent = 'I checked the repository.',
+      },
+    })
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-preserve-message',
+        deltaContent = 'to=multi_tool_use.parallel {"tool_uses":[{"recipient_name":"functions.report_intent"}]}',
+      },
+    })
+
+    assert_eq(1, #state.entries)
+    assert_eq('I checked the repository.', state.entries[1].content)
+  end)
+
+  it('clears raw tool_uses JSON when the final assistant message carries tool requests', function()
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-tool-message',
+        deltaContent = '{"tool_uses":[{"recipient_name":"functions.report_intent"}]}',
+      },
+    })
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-tool-message',
+        toolRequests = {
+          { name = 'multi_tool_use.parallel' },
+        },
+      },
+    })
+
+    assert_eq(1, #state.entries)
+    assert_eq('', state.entries[1].content)
+  end)
+
+  it('keeps normal assistant text even when tool requests are attached', function()
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-normal-message',
+        content = 'I checked the repository and applied the patch.',
+        toolRequests = {
+          { name = 'functions.bash' },
+        },
+      },
+    })
+
+    assert_eq(1, #state.entries)
+    assert_eq('I checked the repository and applied the patch.', state.entries[1].content)
+  end)
+end)
+
 describe('home path display sanitization', function()
   local agent, render, utils
 

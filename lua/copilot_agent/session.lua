@@ -15,8 +15,6 @@ local approvals = require('copilot_agent.approvals')
 local checkpoints = require('copilot_agent.checkpoints')
 local session_names = require('copilot_agent.session_names')
 local utils = require('copilot_agent.utils')
-local discovery = require('copilot_agent.discovery')
-
 local state = cfg.state
 local notify = cfg.notify
 local log = cfg.log
@@ -219,18 +217,6 @@ local function active_session_working_directory()
   return state.session_working_directory or working_directory()
 end
 
-local function mcp_tool_names()
-  local tools = {}
-  local items = discovery.mcp_items()
-  for _, item in ipairs(items) do
-    table.insert(tools, item.name)
-  end
-  if #tools > 0 then
-    log(string.format('discovered %d MCP servers: %s', #tools, table.concat(tools, ', ')), vim.log.levels.INFO)
-  end
-  return tools
-end
-
 local function delete_session_request(session_id, delete_state, callback)
   request('DELETE', string.format('/sessions/%s%s', session_id, delete_state and '?delete=true' or ''), nil, function(_, err)
     if callback then
@@ -335,8 +321,7 @@ end
 function M.resume_session(session_id, callback, opts)
   opts = opts or {}
   local requested_wd = working_directory()
-  local available_tools = mcp_tool_names()
-  log(string.format('resume_session request id=%s cwd=%s availableTools=%s', format_session_id(session_id), requested_wd, vim.fn.json_encode(available_tools)), vim.log.levels.DEBUG)
+  log(string.format('resume_session request id=%s cwd=%s', format_session_id(session_id), requested_wd), vim.log.levels.DEBUG)
   request('POST', '/sessions', {
     sessionId = session_id,
     resume = true,
@@ -347,7 +332,6 @@ function M.resume_session(session_id, callback, opts)
     enableConfigDiscovery = state.config.session.enable_config_discovery,
     model = state.config.session.model,
     agent = state.config.session.agent,
-    availableTools = available_tools,
   }, function(response, err)
     state.creating_session = false
     if err then
@@ -669,15 +653,13 @@ end
 create_session = function(callback, opts)
   opts = opts or {}
   local requested_wd = working_directory()
-  local available_tools = mcp_tool_names()
   log(
     string.format(
-      'create_session request cwd=%s model=%s agent=%s permission=%s availableTools=%s',
+      'create_session request cwd=%s model=%s agent=%s permission=%s',
       requested_wd,
       tostring(state.config.session.model or '<default>'),
       tostring(state.config.session.agent or '<default>'),
-      tostring(state.permission_mode or state.config.permission_mode),
-      vim.fn.json_encode(available_tools)
+      tostring(state.permission_mode or state.config.permission_mode)
     ),
     vim.log.levels.DEBUG
   )
@@ -689,7 +671,6 @@ create_session = function(callback, opts)
     enableConfigDiscovery = state.config.session.enable_config_discovery,
     model = state.config.session.model,
     agent = state.config.session.agent,
-    availableTools = available_tools,
   }, function(response, err)
     state.creating_session = false
     if err then

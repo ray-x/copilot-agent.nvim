@@ -217,6 +217,94 @@ local function decode_json_silently(raw)
   return nil, decoded
 end
 
+local function contains_tool_call_scaffolding_table(value, seen)
+  if type(value) ~= 'table' then
+    return false
+  end
+
+  seen = seen or {}
+  if seen[value] then
+    return false
+  end
+  seen[value] = true
+
+  local function item_contains_scaffolding(item)
+    if type(item) == 'string' then
+      local lowered = item:lower()
+      return lowered:find('functions.', 1, true) ~= nil or lowered:find('multi_tool_use.', 1, true) ~= nil
+    end
+    return contains_tool_call_scaffolding_table(item, seen)
+  end
+
+  if vim.tbl_islist(value) then
+    for _, item in ipairs(value) do
+      if item_contains_scaffolding(item) then
+        seen[value] = nil
+        return true
+      end
+    end
+    seen[value] = nil
+    return false
+  end
+
+  for key, item in pairs(value) do
+    local key_name = type(key) == 'string' and key:lower() or nil
+    if key_name == 'tool_uses' or key_name == 'recipient_name' or key_name == 'recipientname' or key_name == 'recipient' then
+      seen[value] = nil
+      return true
+    end
+    if item_contains_scaffolding(item) then
+      seen[value] = nil
+      return true
+    end
+  end
+
+  seen[value] = nil
+  return false
+end
+
+local function looks_like_tool_call_scaffolding(text)
+  if type(text) ~= 'string' then
+    return false
+  end
+
+  local trimmed = vim.trim(text)
+  if trimmed == '' then
+    return false
+  end
+
+  local lowered = trimmed:lower()
+  if
+    lowered:find('<tool_call>', 1, true)
+    or lowered:find('<tool_use>', 1, true)
+    or lowered:find('to=functions.', 1, true)
+    or lowered:find('to=multi_tool_use.', 1, true)
+    or lowered:find('recipient="functions.', 1, true)
+    or lowered:find('recipient="multi_tool_use.', 1, true)
+    or lowered:find('"tool_uses"', 1, true)
+    or lowered:find('"recipient_name"', 1, true)
+  then
+    return true
+  end
+
+  local decoded = decode_json_silently(trimmed)
+  return contains_tool_call_scaffolding_table(decoded)
+end
+
+local function clear_leaked_tool_call_content(entry, idx, key, message_id, source, replacement_content)
+  entry.content = type(replacement_content) == 'string' and replacement_content or ''
+  log(
+    string.format(
+      '%s cleared leaked tool-call markup message_id=%s idx=%s key=%s',
+      tostring(source or 'assistant.message'),
+      tostring(message_id or '<none>'),
+      tostring(idx or '<none>'),
+      tostring(key or '<none>')
+    ),
+    vim.log.levels.DEBUG
+  )
+end
+
 local function log_session_event_payload(event_name, raw_data)
   if event_name ~= 'session.event' or not should_log(TRACE_LOG_LEVEL) then
     return
@@ -2381,6 +2469,30 @@ local function sync_config_counts(data)
   state.mcp_count = tonumber(data.mcpCount) or 0
 end
 
+local function refresh_session_name_from_server(session_id)
+  if type(session_id) ~= 'string' or session_id == '' then
+    return
+  end
+
+  request('GET', '/sessions/' .. session_id, nil, function(response, err)
+    if err or type(response) ~= 'table' then
+      return
+    end
+    if state.session_id ~= session_id then
+      return
+    end
+    if session_names.get(session_id) then
+      return
+    end
+
+    local summary = type(response.summary) == 'string' and vim.trim(response.summary) or ''
+    if summary ~= '' and summary ~= state.session_name then
+      state.session_name = summary
+      refresh_statuslines()
+    end
+  end)
+end
+
 local show_next_prompt
 
 local function present_user_input_picker(payload)
@@ -2680,6 +2792,9 @@ local function handle_host_event(event_name, payload)
     state.context_tokens = nil
     state.context_limit = nil
     state.session_name = session_names.resolve(data.summary, data.sessionId or state.session_id)
+    if not state.session_name or state.session_name == '' then
+      refresh_session_name_from_server(data.sessionId or state.session_id)
+    end
     refresh_statuslines()
     append_entry('system', 'Connected to session ' .. (data.sessionId or state.session_id or '<unknown>'))
   elseif event_name == 'host.session_name_updated' then
@@ -3185,6 +3300,10 @@ local function handle_session_event(payload)
     -- transcript state and leave any final reconciliation to assistant.message.
     local previous_content = entry.content or ''
     entry._assistant_saw_delta = true
+    if looks_like_tool_call_scaffolding(delta) or (previous_content == '' and looks_like_tool_call_scaffolding(previous_content .. delta)) then
+      clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message_delta', previous_content)
+      return
+    end
     entry.content = previous_content .. delta
     clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
     window.sync_chat_markdown_conceal(state.chat_winid)
@@ -3230,14 +3349,23 @@ local function handle_session_event(payload)
     local entry, idx, key = ensure_assistant_entry(data.messageId)
     local first_message_for_entry = (entry.content or '') == ''
     local had_stream_start = state.stream_line_start ~= nil
+    local tool_requests = data.toolRequests or data.ToolRequests
+    local has_tool_requests = type(tool_requests) == 'table' and not vim.tbl_isempty(tool_requests)
     if type(data.content) == 'string' then
-      entry.content = merge_assistant_message_content(entry.content, data.content, {
+      local merged_content = merge_assistant_message_content(entry.content, data.content, {
         message_id = data.messageId,
         entry_key = key,
         entry_index = idx,
         prefer_incoming_suffix_replacement = entry._assistant_saw_delta == true or had_stream_start,
       })
-      clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+      if has_tool_requests and looks_like_tool_call_scaffolding(merged_content) then
+        clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+      else
+        entry.content = merged_content
+        clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+      end
+    elseif has_tool_requests and looks_like_tool_call_scaffolding(entry.content or '') then
+      clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
     end
     entry._assistant_saw_delta = false
     if state.history_loading and first_message_for_entry then
@@ -3281,6 +3409,7 @@ local function handle_session_event(payload)
 
   if event_type == 'assistant.turn_end' then
     if not state.history_loading then
+      refresh_session_name_from_server(state.session_id)
       local pending_turn = state.pending_checkpoint_turn
       if pending_turn and pending_turn.session_id == state.session_id then
         log(

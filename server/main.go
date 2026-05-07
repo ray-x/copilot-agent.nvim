@@ -567,7 +567,21 @@ func (s *service) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session is not attached to this service")
 		return
 	}
+	s.refreshManagedSessionSummary(r.Context(), managed)
 	writeJSON(w, http.StatusOK, managed.summary())
+}
+
+func (s *service) refreshManagedSessionSummary(ctx context.Context, managed *managedSession) {
+	if managed == nil || managed.session == nil {
+		return
+	}
+
+	meta, err := s.client.GetSessionMetadata(ctx, managed.session.SessionID)
+	if err != nil || meta == nil || meta.Summary == nil {
+		return
+	}
+
+	managed.sessionName = strings.TrimSpace(*meta.Summary)
 }
 
 func (s *service) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -804,6 +818,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	sub := managed.subscribe()
 	defer managed.unsubscribe(sub)
+	s.refreshManagedSessionSummary(r.Context(), managed)
 
 	if err := writeSSE(w, "host.session_attached", mustJSON(hostEvent{Timestamp: time.Now().UTC(), Data: managed.summary()})); err != nil {
 		return
@@ -1388,6 +1403,9 @@ func countDiscoverableConfig(workingDirectory string) (instructionCount, agentCo
 
 	mcpCount += countMCPServersInFile(filepath.Join(workingDirectory, ".mcp.json"))
 	mcpCount += countMCPServersInFile(filepath.Join(workingDirectory, ".vscode", "mcp.json"))
+	if home, err := os.UserHomeDir(); err == nil {
+		mcpCount += countMCPServersInFile(filepath.Join(home, ".copilot", "mcp-config.json"))
+	}
 
 	return instructionCount, agentCount, skillCount, mcpCount
 }

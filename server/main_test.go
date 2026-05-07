@@ -448,7 +448,7 @@ func TestEnrichPersistedSessionsFromWorkspacePreservesExistingContext(t *testing
 }
 
 func TestCountDiscoverableConfigCountsMCPServers(t *testing.T) {
-	t.Parallel()
+	t.Setenv("HOME", t.TempDir())
 
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".github"), 0o755); err != nil {
@@ -495,7 +495,7 @@ func TestCountDiscoverableConfigCountsMCPServers(t *testing.T) {
 }
 
 func TestCountDiscoverableConfigCountsMCPWithoutGithubDir(t *testing.T) {
-	t.Parallel()
+	t.Setenv("HOME", t.TempDir())
 
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"fff":{}}}`), 0o644); err != nil {

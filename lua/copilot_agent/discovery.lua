@@ -148,6 +148,7 @@ function M.mcp_items()
 
   read_config(wd .. '/.mcp.json')
   read_config(wd .. '/.vscode/mcp.json')
+  read_config(vim.fn.expand('~/.copilot/mcp-config.json'))
   table.sort(items, function(left, right)
     if left.name == right.name then
       return left.path < right.path

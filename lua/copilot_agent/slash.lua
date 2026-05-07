@@ -1331,6 +1331,7 @@ local function mcp_config_paths()
   return {
     root = wd .. '/.mcp.json',
     vscode = wd .. '/.vscode/mcp.json',
+    global = vim.fn.expand('~/.copilot/mcp-config.json'),
   }
 end
 
@@ -1370,7 +1371,7 @@ end
 local function load_mcp_sources()
   local sources = {}
   local paths = mcp_config_paths()
-  for _, path in ipairs({ paths.root, paths.vscode }) do
+  for _, path in ipairs({ paths.root, paths.vscode, paths.global }) do
     local payload, err = read_mcp_config(path)
     if err then
       return nil, err
@@ -1489,7 +1490,7 @@ local function mcp_show_command(target_name)
 
   local entries = collect_mcp_entries(sources)
   if vim.tbl_isempty(entries) then
-    append_entry('system', 'No MCP servers configured in .mcp.json or .vscode/mcp.json')
+    append_entry('system', 'No MCP servers configured in .mcp.json, .vscode/mcp.json, or ~/.copilot/mcp-config.json')
     return true
   end
 

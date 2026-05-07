@@ -414,7 +414,9 @@ local function collect_project_snapshot(root)
   snapshot.instruction_count = count_instruction_files(root)
   snapshot.agent_count = count_agent_files(root)
   snapshot.skill_count = count_skill_files(root)
-  snapshot.mcp_count = count_mcp_servers_in_file(path_join(root, '.mcp.json')) + count_mcp_servers_in_file(path_join(root, '.vscode', 'mcp.json'))
+  snapshot.mcp_count = count_mcp_servers_in_file(path_join(root, '.mcp.json'))
+    + count_mcp_servers_in_file(path_join(root, '.vscode', 'mcp.json'))
+    + count_mcp_servers_in_file(vim.fn.expand('~/.copilot/mcp-config.json'))
   return snapshot
 end
 

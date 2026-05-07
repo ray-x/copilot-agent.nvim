@@ -518,6 +518,15 @@ local function merge_assistant_message_content(current, incoming, ctx)
     end
     return 0
   end
+  local function literal_suffix_prefix_overlap(left, right)
+    local max_overlap = math.min(#left, #right)
+    for overlap = max_overlap, 1, -1 do
+      if left:sub(#left - overlap + 1) == right:sub(1, overlap) then
+        return overlap
+      end
+    end
+    return 0
+  end
   local canonical_current = canonicalize(current)
   local canonical_incoming = canonicalize(incoming)
   if current == incoming then
@@ -574,6 +583,12 @@ local function merge_assistant_message_content(current, incoming, ctx)
       merged[#merged + 1] = line
     end
     return finish('merge-line-overlap', table.concat(merged, '\n'), { overlap = overlap })
+  end
+  if ctx and ctx.prefer_incoming_suffix_replacement == true then
+    local literal_overlap = literal_suffix_prefix_overlap(current, incoming)
+    if literal_overlap >= math.max(8, math.floor(math.min(#current, #incoming) * 0.15)) then
+      return finish('merge-live-literal-overlap', current .. incoming:sub(literal_overlap + 1), { overlap = literal_overlap })
+    end
   end
   if canonical_current ~= '' and canonical_incoming ~= '' and #canonical_incoming >= #canonical_current then
     local shared_prefix = common_prefix_len(canonical_current, canonical_incoming)

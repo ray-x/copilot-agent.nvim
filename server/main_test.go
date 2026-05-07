@@ -17,6 +17,23 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 )
 
+type decodedSessionEvent struct {
+	Type              string          `json:"type"`
+	Data              json.RawMessage `json:"data"`
+	SequenceID        uint64          `json:"sequenceId"`
+	MessageChunkIndex *uint64         `json:"messageChunkIndex,omitempty"`
+}
+
+func decodeSessionEventPayload(t *testing.T, payload []byte) decodedSessionEvent {
+	t.Helper()
+
+	var decoded decodedSessionEvent
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode session event payload: %v", err)
+	}
+	return decoded
+}
+
 func TestResolveModelAliasReturnsExactMatch(t *testing.T) {
 	t.Parallel()
 
@@ -534,6 +551,116 @@ func TestManagedSessionSummaryLiveReflectsActiveSubscribers(t *testing.T) {
 
 	if !managed.summary().Live {
 		t.Fatal("expected attached managed session summary to report live=true")
+	}
+}
+
+func TestManagedSessionHandleSessionEventAddsSequenceMetadata(t *testing.T) {
+	t.Parallel()
+
+	managed := &managedSession{
+		session:             &copilot.Session{SessionID: "session-123"},
+		subscribers:         make(map[chan sseMessage]struct{}),
+		pendingInputs:       make(map[string]*pendingUserInput),
+		pendingPermissions:  make(map[string]*pendingPermission),
+		messageChunkIndexes: make(map[string]uint64),
+	}
+
+	sub := managed.subscribe()
+	defer managed.unsubscribe(sub)
+
+	managed.handleSessionEvent(copilot.SessionEvent{
+		Type: copilot.SessionEventTypeAssistantMessage,
+		Data: &copilot.AssistantMessageData{
+			MessageID: "message-1",
+			Content:   "first snapshot",
+		},
+	})
+
+	first := decodeSessionEventPayload(t, (<-sub).Data)
+	if first.SequenceID != 1 {
+		t.Fatalf("expected first sequenceId to be 1, got %d", first.SequenceID)
+	}
+	if first.MessageChunkIndex == nil || *first.MessageChunkIndex != 1 {
+		t.Fatalf("expected first messageChunkIndex to be 1, got %+v", first.MessageChunkIndex)
+	}
+
+	managed.handleSessionEvent(copilot.SessionEvent{
+		Type: copilot.SessionEventTypeAssistantMessage,
+		Data: &copilot.AssistantMessageData{
+			MessageID: "message-1",
+			Content:   "second snapshot",
+		},
+	})
+
+	second := decodeSessionEventPayload(t, (<-sub).Data)
+	if second.SequenceID != 2 {
+		t.Fatalf("expected second sequenceId to be 2, got %d", second.SequenceID)
+	}
+	if second.MessageChunkIndex == nil || *second.MessageChunkIndex != 2 {
+		t.Fatalf("expected second messageChunkIndex to be 2, got %+v", second.MessageChunkIndex)
+	}
+}
+
+func TestMarshalReplaySessionEventsHydratesLiveSequenceState(t *testing.T) {
+	t.Parallel()
+
+	managed := &managedSession{
+		session:             &copilot.Session{SessionID: "session-123"},
+		subscribers:         make(map[chan sseMessage]struct{}),
+		pendingInputs:       make(map[string]*pendingUserInput),
+		pendingPermissions:  make(map[string]*pendingPermission),
+		messageChunkIndexes: make(map[string]uint64),
+	}
+
+	payloads, count := managed.marshalReplaySessionEvents([]copilot.SessionEvent{
+		{
+			Type: copilot.SessionEventTypeAssistantMessage,
+			Data: &copilot.AssistantMessageData{
+				MessageID: "message-1",
+				Content:   "first snapshot",
+			},
+		},
+		{
+			Type: copilot.SessionEventTypeAssistantMessage,
+			Data: &copilot.AssistantMessageData{
+				MessageID: "message-1",
+				Content:   "second snapshot",
+			},
+		},
+	}, false)
+
+	if count != 2 {
+		t.Fatalf("expected 2 replay payloads, got %d", count)
+	}
+	first := decodeSessionEventPayload(t, payloads[0])
+	second := decodeSessionEventPayload(t, payloads[1])
+	if first.SequenceID != 1 || second.SequenceID != 2 {
+		t.Fatalf("expected replay sequenceIds 1 and 2, got %d and %d", first.SequenceID, second.SequenceID)
+	}
+	if first.MessageChunkIndex == nil || *first.MessageChunkIndex != 1 {
+		t.Fatalf("expected first replay messageChunkIndex to be 1, got %+v", first.MessageChunkIndex)
+	}
+	if second.MessageChunkIndex == nil || *second.MessageChunkIndex != 2 {
+		t.Fatalf("expected second replay messageChunkIndex to be 2, got %+v", second.MessageChunkIndex)
+	}
+
+	sub := managed.subscribe()
+	defer managed.unsubscribe(sub)
+
+	managed.handleSessionEvent(copilot.SessionEvent{
+		Type: copilot.SessionEventTypeAssistantMessage,
+		Data: &copilot.AssistantMessageData{
+			MessageID: "message-1",
+			Content:   "third snapshot",
+		},
+	})
+
+	live := decodeSessionEventPayload(t, (<-sub).Data)
+	if live.SequenceID != 3 {
+		t.Fatalf("expected live sequenceId to continue at 3, got %d", live.SequenceID)
+	}
+	if live.MessageChunkIndex == nil || *live.MessageChunkIndex != 3 {
+		t.Fatalf("expected live messageChunkIndex to continue at 3, got %+v", live.MessageChunkIndex)
 	}
 }
 

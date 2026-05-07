@@ -210,6 +210,9 @@ type managedSession struct {
 	pendingInputsMu      sync.Mutex
 	pendingPermissions   map[string]*pendingPermission
 	pendingPermissionsMu sync.Mutex
+	eventSequenceMu      sync.Mutex
+	nextEventSequence    uint64
+	messageChunkIndexes  map[string]uint64
 	eventUnsubscribe     func()
 	inputResponseGrace   time.Duration
 }
@@ -475,20 +478,21 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	managed := &managedSession{
-		model:              model,
-		workingDirectory:   workingDirectory,
-		permissionMode:     req.PermissionMode,
-		excludedTools:      req.ExcludedTools,
-		createdAt:          time.Now().UTC(),
-		resumed:            req.Resume,
-		streaming:          streaming,
-		agent:              req.Agent,
-		configDiscovery:    configDiscovery,
-		clientName:         clientName,
-		subscribers:        make(map[chan sseMessage]struct{}),
-		pendingInputs:      make(map[string]*pendingUserInput),
-		pendingPermissions: make(map[string]*pendingPermission),
-		inputResponseGrace: defaultInputTimeout,
+		model:               model,
+		workingDirectory:    workingDirectory,
+		permissionMode:      req.PermissionMode,
+		excludedTools:       req.ExcludedTools,
+		createdAt:           time.Now().UTC(),
+		resumed:             req.Resume,
+		streaming:           streaming,
+		agent:               req.Agent,
+		configDiscovery:     configDiscovery,
+		clientName:          clientName,
+		subscribers:         make(map[chan sseMessage]struct{}),
+		pendingInputs:       make(map[string]*pendingUserInput),
+		pendingPermissions:  make(map[string]*pendingPermission),
+		messageChunkIndexes: make(map[string]uint64),
+		inputResponseGrace:  defaultInputTimeout,
 	}
 	if configDiscovery {
 		managed.instructionCount, managed.agentCount, managed.skillCount, managed.mcpCount = countDiscoverableConfig(workingDirectory)
@@ -832,19 +836,11 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("get history: %v", err))
 			return
 		}
-		replayedCount := 0
-		for _, event := range events {
-			if !shouldReplayHistoryEvent(event, replayPermissionHistory) {
-				continue
-			}
-			payload, err := (&event).Marshal()
-			if err != nil {
-				continue
-			}
+		payloads, replayedCount := managed.marshalReplaySessionEvents(events, replayPermissionHistory)
+		for _, payload := range payloads {
 			if err := writeSSE(w, "session.event", payload); err != nil {
 				return
 			}
-			replayedCount++
 		}
 		// Signal that history replay is complete so clients can batch-render once.
 		if err := writeSSE(w, "host.history_done", mustJSON(hostEvent{
@@ -1137,11 +1133,138 @@ func (m *managedSession) handleSessionEvent(event copilot.SessionEvent) {
 		}
 	}
 
-	payload, err := (&event).Marshal()
+	payload, err := m.marshalSequencedSessionEvent(event)
 	if err != nil {
 		return
 	}
 	m.broadcast(sseMessage{Event: "session.event", Data: payload})
+}
+
+func (m *managedSession) marshalReplaySessionEvents(events []copilot.SessionEvent, replayPermissionHistory bool) ([][]byte, int) {
+	payloads := make([][]byte, 0, len(events))
+	nextSequence := uint64(0)
+	messageChunkIndexes := make(map[string]uint64)
+
+	for _, event := range events {
+		if !shouldReplayHistoryEvent(event, replayPermissionHistory) {
+			continue
+		}
+		rawPayload, messageID, err := marshalSessionEventPayload(event)
+		if err != nil {
+			continue
+		}
+
+		nextSequence++
+		var messageChunkIndex *uint64
+		if messageID != "" {
+			messageChunkIndexes[messageID]++
+			index := messageChunkIndexes[messageID]
+			messageChunkIndex = &index
+		}
+
+		payload, err := enrichSessionEventPayload(rawPayload, nextSequence, messageChunkIndex)
+		if err != nil {
+			continue
+		}
+		payloads = append(payloads, payload)
+	}
+
+	m.hydrateSessionEventSequenceState(nextSequence, messageChunkIndexes)
+	return payloads, len(payloads)
+}
+
+func (m *managedSession) marshalSequencedSessionEvent(event copilot.SessionEvent) ([]byte, error) {
+	rawPayload, messageID, err := marshalSessionEventPayload(event)
+	if err != nil {
+		return nil, err
+	}
+
+	sequenceID, messageChunkIndex := m.nextSessionEventMetadata(messageID)
+	return enrichSessionEventPayload(rawPayload, sequenceID, messageChunkIndex)
+}
+
+func (m *managedSession) nextSessionEventMetadata(messageID string) (uint64, *uint64) {
+	m.eventSequenceMu.Lock()
+	defer m.eventSequenceMu.Unlock()
+
+	m.nextEventSequence++
+	sequenceID := m.nextEventSequence
+
+	if messageID == "" {
+		return sequenceID, nil
+	}
+	if m.messageChunkIndexes == nil {
+		m.messageChunkIndexes = make(map[string]uint64)
+	}
+
+	m.messageChunkIndexes[messageID]++
+	index := m.messageChunkIndexes[messageID]
+	return sequenceID, &index
+}
+
+func (m *managedSession) hydrateSessionEventSequenceState(sequenceID uint64, messageChunkIndexes map[string]uint64) {
+	m.eventSequenceMu.Lock()
+	defer m.eventSequenceMu.Unlock()
+
+	if m.nextEventSequence < sequenceID {
+		m.nextEventSequence = sequenceID
+	}
+	if m.messageChunkIndexes == nil {
+		m.messageChunkIndexes = make(map[string]uint64)
+	}
+	for messageID, chunkIndex := range messageChunkIndexes {
+		if existing := m.messageChunkIndexes[messageID]; existing < chunkIndex {
+			m.messageChunkIndexes[messageID] = chunkIndex
+		}
+	}
+}
+
+func marshalSessionEventPayload(event copilot.SessionEvent) ([]byte, string, error) {
+	payload, err := (&event).Marshal()
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, sessionEventMessageID(payload), nil
+}
+
+func enrichSessionEventPayload(payload []byte, sequenceID uint64, messageChunkIndex *uint64) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, err
+	}
+
+	encodedSequenceID, err := json.Marshal(sequenceID)
+	if err != nil {
+		return nil, err
+	}
+	envelope["sequenceId"] = encodedSequenceID
+
+	if messageChunkIndex != nil {
+		encodedChunkIndex, err := json.Marshal(*messageChunkIndex)
+		if err != nil {
+			return nil, err
+		}
+		envelope["messageChunkIndex"] = encodedChunkIndex
+	}
+
+	return json.Marshal(envelope)
+}
+
+func sessionEventMessageID(payload []byte) string {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil || len(envelope.Data) == 0 {
+		return ""
+	}
+
+	var message struct {
+		MessageID string `json:"messageId"`
+	}
+	if err := json.Unmarshal(envelope.Data, &message); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(message.MessageID)
 }
 
 func (m *managedSession) handlePermissionRequest(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {

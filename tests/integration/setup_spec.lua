@@ -89,6 +89,17 @@ local function flush_log_file_queue()
   end
 end
 
+local function wipe_copilot_test_buffers()
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ':t')
+      if name == 'CopilotAgentChat' or name == 'copilot-agent-input' or vim.startswith(name, 'copilot-agent-chat-stale-') then
+        pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+      end
+    end
+  end
+end
+
 --------------------------------------------------------------------------------
 -- Tests
 --------------------------------------------------------------------------------
@@ -130,6 +141,16 @@ describe('assistant tool-call transcript filtering', function()
     render.clear_transcript()
     state.history_loading = false
     state.stream_line_start = 1
+  end)
+
+  after_each(function()
+    if render and type(render.clear_transcript) == 'function' then
+      render.clear_transcript()
+    end
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.config'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    package.loaded['copilot_agent.render'] = nil
   end)
 
   it('suppresses streamed multi_tool_use scaffolding before it reaches the transcript', function()
@@ -5965,11 +5986,17 @@ describe('chat input behavior', function()
 
   before_each(function()
     pcall(vim.cmd, 'tabonly | only')
+    wipe_copilot_test_buffers()
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.chat'] = nil
     package.loaded['copilot_agent.input'] = nil
     agent = require('copilot_agent')
-    agent.setup({ auto_create_session = false })
+    agent.setup({
+      auto_create_session = false,
+      chat = {
+        render_markdown = false,
+      },
+    })
     input = require('copilot_agent.input')
     http = require('copilot_agent.http')
     original_ui_select = vim.ui.select
@@ -5999,6 +6026,7 @@ describe('chat input behavior', function()
       end
     end
     pcall(vim.cmd, 'tabonly | only')
+    wipe_copilot_test_buffers()
   end)
 
   it('prompts before closing input with unsent text', function()
@@ -6458,6 +6486,45 @@ describe('chat input behavior', function()
       '  I found the merge helper issue.',
       '',
     }, { unpack(lines, #lines - 2, #lines) })
+  end)
+
+  it('extends a delta-built live draft when assistant.message resumes from an overlapping mid-line suffix', function()
+    local render = require('copilot_agent.render')
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+
+    local prompt_idx = render.append_entry('user', 'debug transcript splice')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'debug transcript splice',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      type = 'assistant.message_delta',
+      data = {
+        messageId = 'assistant-overlap',
+        deltaContent = "You can get **most of `cmp-cmdline-history` natively in Neovim 0.12**. It's **not** part of `vim.l",
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-overlap',
+        content = "part of `vim.lua.wildmenu`.\n\n```lua\nvim.opt.wildmenu = true\n```",
+      },
+    })
+
+    vim.wait(250)
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq(
+      "You can get **most of `cmp-cmdline-history` natively in Neovim 0.12**. It's **not** part of `vim.lua.wildmenu`.\n\n```lua\nvim.opt.wildmenu = true\n```",
+      entry.content
+    )
   end)
 
   it('reuses the trailing live assistant entry when turn tracking is briefly missing', function()
@@ -8418,6 +8485,35 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(items, '@lua/copilot_agent'))
   end)
 
+  it('completes named open buffers and expands them to attachment paths', function()
+    local cwd = require('copilot_agent.service').working_directory()
+    local repo_file = cwd .. '/lua/copilot_agent/init.lua'
+    local repo_bufnr = vim.fn.bufadd(repo_file)
+    vim.fn.bufload(repo_bufnr)
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local line = prefix .. '@init'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local replace_start = input._input_omnifunc(1, '')
+    local items = input._input_omnifunc(0, '')
+    local words = vim.tbl_map(function(item)
+      return item.word
+    end, items)
+
+    assert_eq(#prefix, replace_start)
+    assert_true(vim.tbl_contains(words, '@lua/copilot_agent/init.lua'))
+    assert_false(vim.tbl_contains(words, '@CopilotAgentChat'))
+
+    local replaced = line:sub(1, replace_start) .. '@lua/copilot_agent/init.lua' .. line:sub(#line + 1)
+    assert_eq(prefix .. '@lua/copilot_agent/init.lua', replaced)
+  end)
+
   it('auto-triggers attachment completion after entering a nested folder slash', function()
     local original_complete = vim.fn.complete
     local original_mode = vim.fn.mode
@@ -8825,6 +8921,23 @@ describe('checkpoint id replay', function()
       progress_messages = {},
       success = true,
       output_text = 'lua/copilot_agent/events.lua:1:match\n\n1 match found',
+      start_data = {
+        toolName = 'bash',
+        toolCallId = 'tool-456',
+        command = 'rg',
+        arguments = { 'activity', 'lua' },
+      },
+      complete_data = {
+        success = true,
+        toolCallId = 'tool-456',
+        result = {
+          content = 'rg summary',
+          contents = {
+            { type = 'terminal', text = 'lua/copilot_agent/events.lua:1:match' },
+            { type = 'text', text = '1 match found' },
+          },
+        },
+      },
     }, entry.activity_items[1])
   end)
 end)
@@ -8837,8 +8950,10 @@ describe('checkpoint id assignment', function()
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.config'] = nil
     package.loaded['copilot_agent.events'] = nil
     package.loaded['copilot_agent.checkpoints'] = nil
+    package.loaded['copilot_agent.statusline'] = nil
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false, notify = false })
     agent.state.session_id = 'session-123'

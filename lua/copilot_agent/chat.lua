@@ -71,7 +71,7 @@ local function help_lines()
     '    <C-a>           Open attachment picker',
     '    <M-v>           Paste image from clipboard',
     '    <Tab>           Trigger completion',
-    '    @<path>         Attach a file',
+    '    @<path>         Attach a file or open buffer',
     '    /<cmd>          Run a built-in slash command',
     '    Type / + <Tab>  Browse command completion',
     '    Examples        /model  /new  /resume  /diff  /lsp create',

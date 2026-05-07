@@ -2,7 +2,31 @@
 -- Sets up runtimepath to include this plugin and test dependencies.
 -- Usage:  nvim --headless -u tests/minimal_init.lua [...]
 
-vim.opt.runtimepath:prepend(vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h'))
+local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h')
+
+-- Disable module cache so re-require always uses the dev copy.
+if vim.loader and vim.loader.disable then
+  vim.loader.disable()
+end
+if vim.loader and vim.loader.reset then
+  vim.loader.reset()
+end
+
+vim.opt.runtimepath:prepend(dev_root)
+
+-- Ensure require() resolves to the development tree first by inserting a
+-- custom searcher at position 1 (after preload) that checks dev_root/lua/.
+local dev_lua = dev_root .. '/lua/'
+table.insert(package.searchers or package.loaders, 2, function(modname)
+  local path = dev_lua .. modname:gsub('%.', '/') .. '.lua'
+  if vim.uv.fs_stat(path) then
+    return loadfile(path)
+  end
+  path = dev_lua .. modname:gsub('%.', '/') .. '/init.lua'
+  if vim.uv.fs_stat(path) then
+    return loadfile(path)
+  end
+end)
 
 local function append_dependency(name)
   local data = vim.fn.stdpath('data')

@@ -378,7 +378,7 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<M-v>`              | Paste image from clipboard as attachment                                                          |
 | `<C-x>`              | Toggle session tools (enable/disable individual tools)                                            |
 | `<Tab>`              | Trigger completion (`@file` or `/command`)                                                        |
-| `@<path>`            | Attach a file by path (autocomplete from working directory)                                       |
+| `@<path>`            | Attach a file by path or open buffer (autocomplete from working directory and named open buffers) |
 | `/<cmd>`             | Run a built-in slash command (autocomplete with `<Tab>`)                                          |
 | `<C-w>` (insert)     | Delete previous word in the prompt while keeping the mode prefix (`ask❯`/`plan❯`/`agent❯`) intact |
 | `<C-u>` (insert)     | Delete from prompt start to cursor while keeping the mode prefix (`ask❯`/`plan❯`/`agent❯`) intact |

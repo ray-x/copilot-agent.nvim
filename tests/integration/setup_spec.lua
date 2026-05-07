@@ -4594,6 +4594,101 @@ describe('lsp slash command', function()
   end)
 end)
 
+describe('workspace file opening avoids chat windows', function()
+  local window
+  local state
+  local temp_file
+  local temp_file_two
+
+  before_each(function()
+    package.loaded['copilot_agent.config'] = nil
+    package.loaded['copilot_agent.window'] = nil
+    wipe_copilot_test_buffers()
+    window = require('copilot_agent.window')
+    state = require('copilot_agent.config').state
+    temp_file = vim.fn.tempname() .. '.lua'
+    temp_file_two = vim.fn.tempname() .. '.lua'
+    vim.fn.writefile({ 'return 1' }, temp_file)
+    vim.fn.writefile({ 'return 2' }, temp_file_two)
+    state.chat_bufnr = nil
+    state.chat_winid = nil
+    state.input_bufnr = nil
+    state.input_winid = nil
+    pcall(vim.cmd, 'tabonly | only')
+    vim.cmd('enew')
+  end)
+
+  after_each(function()
+    state.chat_bufnr = nil
+    state.chat_winid = nil
+    state.input_bufnr = nil
+    state.input_winid = nil
+    wipe_copilot_test_buffers()
+    vim.fn.delete(temp_file)
+    vim.fn.delete(temp_file_two)
+    pcall(vim.cmd, 'tabonly | only')
+  end)
+
+  it('reuses the left workspace split instead of replacing the chat window', function()
+    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    local file_winid = vim.api.nvim_get_current_win()
+    local chat_bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(chat_bufnr, 'CopilotAgentChat')
+    local chat_winid = vim.api.nvim_open_win(chat_bufnr, true, {
+      split = 'right',
+      win = file_winid,
+    })
+    state.chat_bufnr = chat_bufnr
+    state.chat_winid = chat_winid
+
+    local opened, err = window.open_path_safely(temp_file_two)
+
+    assert_true(opened or err ~= nil)
+    assert_eq(file_winid, vim.api.nvim_get_current_win())
+    assert_eq(temp_file_two, vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(file_winid)))
+    assert_eq(chat_bufnr, vim.api.nvim_win_get_buf(chat_winid))
+  end)
+
+  it('creates a split to the left of the chat column when only chat windows are present', function()
+    local chat_bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(chat_bufnr, 'CopilotAgentChat')
+    vim.api.nvim_set_current_buf(chat_bufnr)
+    local chat_winid = vim.api.nvim_get_current_win()
+    state.chat_bufnr = chat_bufnr
+    state.chat_winid = chat_winid
+
+    local tree_bufnr = vim.api.nvim_create_buf(false, true)
+    vim.bo[tree_bufnr].buftype = 'nofile'
+    vim.api.nvim_buf_set_name(tree_bufnr, 'NvimTree_1')
+    vim.api.nvim_open_win(tree_bufnr, false, {
+      split = 'left',
+      win = chat_winid,
+    })
+
+    local input_bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(input_bufnr, 'copilot-agent-input')
+    local input_winid = vim.api.nvim_open_win(input_bufnr, false, {
+      split = 'below',
+      win = chat_winid,
+      height = 4,
+    })
+    state.input_bufnr = input_bufnr
+    state.input_winid = input_winid
+
+    local opened, err = window.open_path_safely(temp_file)
+    local file_winid = vim.api.nvim_get_current_win()
+    local file_pos = vim.api.nvim_win_get_position(file_winid)
+    local chat_pos = vim.api.nvim_win_get_position(chat_winid)
+
+    assert_true(opened or err ~= nil)
+    assert_true(file_winid ~= chat_winid)
+    assert_eq(temp_file, vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(file_winid)))
+    assert_eq(chat_bufnr, vim.api.nvim_win_get_buf(chat_winid))
+    assert_eq(input_bufnr, vim.api.nvim_win_get_buf(input_winid))
+    assert_true(file_pos[2] < chat_pos[2])
+  end)
+end)
+
 describe('mcp slash command', function()
   local agent
   local slash
@@ -8486,10 +8581,34 @@ describe('chat input behavior', function()
   end)
 
   it('completes named open buffers and expands them to attachment paths', function()
+    -- Ensure the dev copy of input module is loaded (not an installed copy).
+    local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+    local dev_input_path = dev_root .. '/lua/copilot_agent/input.lua'
+    if debug.getinfo(input._input_omnifunc, 'S').source ~= '@' .. dev_input_path then
+      for k, _ in pairs(package.loaded) do
+        if k:find('^copilot_agent') then
+          package.loaded[k] = nil
+        end
+      end
+      table.insert(package.searchers or package.loaders, 1, function(modname)
+        if modname:find('^copilot_agent') then
+          local p = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '.lua'
+          if vim.uv.fs_stat(p) then return loadfile(p) end
+          p = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '/init.lua'
+          if vim.uv.fs_stat(p) then return loadfile(p) end
+        end
+      end)
+      agent = require('copilot_agent')
+      agent.setup({ auto_create_session = false, chat = { render_markdown = false } })
+      input = require('copilot_agent.input')
+    end
+
     local cwd = require('copilot_agent.service').working_directory()
     local repo_file = cwd .. '/lua/copilot_agent/init.lua'
-    local repo_bufnr = vim.fn.bufadd(repo_file)
-    vim.fn.bufload(repo_bufnr)
+    local repo_bufnr = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(repo_bufnr, repo_file)
+    vim.api.nvim_buf_set_lines(repo_bufnr, 0, -1, false, { '-- stub' })
+    vim.bo[repo_bufnr].modified = false
 
     agent.open_chat()
     input.open_input_window()

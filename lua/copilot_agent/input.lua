@@ -191,18 +191,87 @@ local function attachment_completion_context(before)
   }
 end
 
+local function normalize_attachment_path(path)
+  path = vim.trim(path or '')
+  if path == '' then
+    return nil
+  end
+
+  local normalized
+  if vim.fs and type(vim.fs.normalize) == 'function' then
+    normalized = vim.fs.normalize(path)
+  else
+    normalized = vim.fn.fnamemodify(path, ':p')
+  end
+  return normalized:gsub('\\', '/')
+end
+
+local function attachment_display_path(path)
+  local normalized = normalize_attachment_path(path)
+  if not normalized then
+    return nil
+  end
+
+  local wd = normalize_attachment_path(working_directory())
+  if wd and vim.startswith(normalized, wd .. '/') then
+    return normalized:sub(#wd + 2)
+  end
+  return normalized
+end
+
+local function is_chat_related_buffer_name(path)
+  local name = vim.fn.fnamemodify(path or '', ':t')
+  local chat_name = ((state.config.chat or {}).buf_name) or 'CopilotAgentChat'
+  return name == chat_name or name == 'copilot-agent-input' or vim.startswith(name, 'copilot-agent-chat-stale-')
+end
+
+local function attachment_query_matches(path, query)
+  local candidate = (path or ''):lower()
+  local needle = (query or ''):lower():gsub('\\', '/')
+  if needle == '' then
+    return true
+  end
+  if vim.startswith(candidate, needle) then
+    return true
+  end
+  if not needle:find('/', 1, true) then
+    return vim.startswith(vim.fn.fnamemodify(candidate, ':t'), needle)
+  end
+  return false
+end
+
 local function attachment_completion_items(query)
   query = type(query) == 'string' and query or ''
-  local wd = working_directory()
-  local pattern = wd .. '/' .. query .. '*'
   local items = {}
   local seen = {}
 
-  for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
-    local rel = path:sub(#wd + 2)
-    if rel ~= '' and not seen[rel] then
-      seen[rel] = true
-      table.insert(items, { word = '@' .. rel, abbr = rel, menu = '[file]' })
+  local function add_item(path, menu)
+    local display = attachment_display_path(path)
+    if display and display ~= '' and not seen[display] then
+      seen[display] = true
+      table.insert(items, { word = '@' .. display, abbr = display, menu = menu })
+    end
+  end
+
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_get_option_value('buftype', { buf = bufnr }) == '' then
+      local path = vim.api.nvim_buf_get_name(bufnr)
+      if path ~= '' then
+        local display = attachment_display_path(path)
+        local is_chat = is_chat_related_buffer_name(path)
+        local matches = display and attachment_query_matches(display, query)
+        if display and not is_chat and matches then
+          add_item(path, '[buffer]')
+        end
+      end
+    end
+  end
+
+  local wd = working_directory()
+  if wd ~= '' then
+    local pattern = wd .. '/' .. query .. '*'
+    for _, path in ipairs(vim.fn.glob(pattern, false, true)) do
+      add_item(path, '[file]')
     end
   end
 

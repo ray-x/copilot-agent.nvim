@@ -5,6 +5,7 @@
 local uv = vim.uv or vim.loop
 local render = require('copilot_agent.render')
 local service = require('copilot_agent.service')
+local window = require('copilot_agent.window')
 
 local append_entry = render.append_entry
 local working_directory = service.working_directory
@@ -563,7 +564,7 @@ local function write_instructions(path, lines, scanned_files)
   end
   local rel_path = vim.fn.fnamemodify(path, ':~:.')
   append_entry('system', string.format('Generated starter Copilot instructions at %s (scanned %d files)', rel_path, scanned_files))
-  vim.cmd('edit ' .. vim.fn.fnameescape(path))
+  window.open_path_safely(path)
 end
 
 function M.run(args)
@@ -579,7 +580,7 @@ function M.run(args)
   end
 
   if args == 'open' and exists(canonical_path) then
-    vim.cmd('edit ' .. vim.fn.fnameescape(canonical_path))
+    window.open_path_safely(canonical_path)
     return true
   end
 
@@ -608,7 +609,7 @@ function M.run(args)
         return
       end
       if choice.id == 'open' then
-        vim.cmd('edit ' .. vim.fn.fnameescape(canonical_path))
+        window.open_path_safely(canonical_path)
       elseif choice.id == 'draft' then
         write_target(draft_path)
       else

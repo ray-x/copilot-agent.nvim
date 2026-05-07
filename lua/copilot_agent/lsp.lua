@@ -6,6 +6,7 @@
 
 local uv = vim.uv or vim.loop
 local cfg = require('copilot_agent.config')
+local window = require('copilot_agent.window')
 local state = cfg.state
 local notify = cfg.notify
 local http = require('copilot_agent.http')
@@ -404,23 +405,7 @@ local function command_label(command, args)
 end
 
 local function open_path_safely(path)
-  local ok, err = pcall(vim.cmd, 'edit ' .. vim.fn.fnameescape(path))
-  if ok then
-    return true
-  end
-
-  local bufnr = vim.fn.bufadd(path)
-  if bufnr <= 0 or not vim.api.nvim_buf_is_valid(bufnr) then
-    bufnr = vim.api.nvim_create_buf(true, false)
-    vim.api.nvim_buf_set_name(bufnr, path)
-  end
-
-  local lines = vim.fn.filereadable(path) == 1 and vim.fn.readfile(path) or { '' }
-  vim.api.nvim_set_current_buf(bufnr)
-  vim.bo[bufnr].buftype = ''
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-  vim.bo[bufnr].modified = false
-  return nil, err
+  return window.open_path_safely(path)
 end
 
 local function normalize_command(command)

@@ -88,7 +88,10 @@ local function open_path(path)
   if type(path) ~= 'string' or path == '' then
     return
   end
-  vim.cmd('edit ' .. vim.fn.fnameescape(path))
+  local _, err = window.open_path_safely(path)
+  if err then
+    notify('Opened with a fallback buffer after :edit failed: ' .. tostring(err), vim.log.levels.WARN)
+  end
 end
 
 local function now_ms()

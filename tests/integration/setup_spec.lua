@@ -4629,6 +4629,10 @@ describe('workspace file opening avoids chat windows', function()
     pcall(vim.cmd, 'tabonly | only')
   end)
 
+  local function resolve(path)
+    return vim.fn.resolve(vim.fn.fnamemodify(path, ':p'))
+  end
+
   it('reuses the left workspace split instead of replacing the chat window', function()
     vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
     local file_winid = vim.api.nvim_get_current_win()
@@ -4645,7 +4649,7 @@ describe('workspace file opening avoids chat windows', function()
 
     assert_true(opened or err ~= nil)
     assert_eq(file_winid, vim.api.nvim_get_current_win())
-    assert_eq(temp_file_two, vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(file_winid)))
+    assert_eq(resolve(temp_file_two), resolve(vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(file_winid))))
     assert_eq(chat_bufnr, vim.api.nvim_win_get_buf(chat_winid))
   end)
 
@@ -4682,7 +4686,7 @@ describe('workspace file opening avoids chat windows', function()
 
     assert_true(opened or err ~= nil)
     assert_true(file_winid ~= chat_winid)
-    assert_eq(temp_file, vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(file_winid)))
+    assert_eq(resolve(temp_file), resolve(vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(file_winid))))
     assert_eq(chat_bufnr, vim.api.nvim_win_get_buf(chat_winid))
     assert_eq(input_bufnr, vim.api.nvim_win_get_buf(input_winid))
     assert_true(file_pos[2] < chat_pos[2])

@@ -12,8 +12,8 @@ local function is_named_chat_buffer(bufnr)
   end
 
   local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ':t')
-  local chat_name = ((state.config.chat or {}).buf_name) or 'CopilotAgentChat'
-  return name == chat_name or name == 'copilot-agent-input' or vim.startswith(name, 'copilot-agent-chat-stale-')
+  local chat_name = (state.config.chat or {}).buf_name or 'CopilotAgentChat'
+  return name == chat_name or name == 'copilot-agent-input' or name == 'copilot-agent-compose' or vim.startswith(name, 'copilot-agent-chat-stale-')
 end
 
 local function win_sort_key(winid)
@@ -102,20 +102,10 @@ end
 
 function M.resolve_chat_anchor_window()
   local current_tab = vim.api.nvim_get_current_tabpage()
-  if
-    state.chat_winid
-    and vim.api.nvim_win_is_valid(state.chat_winid)
-    and vim.api.nvim_win_get_tabpage(state.chat_winid) == current_tab
-    and not M.is_floating_window(state.chat_winid)
-  then
+  if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) and vim.api.nvim_win_get_tabpage(state.chat_winid) == current_tab and not M.is_floating_window(state.chat_winid) then
     return state.chat_winid
   end
-  if
-    state.input_winid
-    and vim.api.nvim_win_is_valid(state.input_winid)
-    and vim.api.nvim_win_get_tabpage(state.input_winid) == current_tab
-    and not M.is_floating_window(state.input_winid)
-  then
+  if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) and vim.api.nvim_win_get_tabpage(state.input_winid) == current_tab and not M.is_floating_window(state.input_winid) then
     return state.input_winid
   end
   return nil

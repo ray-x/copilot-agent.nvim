@@ -57,6 +57,33 @@ end, {
   desc = 'Send a prompt to Copilot Go',
 })
 
+vim.api.nvim_create_user_command('CopilotAgentCompose', function(command)
+  local arg = vim.trim(table.concat(command.fargs, ' '))
+  local opts = {}
+  if arg ~= '' then
+    if arg ~= 'tab' then
+      vim.notify('CopilotAgentCompose only accepts "tab" as an optional argument', vim.log.levels.WARN)
+      return
+    end
+    opts.layout = 'tab'
+  end
+  copilot_agent.open_compose(opts)
+end, {
+  nargs = '?',
+  complete = function()
+    return { 'tab' }
+  end,
+  desc = 'Open the Copilot compose scratch buffer',
+})
+
+vim.api.nvim_create_user_command('CopilotAgentPromoteToCompose', function()
+  copilot_agent.promote_to_compose()
+end, { desc = 'Move the prompt buffer text into the Copilot compose buffer' })
+
+vim.api.nvim_create_user_command('CopilotAgentSendBuffer', function()
+  copilot_agent.send_buffer()
+end, { desc = 'Send the active Copilot compose buffer' })
+
 vim.api.nvim_create_user_command('CopilotAgentModel', function(command)
   copilot_agent.select_model(table.concat(command.fargs, ' '))
 end, {

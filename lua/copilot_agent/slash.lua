@@ -600,6 +600,25 @@ local function reset_allowed_tools_command()
   return true
 end
 
+local function list_tools_command()
+  local tools = approvals.list_tools()
+  if vim.tbl_isempty(tools) then
+    append_entry('system', 'No approved tools in this session\nNote: the backend does not expose the full available-tools inventory to the plugin')
+    return true
+  end
+
+  table.sort(tools)
+  local lines = {
+    'Approved tools for this session:',
+  }
+  for _, tool in ipairs(tools) do
+    lines[#lines + 1] = '  - ' .. tool
+  end
+  lines[#lines + 1] = 'Note: the backend does not expose the full available-tools inventory to the plugin'
+  append_entry('system', table.concat(lines, '\n'))
+  return true
+end
+
 local function cwd_command(args)
   args = vim.trim(args or '')
   if args == '' then
@@ -2317,13 +2336,83 @@ local function compact_history()
   return true
 end
 
+local function short_hash(commit)
+  local text = vim.trim(commit or '')
+  if text == '' then
+    return 'unknown'
+  end
+  return #text > 12 and text:sub(1, 12) or text
+end
+
+local function restore_command_label(command_name, requested_checkpoint, result)
+  if command_name == 'undo' then
+    return '/undo'
+  end
+  local target_id = type(result) == 'table' and type(result.target) == 'table' and result.target.id or nil
+  local checkpoint = vim.trim(requested_checkpoint or '')
+  if checkpoint ~= '' then
+    return '/rewind ' .. checkpoint
+  end
+  if target_id and target_id ~= '' then
+    return '/rewind ' .. target_id
+  end
+  return '/rewind'
+end
+
+local function restore_context_text(command_label, result)
+  local target = type(result) == 'table' and type(result.target) == 'table' and result.target or nil
+  if not target or type(target.id) ~= 'string' or target.id == '' then
+    return nil
+  end
+
+  local lines = {
+    'Checkpoint restore context for the next Copilot turn:',
+    '- Command: ' .. command_label,
+    '- Target checkpoint: ' .. target.id,
+    '- Target checkpoint git hash: ' .. tostring(target.commit or 'unknown'),
+  }
+
+  if type(result.previous_head) == 'string' and result.previous_head ~= '' and result.previous_head ~= target.commit then
+    lines[#lines + 1] = '- Previous checkpoint git hash: ' .. result.previous_head
+  end
+
+  if type(result.reverted) == 'table' and not vim.tbl_isempty(result.reverted) then
+    lines[#lines + 1] = '- Reverted checkpoints:'
+    for _, item in ipairs(result.reverted) do
+      local detail = string.format('  - %s (%s): User asked %s', tostring(item.id or '?'), short_hash(item.commit), tostring(item.prompt_summary or 'checkpoint'))
+      if type(item.assistant_summary) == 'string' and item.assistant_summary ~= '' then
+        detail = detail .. '; Copilot updated ' .. item.assistant_summary
+      end
+      lines[#lines + 1] = detail
+    end
+  else
+    lines[#lines + 1] = '- Reverted checkpoints: none; the workspace was restored to the latest saved checkpoint state.'
+  end
+
+  lines[#lines + 1] = '- This restore context will be included automatically with the next prompt sent to Copilot.'
+  lines[#lines + 1] = '- Copilot may run `git diff` in the workspace to inspect the reverted code before making more changes.'
+  return table.concat(lines, '\n')
+end
+
+local function queue_restore_context(command_name, requested_checkpoint, result)
+  local context_text = restore_context_text(restore_command_label(command_name, requested_checkpoint, result), result)
+  if not context_text then
+    return nil
+  end
+  state.pending_session_context = {
+    session_id = state.session_id,
+    text = context_text,
+  }
+  return context_text
+end
+
 local function undo_checkpoint()
   if not state.session_id then
     notify('No active session to undo', vim.log.levels.WARN)
     return true
   end
 
-  checkpoints.undo(state.session_id, function(err)
+  checkpoints.undo(state.session_id, function(err, result)
     if err and err ~= '' then
       if err == 'No checkpoints available' then
         notify(err, vim.log.levels.INFO)
@@ -2332,7 +2421,7 @@ local function undo_checkpoint()
       append_entry('error', 'Undo failed: ' .. err)
       return
     end
-    append_entry('system', 'Restored latest checkpoint')
+    append_entry('system', queue_restore_context('undo', nil, result) or 'Restored latest checkpoint')
   end)
   return true
 end
@@ -2344,7 +2433,7 @@ local function rewind_checkpoint(args)
   end
 
   args = vim.trim(args or '')
-  checkpoints.rewind(state.session_id, args ~= '' and args or nil, function(err)
+  checkpoints.rewind(state.session_id, args ~= '' and args or nil, function(err, result)
     if err and err ~= '' then
       if err == 'No checkpoints available' then
         notify(err, vim.log.levels.INFO)
@@ -2352,6 +2441,10 @@ local function rewind_checkpoint(args)
       end
       append_entry('error', 'Rewind failed: ' .. err)
       return
+    end
+    local context_text = queue_restore_context('rewind', args, result)
+    if context_text then
+      append_entry('system', context_text)
     end
   end)
   return true
@@ -2371,6 +2464,7 @@ local handlers = {
   instructions = instructions_command,
   ['list-dir'] = list_directories_command,
   ['list-dirs'] = list_directories_command,
+  ['list-tools'] = list_tools_command,
   lsp = lsp_command,
   mcp = mcp_command,
   ['new'] = new_session_command,

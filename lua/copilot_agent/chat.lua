@@ -48,6 +48,13 @@ local function help_lines()
     '  Send / Open input',
     '    <CR> / i / a    Open input buffer (output pane)',
     '    <C-s>           Send message / open input',
+    '    :CopilotAgentCompose     Open compose split left of chat',
+    '    :CopilotAgentCompose tab Open compose scratch buffer in a new tab',
+    '    <leader>cs      Send compose buffer',
+    '    :w / :wq        Send compose buffer',
+    '    :CopilotAgentSendBuffer  Send compose buffer',
+    '    <leader>cc      Promote prompt buffer into compose',
+    '    :CopilotAgentPromoteToCompose  Promote prompt buffer into compose',
     '',
     '  Mode  (<C-t> to cycle; auto-sets permission)',
     '    💬 ask           Single-turn Q&A            → 🔐 interactive',
@@ -72,6 +79,7 @@ local function help_lines()
     '    <M-v>           Paste image from clipboard',
     '    <Tab>           Trigger completion',
     '    @<path>         Attach a file or open buffer',
+    '    @"path with spaces"  Attach a file whose path includes spaces',
     '    /<cmd>          Run a built-in slash command',
     '    Type / + <Tab>  Browse command completion',
     '    Examples        /model  /new  /resume  /diff  /lsp create',
@@ -504,6 +512,11 @@ function M.close_chat_window()
   if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
     vim.api.nvim_win_close(state.input_winid, true)
   end
+  state.input_winid = nil
+  if state.compose_winid and vim.api.nvim_win_is_valid(state.compose_winid) then
+    vim.api.nvim_win_close(state.compose_winid, true)
+  end
+  state.compose_winid = nil
   if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
     vim.api.nvim_win_close(state.chat_winid, true)
   end
@@ -719,7 +732,10 @@ function M.setup_action_keymaps(bufnr)
         table.insert(state.pending_attachments, att)
         refresh_statuslines()
         vim.schedule(function()
-          if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+          if state.compose_winid and vim.api.nvim_win_is_valid(state.compose_winid) then
+            vim.api.nvim_set_current_win(state.compose_winid)
+            vim.cmd('startinsert!')
+          elseif state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
             vim.api.nvim_set_current_win(state.input_winid)
             vim.cmd('startinsert!')
           elseif state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
@@ -783,7 +799,10 @@ function M.setup_action_keymaps(bufnr)
       end
 
       if choice == 'Current buffer' or choice == 'Visual selection' then
-        if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+        if state.compose_winid and vim.api.nvim_win_is_valid(state.compose_winid) then
+          vim.api.nvim_set_current_win(state.compose_winid)
+          vim.cmd('startinsert!')
+        elseif state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
           vim.api.nvim_set_current_win(state.input_winid)
           vim.cmd('startinsert!')
         end
@@ -882,8 +901,9 @@ end
 --- If prompt is empty, opens the input buffer instead.
 function M.ask(prompt, opts)
   opts = opts or {}
-  local text = prompt
-  if text == nil or text == '' then
+  local text = type(prompt) == 'string' and prompt or ''
+  local has_attachments = type(opts.attachments) == 'table' and #opts.attachments > 0
+  if (text == nil or text == '') and not has_attachments then
     M.ensure_chat_window({ replace_current = opts.replace_current })
     if state.session_id then
       require('copilot_agent.input').open_input_window()
@@ -929,6 +949,23 @@ function M.ask(prompt, opts)
     end
 
     local function dispatch_prompt()
+      local prompt_body = text
+      local included_restore_context = false
+      local pending_context = state.pending_session_context
+      if type(pending_context) == 'table' and type(pending_context.text) == 'string' and pending_context.text ~= '' then
+        if pending_context.session_id == nil or pending_context.session_id == session_id then
+          prompt_body = table.concat({
+            pending_context.text,
+            '',
+            'Current user request:',
+            text,
+          }, '\n')
+          included_restore_context = true
+        else
+          state.pending_session_context = nil
+        end
+      end
+
       require('copilot_agent').open_chat({
         activate_input_on_session_ready = false,
         replace_current = opts.replace_current,
@@ -944,7 +981,7 @@ function M.ask(prompt, opts)
       refresh_statuslines()
       schedule_render()
 
-      local body = { prompt = text }
+      local body = { prompt = prompt_body }
       if #api_attachments > 0 then
         body.attachments = api_attachments
       end
@@ -975,6 +1012,10 @@ function M.ask(prompt, opts)
           refresh_statuslines()
           refresh_reasoning_overlay(true)
           append_entry('error', 'Failed to send prompt: ' .. request_err)
+          return
+        end
+        if included_restore_context then
+          state.pending_session_context = nil
         end
       end)
     end

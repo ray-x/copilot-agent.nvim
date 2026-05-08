@@ -29,6 +29,7 @@ Below, **Plugin** means there is a working Neovim command/keymap/UI path now. **
 | `/allow-all`           | **Yes**     |     **Yes** | `<M-a>` until `approve-all`, or set `permission_mode = 'approve-all'`                                                                     |
 | `/add-dir`             | No          |          No | No real trusted-dir API here; closest is changing `working_directory` or approving requests interactively                                 |
 | `/list-dirs`           | No          |          No | No equivalent                                                                                                                             |
+| `/list-tools`          | **Yes**     |          No | List the plugin's remembered tool approvals for the current session; this is local-only and not a full backend tool inventory            |
 | `/cwd`                 | **Partial** |     **Yes** | `vim.cmd('cd ...')` plus `session.working_directory = function() return vim.fn.getcwd() end`                                              |
 | `/reset-allowed-tools` | **Partial** | **Partial** | `<C-x>` opens tool toggle UI, but current `/tools` state is local-only; recreate session for a clean tool set                             |
 | `/share`               | No          |          No | Use normal Neovim save/yank workflows                                                                                                     |

@@ -84,6 +84,17 @@ local defaults = {
     auto_open = true,
     buf_name = 'CopilotAgentDashboard',
   },
+  prompt = {
+    style = 'cold', -- "cold" = red-violet/violet/blue, "warm" = red/yellow/green
+  },
+  compose = {
+    -- Width for the left-side compose split. Fractions are relative to the chat
+    -- window; integers are absolute columns.
+    width = 0.4,
+    min_width = 40,
+    max_width = 100,
+    promote_keymap = '<leader>cc',
+  },
   statusline = {
     enabled = true, -- When true, the plugin manages local chat/input statuslines; leave false to keep your own statusline.
     -- Toggle individual statusline segments. You can also provide a list like
@@ -132,6 +143,8 @@ local state = {
   chat_winid = nil,
   input_bufnr = nil,
   input_winid = nil,
+  compose_bufnr = nil,
+  compose_winid = nil,
   chat_statusline_managed = false, -- true when plugin populated the chat window local statusline
   input_statusline_managed = false, -- true when plugin populated the input window local statusline
   service_job_id = nil,
@@ -148,6 +161,7 @@ local state = {
   prompt_history_index = nil,
   prompt_history_draft = '',
   prompt_prefill = nil, -- text to pre-populate the input buffer (set by chat-buffer history nav)
+  pending_session_context = nil, -- one-shot context block injected into the next prompt sent to the current session
   lsp_client_id = nil,
   -- Input buffer UI state
   input_mode = 'agent', -- 'ask' | 'plan' | 'agent'
@@ -258,12 +272,13 @@ local SLASH_COMMANDS = {
   { word = '/allow-all', info = 'Enable all permissions' },
   { word = '/add-dir', info = 'Add a directory to the allowed list' },
   { word = '/list-dirs', info = 'Display all allowed directories' },
+  { word = '/list-tools', info = 'Display remembered tool approvals for this session' },
   { word = '/cwd', info = 'Change or show working directory' },
   { word = '/reset-allowed-tools', info = 'Reset the list of allowed tools' },
   { word = '/share', info = 'Share session to markdown, HTML, or GitHub gist' },
   { word = '/copy', info = 'Copy the last response to the clipboard' },
-  { word = '/rewind', info = 'Rewind the last turn and revert file changes' },
-  { word = '/undo', info = 'Rewind the last turn and revert file changes' },
+  { word = '/rewind', info = 'Restore a checkpoint and queue git-aware rewind context for the next prompt' },
+  { word = '/undo', info = 'Restore the latest checkpoint and queue git-aware restore context for the next prompt' },
   { word = '/ask', info = 'Ask a quick side question without adding to history' },
   { word = '/search', info = 'Search the conversation timeline' },
   { word = '/env', info = 'Show loaded environment details' },

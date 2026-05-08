@@ -225,6 +225,78 @@ local function prompt_summary(prompt)
   return text:gsub('%s+', ' ')
 end
 
+local function text_summary(text, max_chars)
+  local summary = vim.trim(text or '')
+  if summary == '' then
+    return nil
+  end
+  summary = summary:gsub('%s+', ' ')
+  max_chars = max_chars or 120
+  if #summary > max_chars then
+    summary = summary:sub(1, max_chars - #prompt_summary_ellipsis) .. prompt_summary_ellipsis
+  end
+  return summary
+end
+
+local function last_assistant_summary(snapshot)
+  if type(snapshot) ~= 'table' or type(snapshot.entries) ~= 'table' then
+    return nil
+  end
+
+  for i = #snapshot.entries, 1, -1 do
+    local entry = snapshot.entries[i]
+    if type(entry) == 'table' and entry.kind == 'assistant' then
+      local summary = text_summary(entry.content, 140)
+      if summary then
+        return summary
+      end
+    end
+  end
+  return nil
+end
+
+local function checkpoint_restore_item(session_id, item)
+  if type(item) ~= 'table' then
+    return nil
+  end
+
+  local snapshot = read_json(metadata_path(session_id, item.metadata_key or item.id))
+  return {
+    id = item.id,
+    commit = item.commit,
+    prompt = item.prompt,
+    prompt_summary = prompt_summary(item.prompt),
+    assistant_summary = last_assistant_summary(snapshot),
+    created_at = item.created_at,
+  }
+end
+
+local function build_restore_result(session_id, index, checkpoint, previous_head)
+  local target_idx = nil
+  for idx, item in ipairs(index.checkpoints or {}) do
+    if item.id == checkpoint.id then
+      target_idx = idx
+      break
+    end
+  end
+
+  local reverted = {}
+  if target_idx then
+    for idx = #index.checkpoints, target_idx + 1, -1 do
+      local item = checkpoint_restore_item(session_id, index.checkpoints[idx])
+      if item then
+        reverted[#reverted + 1] = item
+      end
+    end
+  end
+
+  return {
+    previous_head = previous_head,
+    target = checkpoint_restore_item(session_id, checkpoint),
+    reverted = reverted,
+  }
+end
+
 local function next_checkpoint_id(index)
   local number = tonumber(index.next_checkpoint_number) or 1
   index.next_checkpoint_number = number + 1
@@ -589,30 +661,40 @@ local function restore(session_id, checkpoint_id, callback)
   snapshot = remap_snapshot_checkpoint_ids(snapshot, index)
 
   local workspace = checkpoint_workspace()
-  git(session_id, workspace, { 'reset', '--hard', '--quiet', checkpoint.commit }, function(_, reset_err)
-    if reset_err then
-      callback(reset_err)
+  current_head_commit(session_id, workspace, function(previous_head, head_err)
+    if head_err then
+      callback(head_err)
       return
     end
 
-    git(session_id, workspace, { 'clean', '-fdq' }, function(_, clean_err)
-      if clean_err then
-        callback(clean_err)
+    local restore_result = build_restore_result(session_id, index, checkpoint, previous_head)
+    git(session_id, workspace, { 'reset', '--hard', '--quiet', checkpoint.commit }, function(_, reset_err)
+      if reset_err then
+        callback(reset_err)
         return
       end
 
-      local truncated = {}
-      for _, item in ipairs(index.checkpoints) do
-        truncated[#truncated + 1] = item
-        if item.id == checkpoint_id then
-          break
+      git(session_id, workspace, { 'clean', '-fdq' }, function(_, clean_err)
+        if clean_err then
+          callback(clean_err)
+          return
         end
-      end
-      index.checkpoints = truncated
-      save_index(session_id, index)
 
-      refresh_workspace_buffers(workspace)
-      replace_with_new_session(snapshot, callback)
+        local truncated = {}
+        for _, item in ipairs(index.checkpoints) do
+          truncated[#truncated + 1] = item
+          if item.id == checkpoint_id then
+            break
+          end
+        end
+        index.checkpoints = truncated
+        save_index(session_id, index)
+
+        refresh_workspace_buffers(workspace)
+        replace_with_new_session(snapshot, function(replace_err)
+          callback(replace_err, restore_result)
+        end)
+      end)
     end)
   end)
 end

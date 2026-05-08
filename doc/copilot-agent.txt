@@ -149,6 +149,9 @@ optional — defaults are shown below: >lua
       render_markdown         = false,  -- true = enable render-markdown.nvim
       file_picker             = "auto", -- see |copilot-agent-picker|
     },
+    prompt = {
+      style                   = "cold", -- "cold" (default) = red-violet/violet/blue, "warm" = red/yellow/green
+    },
   })
 <
 
@@ -314,7 +317,7 @@ Required tools by platform:
 ------------------------------------------------------------------------------
 6.3 Chat Modes                                    *copilot-agent-modes*
 
-The current mode is shown in the prompt prefix (e.g. `agent❯`).
+The current mode is shown in the prompt prefix (e.g. `agent❯❯❯`).
 
   ask        💬  Standard question-and-answer (interactive permission)
   plan       📋  Ask Copilot to create an implementation plan
@@ -647,6 +650,12 @@ dashboard.auto_open ~
   shows the latest session for the current folder, includes shortcuts for
   reconnecting or picking a session/model, and places a two-line prompt
   at the bottom. Set false to disable the startup dashboard.
+
+prompt.style ~
+  Type: string  ("cold" | "warm")
+  Default: `"cold"`
+  Choose the dashboard prompt palette. `"cold"` uses red-violet, violet,
+  and blue for the `❯❯❯` prompt; `"warm"` uses red, yellow, and green.
 
 ==============================================================================
 13. HTTP API                                      *copilot-agent-api*

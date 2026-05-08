@@ -93,7 +93,7 @@ local function wipe_copilot_test_buffers()
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(bufnr) then
       local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ':t')
-      if name == 'CopilotAgentChat' or name == 'copilot-agent-input' or vim.startswith(name, 'copilot-agent-chat-stale-') then
+      if name == 'CopilotAgentChat' or name == 'copilot-agent-input' or name == 'copilot-agent-compose' or vim.startswith(name, 'copilot-agent-chat-stale-') then
         pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
       end
     end
@@ -788,8 +788,30 @@ describe('dashboard', function()
 
   before_each(function()
     pcall(vim.cmd, 'tabonly | only')
-    package.loaded['copilot_agent'] = nil
-    package.loaded['copilot_agent.dashboard'] = nil
+    if vim.loader then
+      pcall(vim.loader.disable)
+      if type(vim.loader.reset) == 'function' then
+        pcall(vim.loader.reset)
+      end
+    end
+    for key, _ in pairs(package.loaded) do
+      if key:find('^copilot_agent') then
+        package.loaded[key] = nil
+      end
+    end
+    local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+    table.insert(package.searchers or package.loaders, 1, function(modname)
+      if modname:find('^copilot_agent') then
+        local path = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '.lua'
+        if vim.uv.fs_stat(path) then
+          return loadfile(path)
+        end
+        path = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '/init.lua'
+        if vim.uv.fs_stat(path) then
+          return loadfile(path)
+        end
+      end
+    end)
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
@@ -875,6 +897,66 @@ describe('dashboard', function()
     local expected_padding = math.floor((vim.api.nvim_win_get_width(agent.state.dashboard_winid) - vim.fn.strdisplaywidth('Copilot Agent Dashboard')) / 2)
     local actual_padding = (title_line:find('%S') or 1) - 1
     assert_eq(expected_padding, actual_padding)
+  end)
+
+  it('uses the cold triple-arrow dashboard prompt by default', function()
+    agent.open_dashboard()
+
+    local prompt_bufnr = agent.state.dashboard_prompt_bufnr
+    local arrow1 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptArrow1' })
+    local arrow2 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptArrow2' })
+    local arrow3 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptArrow3' })
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_prompt
+    vim.wait(100, function()
+      return #vim.api.nvim_buf_get_extmarks(prompt_bufnr, ns, 0, -1, { details = true }) > 0
+    end)
+    local extmarks = vim.api.nvim_buf_get_extmarks(prompt_bufnr, ns, 0, -1, { details = true })
+    local virt_text = extmarks[1][4].virt_text
+
+    assert_eq('❯', virt_text[1][1])
+    assert_eq('CopilotAgentPromptArrow1', virt_text[1][2])
+    assert_eq('❯', virt_text[2][1])
+    assert_eq('CopilotAgentPromptArrow2', virt_text[2][2])
+    assert_eq('❯', virt_text[3][1])
+    assert_eq('CopilotAgentPromptArrow3', virt_text[3][2])
+    assert_eq(tonumber('c678dd', 16), arrow1.fg)
+    assert_eq(tonumber('a78bfa', 16), arrow2.fg)
+    assert_eq(tonumber('61afef', 16), arrow3.fg)
+  end)
+
+  it('supports a warm triple-arrow dashboard prompt palette', function()
+    agent.setup({
+      auto_create_session = false,
+      dashboard = {
+        auto_open = false,
+      },
+      prompt = {
+        style = 'warm',
+      },
+      service = {
+        auto_start = false,
+      },
+    })
+
+    agent.open_dashboard()
+
+    local prompt_bufnr = agent.state.dashboard_prompt_bufnr
+    local arrow1 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptArrow1' })
+    local arrow2 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptArrow2' })
+    local arrow3 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptArrow3' })
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_prompt
+    vim.wait(100, function()
+      return #vim.api.nvim_buf_get_extmarks(prompt_bufnr, ns, 0, -1, { details = true }) > 0
+    end)
+    local extmarks = vim.api.nvim_buf_get_extmarks(prompt_bufnr, ns, 0, -1, { details = true })
+    local virt_text = extmarks[1][4].virt_text
+
+    assert_eq('CopilotAgentPromptArrow1', virt_text[1][2])
+    assert_eq('CopilotAgentPromptArrow2', virt_text[2][2])
+    assert_eq('CopilotAgentPromptArrow3', virt_text[3][2])
+    assert_eq(tonumber('e06c75', 16), arrow1.fg)
+    assert_eq(tonumber('e5c07b', 16), arrow2.fg)
+    assert_eq(tonumber('98c379', 16), arrow3.fg)
   end)
 
   it('opens on startup when Neovim starts with an empty buffer', function()
@@ -2905,6 +2987,146 @@ describe('model state sync', function()
   end)
 end)
 
+describe('model picker', function()
+  local model
+  local original_ui_select
+  local original_defer_fn
+
+  before_each(function()
+    package.loaded['copilot_agent.config'] = nil
+    package.loaded['copilot_agent.http'] = nil
+    package.loaded['copilot_agent.log'] = nil
+    package.loaded['copilot_agent.model'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    package.loaded['copilot_agent.service'] = nil
+    package.loaded['copilot_agent.statusline'] = nil
+    package.loaded['copilot_agent.utils'] = nil
+
+    original_ui_select = vim.ui.select
+    original_defer_fn = vim.defer_fn
+    local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+    table.insert(package.searchers or package.loaders, 1, function(modname)
+      if modname:find('^copilot_agent') then
+        local path = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '.lua'
+        if vim.uv.fs_stat(path) then
+          return loadfile(path)
+        end
+        path = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '/init.lua'
+        if vim.uv.fs_stat(path) then
+          return loadfile(path)
+        end
+      end
+    end)
+    model = require('copilot_agent.model')
+  end)
+
+  after_each(function()
+    vim.ui.select = original_ui_select
+    vim.defer_fn = original_defer_fn
+  end)
+
+  it('defers the reasoning effort picker until after the model picker closes', function()
+    local prompts = {}
+    local deferred = {}
+    local applied
+
+    model.fetch_models = function(callback)
+      callback({
+        {
+          id = 'gpt-5.5',
+          name = 'GPT-5.5 Thinking',
+          label = 'GPT-5.5 Thinking (gpt-5.5)',
+          supports_reasoning = true,
+          supported_efforts = { 'low', 'medium', 'high' },
+          default_effort = 'medium',
+        },
+      }, nil)
+    end
+
+    model.apply_model = function(selected_model, callback, opts)
+      applied = {
+        model = selected_model,
+        reasoning_effort = opts and opts.reasoning_effort or nil,
+      }
+      if callback then
+        callback(selected_model, nil)
+      end
+    end
+
+    vim.defer_fn = function(callback, ms)
+      deferred[#deferred + 1] = { callback = callback, ms = ms }
+    end
+
+    vim.ui.select = function(items, opts, on_choice)
+      prompts[#prompts + 1] = opts.prompt
+      if opts.prompt == 'Select Copilot model' then
+        on_choice(items[1])
+        return
+      end
+      on_choice(items[2])
+    end
+
+    model.select_model()
+
+    assert_eq(0, #prompts)
+    assert_eq(1, #deferred)
+    assert_eq(20, deferred[1].ms)
+
+    deferred[1].callback()
+
+    assert_eq(1, #prompts)
+    assert_eq('Select Copilot model', prompts[1])
+    assert_eq(2, #deferred)
+    assert_eq(20, deferred[2].ms)
+
+    deferred[2].callback()
+
+    assert_eq(2, #prompts)
+    assert_eq('Reasoning effort for GPT-5.5 Thinking', prompts[2])
+    assert_not_nil(applied)
+    assert_eq('gpt-5.5', applied.model)
+    assert_eq('medium', applied.reasoning_effort)
+  end)
+
+  it('defers the top-level model picker so popup providers can reopen reliably', function()
+    local prompts = {}
+    local deferred
+    local deferred_ms
+
+    model.fetch_models = function(callback)
+      callback({
+        {
+          id = 'gpt-5.4',
+          name = 'GPT-5.4',
+          label = 'GPT-5.4 (gpt-5.4)',
+          supports_reasoning = false,
+        },
+      }, nil)
+    end
+
+    vim.defer_fn = function(callback, ms)
+      deferred = callback
+      deferred_ms = ms
+    end
+
+    vim.ui.select = function(_, opts, on_choice)
+      prompts[#prompts + 1] = opts.prompt
+      on_choice(nil)
+    end
+
+    model.select_model()
+
+    assert_eq(0, #prompts)
+    assert_not_nil(deferred)
+    assert_eq(20, deferred_ms)
+
+    deferred()
+
+    assert_eq(1, #prompts)
+    assert_eq('Select Copilot model', prompts[1])
+  end)
+end)
+
 describe('statusline config counts', function()
   local agent
 
@@ -3993,6 +4215,7 @@ describe('rewind command', function()
   local slash
   local checkpoints
   local original_rewind
+  local original_undo
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
@@ -4004,10 +4227,12 @@ describe('rewind command', function()
     slash = require('copilot_agent.slash')
     checkpoints = require('copilot_agent.checkpoints')
     original_rewind = checkpoints.rewind
+    original_undo = checkpoints.undo
   end)
 
   after_each(function()
     checkpoints.rewind = original_rewind
+    checkpoints.undo = original_undo
   end)
 
   it('rewinds directly to a checkpoint label argument', function()
@@ -4036,6 +4261,141 @@ describe('rewind command', function()
 
     assert_true(slash.execute('/rewind V059'))
     assert_eq('V059', captured)
+  end)
+
+  it('queues restore context for the next prompt after /rewind', function()
+    checkpoints.rewind = function(_, checkpoint_id, callback)
+      assert_eq('v004', checkpoint_id)
+      callback(nil, {
+        previous_head = '9999999999999999999999999999999999999999',
+        target = {
+          id = 'v004',
+          commit = '4444444444444444444444444444444444444444',
+          prompt_summary = 'add a slash command list',
+        },
+        reverted = {
+          {
+            id = 'v006',
+            commit = '6666666666666666666666666666666666666666',
+            prompt_summary = 'add a slash command list',
+            assistant_summary = 'updated slash command list output and tests',
+          },
+          {
+            id = 'v005',
+            commit = '5555555555555555555555555555555555555555',
+            prompt_summary = 'add a slash command remove',
+            assistant_summary = 'added /remove handling and docs',
+          },
+        },
+      })
+    end
+
+    assert_true(slash.execute('/rewind v004'))
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('system', entry.kind)
+    assert_true(entry.content:find('Command: /rewind v004', 1, true) ~= nil)
+    assert_true(entry.content:find('Target checkpoint git hash: 4444444444444444444444444444444444444444', 1, true) ~= nil)
+    assert_true(entry.content:find('v006', 1, true) ~= nil)
+    assert_true(entry.content:find('v005', 1, true) ~= nil)
+    assert_true(entry.content:find('git diff', 1, true) ~= nil)
+    assert_eq('session-123', agent.state.pending_session_context.session_id)
+    assert_eq(entry.content, agent.state.pending_session_context.text)
+  end)
+
+  it('queues restore context for the next prompt after /undo', function()
+    checkpoints.undo = function(_, callback)
+      callback(nil, {
+        target = {
+          id = 'v006',
+          commit = '6666666666666666666666666666666666666666',
+          prompt_summary = 'latest checkpoint',
+        },
+        reverted = {},
+      })
+    end
+
+    assert_true(slash.execute('/undo'))
+
+    local entry = agent.state.entries[#agent.state.entries]
+    assert_eq('system', entry.kind)
+    assert_true(entry.content:find('Command: /undo', 1, true) ~= nil)
+    assert_true(entry.content:find('Target checkpoint: v006', 1, true) ~= nil)
+    assert_true(entry.content:find('Reverted checkpoints: none', 1, true) ~= nil)
+    assert_true(entry.content:find('next prompt sent to Copilot', 1, true) ~= nil)
+    assert_eq(entry.content, agent.state.pending_session_context.text)
+  end)
+end)
+
+describe('restore context prompt injection', function()
+  local agent
+  local chat
+  local http
+  local session
+  local original_request
+  local original_with_session
+
+  before_each(function()
+    pcall(vim.cmd, 'tabonly | only')
+    wipe_copilot_test_buffers()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.chat'] = nil
+    package.loaded['copilot_agent.http'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    agent = require('copilot_agent')
+    agent.setup({
+      auto_create_session = false,
+      notify = false,
+      chat = {
+        render_markdown = false,
+      },
+    })
+    agent.state.session_id = 'session-123'
+    chat = require('copilot_agent.chat')
+    http = require('copilot_agent.http')
+    session = require('copilot_agent.session')
+    original_request = http.request
+    original_with_session = session.with_session
+  end)
+
+  after_each(function()
+    http.request = original_request
+    session.with_session = original_with_session
+    wipe_copilot_test_buffers()
+    pcall(vim.cmd, 'tabonly | only')
+  end)
+
+  it('injects queued restore context into the next session prompt without changing the user transcript entry', function()
+    local captured_body
+
+    agent.state.pending_session_context = {
+      session_id = 'session-123',
+      text = table.concat({
+        'Checkpoint restore context for the next Copilot turn:',
+        '- Command: /rewind v004',
+        '- Target checkpoint git hash: 4444444444444444444444444444444444444444',
+      }, '\n'),
+    }
+
+    session.with_session = function(callback)
+      callback('session-123', nil)
+    end
+    http.request = function(method, path, body, callback)
+      if method == 'POST' and path == '/sessions/session-123/messages' then
+        captured_body = body
+      end
+      callback({}, nil)
+    end
+
+    package.loaded['copilot_agent.chat'] = nil
+    chat = require('copilot_agent.chat')
+    chat.ask('Please continue from here')
+
+    assert_not_nil(captured_body)
+    assert_true(captured_body.prompt:find('Checkpoint restore context for the next Copilot turn:', 1, true) ~= nil)
+    assert_true(captured_body.prompt:find('Current user request:\nPlease continue from here', 1, true) ~= nil)
+    assert_eq('Please continue from here', agent.state.entries[#agent.state.entries].content)
+    assert_eq(nil, agent.state.pending_session_context)
   end)
 end)
 
@@ -4801,6 +5161,48 @@ describe('mcp slash command', function()
     agent.state.creating_session = false
     assert_true(slash.execute('/mcp reload'))
     assert_true(agent.state.entries[#agent.state.entries].content:find('No active session', 1, true) ~= nil)
+  end)
+end)
+
+describe('tool approval slash command', function()
+  local agent
+  local slash
+  local approvals
+  local state
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.config'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.approvals'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    state = require('copilot_agent.config').state
+    state.entries = {}
+    slash = require('copilot_agent.slash')
+    approvals = require('copilot_agent.approvals')
+  end)
+
+  it('lists remembered tool approvals for the current session', function()
+    approvals.allow_tool({ toolName = 'web_search' })
+    approvals.allow_tool({ toolName = 'edit' })
+
+    assert_true(slash.execute('/list-tools'))
+
+    local message = state.entries[#state.entries].content
+    assert_true(message:find('Approved tools for this session:', 1, true) ~= nil)
+    assert_true(message:find('  %- edit') ~= nil)
+    assert_true(message:find('  %- web_search') ~= nil)
+    assert_true(message:find('available%-tools inventory', 1) ~= nil)
+  end)
+
+  it('explains when no tool approvals have been remembered yet', function()
+    assert_true(slash.execute('/list-tools'))
+
+    local message = state.entries[#state.entries].content
+    assert_true(message:find('No approved tools in this session', 1, true) ~= nil)
+    assert_true(message:find('available%-tools inventory', 1) ~= nil)
   end)
 end)
 
@@ -6078,6 +6480,8 @@ describe('chat input behavior', function()
   local http
   local original_ui_select
   local original_sync_request
+  local original_vim_system
+  local original_executable
   local root_mcp
   local vscode_mcp
   local root_mcp_backup
@@ -6086,9 +6490,17 @@ describe('chat input behavior', function()
   before_each(function()
     pcall(vim.cmd, 'tabonly | only')
     wipe_copilot_test_buffers()
-    package.loaded['copilot_agent'] = nil
-    package.loaded['copilot_agent.chat'] = nil
-    package.loaded['copilot_agent.input'] = nil
+    if vim.loader then
+      pcall(vim.loader.disable)
+      if type(vim.loader.reset) == 'function' then
+        pcall(vim.loader.reset)
+      end
+    end
+    for key, _ in pairs(package.loaded) do
+      if key:find('^copilot_agent') then
+        package.loaded[key] = nil
+      end
+    end
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
@@ -6100,6 +6512,8 @@ describe('chat input behavior', function()
     http = require('copilot_agent.http')
     original_ui_select = vim.ui.select
     original_sync_request = http.sync_request
+    original_vim_system = vim.system
+    original_executable = vim.fn.executable
     local cwd = require('copilot_agent.service').working_directory()
     root_mcp = cwd .. '/.mcp.json'
     vscode_mcp = cwd .. '/.vscode/mcp.json'
@@ -6110,6 +6524,8 @@ describe('chat input behavior', function()
   after_each(function()
     vim.ui.select = original_ui_select
     http.sync_request = original_sync_request
+    vim.system = original_vim_system
+    vim.fn.executable = original_executable
     if root_mcp then
       if root_mcp_backup then
         vim.fn.writefile(root_mcp_backup, root_mcp)
@@ -6127,6 +6543,64 @@ describe('chat input behavior', function()
     pcall(vim.cmd, 'tabonly | only')
     wipe_copilot_test_buffers()
   end)
+
+  local function ensure_dev_input_module()
+    local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+    local dev_input_path = dev_root .. '/lua/copilot_agent/input.lua'
+    if debug.getinfo(input._input_omnifunc, 'S').source == '@' .. dev_input_path then
+      return
+    end
+
+    if vim.loader then
+      pcall(vim.loader.disable)
+      if type(vim.loader.reset) == 'function' then
+        pcall(vim.loader.reset)
+      end
+    end
+    for key, _ in pairs(package.loaded) do
+      if key:find('^copilot_agent') then
+        package.loaded[key] = nil
+      end
+    end
+    table.insert(package.searchers or package.loaders, 1, function(modname)
+      if modname:find('^copilot_agent') then
+        local path = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '.lua'
+        if vim.uv.fs_stat(path) then
+          return loadfile(path)
+        end
+        path = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '/init.lua'
+        if vim.uv.fs_stat(path) then
+          return loadfile(path)
+        end
+      end
+    end)
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, chat = { render_markdown = false } })
+    http = require('copilot_agent.http')
+    input = require('copilot_agent.input')
+  end
+
+  local function stub_fd_output(lines)
+    vim.fn.executable = function(bin)
+      if bin == 'fd' then
+        return 1
+      end
+      return original_executable(bin)
+    end
+    vim.system = function(args, opts)
+      assert_eq('fd', args[1])
+      assert_eq(require('copilot_agent.service').working_directory(), opts.cwd)
+      return {
+        wait = function()
+          return {
+            code = 0,
+            stdout = table.concat(lines, '\n') .. '\n',
+            stderr = '',
+          }
+        end,
+      }
+    end
+  end
 
   it('prompts before closing input with unsent text', function()
     local captured
@@ -6171,6 +6645,27 @@ describe('chat input behavior', function()
 
     assert_true(has_ctrl_w)
     assert_true(has_ctrl_u)
+  end)
+
+  it('uses the triple-arrow prompt prefix in the input buffer', function()
+    ensure_dev_input_module()
+    agent.open_chat()
+    input.open_input_window()
+
+    local ns = vim.api.nvim_get_namespaces().copilot_agent_prompt
+    vim.wait(100, function()
+      return #vim.api.nvim_buf_get_extmarks(agent.state.input_bufnr, ns, 0, -1, { details = true }) > 0
+    end)
+    local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.input_bufnr, ns, 0, -1, { details = true })
+    local virt_text = extmarks[1][4].virt_text
+
+    assert_eq('🤖agent', virt_text[1][1])
+    assert_eq('❯', virt_text[2][1])
+    assert_eq('CopilotAgentPromptArrow1', virt_text[2][2])
+    assert_eq('❯', virt_text[3][1])
+    assert_eq('CopilotAgentPromptArrow2', virt_text[3][2])
+    assert_eq('❯', virt_text[4][1])
+    assert_eq('CopilotAgentPromptArrow3', virt_text[4][2])
   end)
 
   it('deletes previous input word with Ctrl-W without removing the prompt prefix', function()
@@ -6228,6 +6723,235 @@ describe('chat input behavior', function()
     input.open_input_window()
 
     assert_eq('markdown', vim.bo[agent.state.input_bufnr].filetype)
+  end)
+
+  it('opens a markdown compose scratch buffer', function()
+    agent.open_chat()
+    input.open_compose_buffer()
+
+    assert_eq('markdown', vim.bo[agent.state.compose_bufnr].filetype)
+    assert_eq('acwrite', vim.bo[agent.state.compose_bufnr].buftype)
+    assert_true(agent.state.chat_bufnr ~= agent.state.compose_bufnr)
+  end)
+
+  it('opens compose to the left of the chat window by default', function()
+    agent.open_chat()
+    input.open_compose_buffer()
+
+    local compose_pos = vim.api.nvim_win_get_position(agent.state.compose_winid)
+    local chat_pos = vim.api.nvim_win_get_position(agent.state.chat_winid)
+
+    assert_true(compose_pos[2] < chat_pos[2])
+  end)
+
+  it('uses configured compose split width limits', function()
+    agent.setup({
+      auto_create_session = false,
+      chat = {
+        render_markdown = false,
+      },
+      compose = {
+        width = 0.5,
+        min_width = 20,
+        max_width = 30,
+      },
+    })
+
+    agent.open_chat()
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(vim.api.nvim_get_current_tabpage())) do
+      if winid ~= agent.state.chat_winid then
+        pcall(vim.api.nvim_win_close, winid, true)
+      end
+    end
+    input.open_compose_buffer()
+
+    assert_eq(30, vim.api.nvim_win_get_width(agent.state.compose_winid))
+  end)
+
+  it('reuses an existing left workspace split for compose instead of stacking another split', function()
+    agent.open_chat()
+
+    local left_bufnr = vim.api.nvim_create_buf(false, true)
+    local left_winid = vim.api.nvim_open_win(left_bufnr, true, {
+      split = 'left',
+      win = agent.state.chat_winid,
+      width = 24,
+    })
+    local wins_before = #vim.api.nvim_tabpage_list_wins(vim.api.nvim_get_current_tabpage())
+    vim.api.nvim_set_current_win(agent.state.chat_winid)
+
+    input.open_compose_buffer()
+
+    assert_eq(wins_before, #vim.api.nvim_tabpage_list_wins(vim.api.nvim_get_current_tabpage()))
+    assert_eq(left_winid, agent.state.compose_winid)
+    assert_eq(agent.state.compose_bufnr, vim.api.nvim_win_get_buf(left_winid))
+  end)
+
+  it('promotes prompt text into the compose buffer', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local prompt = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prompt .. 'move this into compose' })
+
+    input._promote_input_to_compose()
+
+    assert_true(not (agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid)))
+    assert_eq('move this into compose', table.concat(vim.api.nvim_buf_get_lines(agent.state.compose_bufnr, 0, -1, false), '\n'))
+    assert_eq(agent.state.compose_winid, vim.api.nvim_get_current_win())
+
+    input.open_input_window()
+    local restored_prompt = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.wait(100, function()
+      local line = vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1] or ''
+      return line ~= '' and line ~= restored_prompt
+    end)
+    local restored_line = vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1] or ''
+    if vim.startswith(restored_line, restored_prompt) then
+      restored_line = restored_line:sub(#restored_prompt + 1)
+    end
+    assert_eq('move this into compose', restored_line)
+  end)
+
+  it('uses the configured prompt-to-compose keymap', function()
+    agent.setup({
+      auto_create_session = false,
+      chat = {
+        render_markdown = false,
+      },
+      compose = {
+        promote_keymap = '<F12>',
+      },
+    })
+
+    agent.open_chat()
+    input.open_input_window()
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+
+    assert_true(vim.fn.maparg('<F12>', 'n') ~= '')
+  end)
+
+  it('promotes prompt text through CopilotAgentPromoteToCompose', function()
+    local plugin_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+
+    agent.open_chat()
+    input.open_input_window()
+    pcall(vim.api.nvim_del_user_command, 'CopilotAgentPromoteToCompose')
+    vim.g.loaded_copilot_agent_plugin = 0
+    dofile(plugin_root .. '/plugin/copilot_agent.lua')
+
+    local prompt = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prompt .. 'promote by command' })
+    vim.cmd('CopilotAgentPromoteToCompose')
+
+    assert_eq('promote by command', table.concat(vim.api.nvim_buf_get_lines(agent.state.compose_bufnr, 0, -1, false), '\n'))
+  end)
+
+  it('opens compose in a new tab when requested', function()
+    local plugin_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+    local tabs_before = vim.fn.tabpagenr('$')
+
+    agent.open_chat()
+    pcall(vim.api.nvim_del_user_command, 'CopilotAgentCompose')
+    pcall(vim.api.nvim_del_user_command, 'CopilotAgentSendBuffer')
+    vim.g.loaded_copilot_agent_plugin = 0
+    dofile(plugin_root .. '/plugin/copilot_agent.lua')
+
+    vim.cmd('CopilotAgentCompose tab')
+
+    assert_eq(tabs_before + 1, vim.fn.tabpagenr('$'))
+    assert_eq(agent.state.compose_bufnr, vim.api.nvim_get_current_buf())
+    vim.cmd('tabclose')
+    assert_true(not (agent.state.compose_winid and vim.api.nvim_win_is_valid(agent.state.compose_winid)))
+  end)
+
+  it('focuses an existing compose window in another tab instead of opening a duplicate', function()
+    agent.open_chat()
+    input.open_compose_buffer({ layout = 'tab' })
+
+    local compose_tab = vim.fn.tabpagenr()
+    local tabs_before = vim.fn.tabpagenr('$')
+    vim.cmd('tabprevious')
+
+    input.open_compose_buffer()
+
+    assert_eq(tabs_before, vim.fn.tabpagenr('$'))
+    assert_eq(compose_tab, vim.fn.tabpagenr())
+    assert_eq(agent.state.compose_bufnr, vim.api.nvim_get_current_buf())
+    vim.cmd('tabclose')
+  end)
+
+  it('warns instead of throwing when CopilotAgentCompose gets an unsupported argument', function()
+    local plugin_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+    local original_notify = vim.notify
+    local warned
+
+    pcall(vim.api.nvim_del_user_command, 'CopilotAgentCompose')
+    vim.g.loaded_copilot_agent_plugin = 0
+    dofile(plugin_root .. '/plugin/copilot_agent.lua')
+    vim.notify = function(message, level)
+      warned = { message = message, level = level }
+    end
+
+    local ok = pcall(vim.cmd, 'CopilotAgentCompose split')
+
+    vim.notify = original_notify
+    assert_true(ok)
+    assert_eq(vim.log.levels.WARN, warned.level)
+    assert_true(warned.message:find('only accepts "tab"', 1, true) ~= nil)
+  end)
+
+  it('submits the compose buffer with :wq', function()
+    local original_ask = agent.ask
+    local sent
+
+    agent.open_chat()
+    input.open_compose_buffer()
+    agent.ask = function(prompt, opts)
+      sent = {
+        prompt = prompt,
+        attachments = opts and opts.attachments or nil,
+      }
+    end
+
+    vim.api.nvim_set_current_win(agent.state.compose_winid)
+    vim.api.nvim_buf_set_lines(agent.state.compose_bufnr, 0, -1, false, {
+      '# Draft',
+      '',
+      'hello world',
+    })
+    vim.cmd('wq')
+
+    agent.ask = original_ask
+
+    assert_eq('# Draft\n\nhello world', sent.prompt)
+    assert_true(not (agent.state.compose_winid and vim.api.nvim_win_is_valid(agent.state.compose_winid)))
+  end)
+
+  it('submits the compose buffer through CopilotAgentSendBuffer', function()
+    local original_ask = agent.ask
+    local sent
+
+    agent.open_chat()
+    input.open_compose_buffer()
+    local plugin_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
+    pcall(vim.api.nvim_del_user_command, 'CopilotAgentCompose')
+    pcall(vim.api.nvim_del_user_command, 'CopilotAgentSendBuffer')
+    vim.g.loaded_copilot_agent_plugin = 0
+    dofile(plugin_root .. '/plugin/copilot_agent.lua')
+    agent.ask = function(prompt, opts)
+      sent = {
+        prompt = prompt,
+        attachments = opts and opts.attachments or nil,
+      }
+    end
+
+    vim.api.nvim_buf_set_lines(agent.state.compose_bufnr, 0, -1, false, { 'send via command' })
+    vim.cmd('CopilotAgentSendBuffer')
+
+    agent.ask = original_ask
+
+    assert_eq('send via command', sent.prompt)
   end)
 
   it('protects the input prompt buffer by default for the upstream treesitter workaround', function()
@@ -6613,17 +7337,14 @@ describe('chat input behavior', function()
       type = 'assistant.message',
       data = {
         messageId = 'assistant-overlap',
-        content = "part of `vim.lua.wildmenu`.\n\n```lua\nvim.opt.wildmenu = true\n```",
+        content = 'part of `vim.lua.wildmenu`.\n\n```lua\nvim.opt.wildmenu = true\n```',
       },
     })
 
     vim.wait(250)
 
     local entry = agent.state.entries[#agent.state.entries]
-    assert_eq(
-      "You can get **most of `cmp-cmdline-history` natively in Neovim 0.12**. It's **not** part of `vim.lua.wildmenu`.\n\n```lua\nvim.opt.wildmenu = true\n```",
-      entry.content
-    )
+    assert_eq("You can get **most of `cmp-cmdline-history` natively in Neovim 0.12**. It's **not** part of `vim.lua.wildmenu`.\n\n```lua\nvim.opt.wildmenu = true\n```", entry.content)
   end)
 
   it('reuses the trailing live assistant entry when turn tracking is briefly missing', function()
@@ -8475,6 +9196,7 @@ describe('chat input behavior', function()
   end)
 
   it('completes discovered command arguments from the chat input', function()
+    ensure_dev_input_module()
     local vscode_dir = vim.fn.fnamemodify(vscode_mcp, ':h')
     root_mcp_backup = vim.fn.filereadable(root_mcp) == 1 and vim.fn.readfile(root_mcp) or nil
     vscode_mcp_backup = vim.fn.filereadable(vscode_mcp) == 1 and vim.fn.readfile(vscode_mcp) or nil
@@ -8566,6 +9288,13 @@ describe('chat input behavior', function()
   end)
 
   it('completes nested attachment paths inside subfolders', function()
+    ensure_dev_input_module()
+    stub_fd_output({
+      'README.md',
+      'lua/',
+      'lua/copilot_agent/',
+      'lua/copilot_agent/init.lua',
+    })
     agent.open_chat()
     input.open_input_window()
 
@@ -8581,31 +9310,66 @@ describe('chat input behavior', function()
     end, input._input_omnifunc(0, ''))
 
     assert_eq(#prefix, replace_start)
-    assert_true(vim.tbl_contains(items, '@lua/copilot_agent'))
+    assert_true(vim.tbl_contains(items, '@lua/copilot_agent/') or vim.tbl_contains(items, '@lua/copilot_agent'))
+  end)
+
+  it('uses fd-backed fuzzy attachment completion for nested file matches', function()
+    ensure_dev_input_module()
+    stub_fd_output({
+      'README.md',
+      'lua/',
+      'lua/copilot_agent/',
+      'lua/copilot_agent/init.lua',
+      'lua/init.lua',
+    })
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local line = prefix .. '@init'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local items = input._input_omnifunc(0, '')
+    local words = vim.tbl_map(function(item)
+      return item.word
+    end, items)
+
+    assert_true(vim.tbl_contains(words, '@lua/copilot_agent/init.lua'))
+    assert_true(vim.tbl_contains(words, '@lua/init.lua'))
+  end)
+
+  it('supports quoted attachment completion for paths with spaces', function()
+    ensure_dev_input_module()
+    stub_fd_output({
+      'my file name.txt',
+      'lua/',
+      'lua/init.lua',
+    })
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local line = prefix .. '@"my fi'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local replace_start = input._input_omnifunc(1, '')
+    local items = input._input_omnifunc(0, '')
+    local words = vim.tbl_map(function(item)
+      return item.word
+    end, items)
+
+    assert_eq(#prefix, replace_start)
+    assert_true(vim.tbl_contains(words, '@"my file name.txt"'))
   end)
 
   it('completes named open buffers and expands them to attachment paths', function()
-    -- Ensure the dev copy of input module is loaded (not an installed copy).
-    local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h:h')
-    local dev_input_path = dev_root .. '/lua/copilot_agent/input.lua'
-    if debug.getinfo(input._input_omnifunc, 'S').source ~= '@' .. dev_input_path then
-      for k, _ in pairs(package.loaded) do
-        if k:find('^copilot_agent') then
-          package.loaded[k] = nil
-        end
-      end
-      table.insert(package.searchers or package.loaders, 1, function(modname)
-        if modname:find('^copilot_agent') then
-          local p = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '.lua'
-          if vim.uv.fs_stat(p) then return loadfile(p) end
-          p = dev_root .. '/lua/' .. modname:gsub('%.', '/') .. '/init.lua'
-          if vim.uv.fs_stat(p) then return loadfile(p) end
-        end
-      end)
-      agent = require('copilot_agent')
-      agent.setup({ auto_create_session = false, chat = { render_markdown = false } })
-      input = require('copilot_agent.input')
-    end
+    ensure_dev_input_module()
 
     local cwd = require('copilot_agent.service').working_directory()
     local repo_file = cwd .. '/lua/copilot_agent/init.lua'
@@ -8638,6 +9402,12 @@ describe('chat input behavior', function()
   end)
 
   it('auto-triggers attachment completion after entering a nested folder slash', function()
+    ensure_dev_input_module()
+    stub_fd_output({
+      'lua/',
+      'lua/copilot_agent/',
+      'lua/copilot_agent/init.lua',
+    })
     local original_complete = vim.fn.complete
     local original_mode = vim.fn.mode
     local completions = {}
@@ -8667,15 +9437,59 @@ describe('chat input behavior', function()
 
     assert_eq(1, #completions)
     assert_eq(#prefix + 1, completions[1].col)
-    assert_true(vim.tbl_contains(
-      vim.tbl_map(function(item)
-        return item.word
-      end, completions[1].items),
-      '@lua/copilot_agent'
-    ))
+    local words = vim.tbl_map(function(item)
+      return item.word
+    end, completions[1].items)
+    assert_true(vim.tbl_contains(words, '@lua/copilot_agent/') or vim.tbl_contains(words, '@lua/copilot_agent'))
+  end)
+
+  it('distinguishes directory and file attachment suggestions when fd is available', function()
+    ensure_dev_input_module()
+    stub_fd_output({
+      'lua/',
+      'lua/copilot_agent/',
+      'lua/init.lua',
+    })
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local line = prefix .. '@lua/'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local items = input._input_omnifunc(0, '')
+    local by_word = {}
+    for _, item in ipairs(items) do
+      by_word[item.word] = item
+    end
+
+    assert_eq('[dir]', by_word['@lua/copilot_agent/'].menu)
+    assert_eq('[file]', by_word['@lua/init.lua'].menu)
+  end)
+
+  it('extracts inline attachment tokens into real attachments', function()
+    local cwd = require('copilot_agent.service').working_directory()
+    agent.state.config.session.working_directory = cwd
+    local spaced_path = cwd .. '/my file name.txt'
+    vim.fn.writefile({ 'hello' }, spaced_path)
+
+    local cleaned, attachments = input._extract_inline_attachments('review @"my file name.txt" and @README.md')
+
+    pcall(vim.fn.delete, spaced_path)
+
+    assert_eq('review my file name.txt and README.md', cleaned)
+    assert_eq(2, #attachments)
+    assert_eq('file', attachments[1].type)
+    assert_eq(true, input._attachment_completion_context('@"my fi').quoted)
+    assert_true(attachments[1].path:sub(-#'my file name.txt') == 'my file name.txt')
+    assert_true(attachments[2].path:sub(-#'README.md') == 'README.md')
   end)
 
   it('replaces the generic slash completion with agent completion when typing /agent', function()
+    ensure_dev_input_module()
     local original_complete = vim.fn.complete
     local original_mode = vim.fn.mode
     local completions = {}
@@ -8730,6 +9544,7 @@ describe('chat input behavior', function()
   end)
 
   it('replaces /agent completion text with only the selected agent name', function()
+    ensure_dev_input_module()
     agent.open_chat()
     input.open_input_window()
 
@@ -8757,6 +9572,7 @@ describe('chat input behavior', function()
   end)
 
   it('replaces /mcp completion text with only the selected mcp name', function()
+    ensure_dev_input_module()
     local vscode_dir = vim.fn.fnamemodify(vscode_mcp, ':h')
     root_mcp_backup = vim.fn.filereadable(root_mcp) == 1 and vim.fn.readfile(root_mcp) or nil
     vscode_mcp_backup = vim.fn.filereadable(vscode_mcp) == 1 and vim.fn.readfile(vscode_mcp) or nil

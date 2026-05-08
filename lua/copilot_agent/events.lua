@@ -2142,6 +2142,7 @@ local function reset_live_activity_state()
   state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil
   state.active_assistant_merge_group = nil
+  state.assistant_chunk_state = {}
   state.current_intent = nil
   clear_reasoning_preview('live activity reset')
 end
@@ -2782,6 +2783,7 @@ local function clear_live_turn_state(reason, opts)
   state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil
   state.active_assistant_merge_group = nil
+  state.assistant_chunk_state = {}
   state.current_intent = nil
   window.sync_chat_markdown_conceal(state.chat_winid)
   refresh_statuslines()
@@ -3307,6 +3309,28 @@ local function handle_session_event(payload)
     if not state.history_loading and pending_turn and pending_turn.session_id == state.session_id and type(data.messageId) == 'string' and data.messageId ~= '' then
       pending_turn.assistant_message_id = data.messageId
     end
+
+    -- Drop duplicates / late replays of the same chunk by tracking each
+    -- (messageId, messageChunkIndex) pair we've already applied. The server
+    -- stamps chunkIndex monotonically per messageId in
+    -- enrichSessionEventPayload (server/main.go) so any repeat is either a
+    -- replay or an out-of-order resend that would corrupt the live draft.
+    local message_id = type(data.messageId) == 'string' and data.messageId ~= '' and data.messageId or nil
+    local chunk_index = tonumber(data.messageChunkIndex)
+    if message_id and chunk_index then
+      state.assistant_chunk_state = state.assistant_chunk_state or {}
+      local bucket = state.assistant_chunk_state[message_id]
+      if not bucket then
+        bucket = { applied = {} }
+        state.assistant_chunk_state[message_id] = bucket
+      end
+      if bucket.applied[chunk_index] then
+        log(string.format('assistant.message_delta dropped duplicate chunk message_id=%s chunk_index=%d', message_id, chunk_index), vim.log.levels.DEBUG)
+        return
+      end
+      bucket.applied[chunk_index] = true
+    end
+
     local entry, idx, key = ensure_assistant_entry(data.messageId)
     local delta = data.deltaContent or ''
 
@@ -3507,6 +3531,7 @@ local function handle_session_event(payload)
       state.live_assistant_entry_index = nil
       state.active_turn_assistant_message_id = nil
       state.active_assistant_merge_group = nil
+      state.assistant_chunk_state = {}
     end
     if state.overlay_tool_display and state.overlay_tool_display.completed ~= true then
       complete_overlay_tool(state.overlay_tool_display.run_id)

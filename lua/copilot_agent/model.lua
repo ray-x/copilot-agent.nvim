@@ -28,6 +28,16 @@ local append_entry = render.append_entry
 
 local M = {}
 
+local function deferred_select(items, opts, on_choice)
+  -- Some vim.ui.select providers close or recycle popup windows on a short
+  -- defer. Opening model pickers through the same defer window avoids guihua
+  -- and similar providers swallowing a picker that is launched from another
+  -- popup callback or immediately after a previous picker closes.
+  vim.defer_fn(function()
+    vim.ui.select(items, opts, on_choice)
+  end, 20)
+end
+
 function M.store_model_cache(models)
   local items = {}
   for _, entry in ipairs(models or {}) do
@@ -109,7 +119,7 @@ function M.prompt_supported_model_selection(unavailable_model, prompt, callback)
       return
     end
 
-    vim.ui.select(models, {
+    deferred_select(models, {
       prompt = prompt,
       format_item = function(item)
         return item.label
@@ -226,7 +236,7 @@ function M.select_model(model)
       return
     end
 
-    vim.ui.select(models, {
+    deferred_select(models, {
       prompt = 'Select Copilot model',
       format_item = function(item)
         local label = item.label
@@ -249,7 +259,7 @@ function M.select_model(model)
           end
           table.insert(efforts, { id = e, label = label })
         end
-        vim.ui.select(efforts, {
+        deferred_select(efforts, {
           prompt = 'Reasoning effort for ' .. choice.name,
           format_item = function(item)
             return item.label

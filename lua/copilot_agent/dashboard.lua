@@ -6,6 +6,7 @@ local cfg = require('copilot_agent.config')
 local service = require('copilot_agent.service')
 local session = require('copilot_agent.session')
 local session_names = require('copilot_agent.session_names')
+local prompt = require('copilot_agent.prompt')
 local utils = require('copilot_agent.utils')
 local win = require('copilot_agent.window')
 
@@ -498,6 +499,7 @@ end
 
 local function create_prompt_buffer()
   local bufnr = vim.api.nvim_create_buf(false, true)
+  local _, prompt_segments, prompt_placeholder = prompt.build()
   vim.bo[bufnr].buftype = 'prompt'
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].bufhidden = 'wipe'
@@ -505,7 +507,8 @@ local function create_prompt_buffer()
   vim.bo[bufnr].filetype = 'copilot-agent-dashboard-prompt'
   vim.api.nvim_buf_set_name(bufnr, dashboard_prompt_buffer_name())
   exclude_from_mini_sessions(bufnr)
-  vim.fn.prompt_setprompt(bufnr, '❯ ')
+  vim.fn.prompt_setprompt(bufnr, prompt_placeholder)
+  prompt.apply(bufnr, prompt_segments)
   vim.fn.prompt_setcallback(bufnr, function(text)
     submit_prompt(text)
   end)

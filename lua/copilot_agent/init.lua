@@ -21,6 +21,7 @@ local chat = require('copilot_agent.chat')
 local dashboard = require('copilot_agent.dashboard')
 local input = require('copilot_agent.input')
 local lsp = require('copilot_agent.lsp')
+local prompt = require('copilot_agent.prompt')
 
 -- ── Local aliases ─────────────────────────────────────────────────────────────
 local ensure_service_running = service.ensure_service_running
@@ -106,7 +107,14 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, 'CopilotAgentDashboardArt', { link = '@text', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentDashboardKey', { link = 'Function', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentDashboardHint', { link = 'Comment', default = true })
+  prompt.configure_highlights()
   local ui_group = vim.api.nvim_create_augroup('CopilotAgentUI', { clear = true })
+  vim.api.nvim_create_autocmd('ColorScheme', {
+    group = ui_group,
+    callback = function()
+      prompt.configure_highlights()
+    end,
+  })
   vim.api.nvim_create_autocmd({ 'VimResized', 'WinResized', 'WinScrolled' }, {
     group = ui_group,
     callback = function(args)
@@ -221,8 +229,26 @@ end
 
 -- ── Delegated to chat.lua ────────────────────────────────────────────────────
 
-function M.ask(prompt, opts)
-  chat.ask(prompt, opts)
+function M.ask(prompt_text, opts)
+  chat.ask(prompt_text, opts)
+end
+
+function M.open_compose(opts)
+  chat.ensure_chat_window({
+    activate_input_on_session_ready = false,
+  })
+  input.open_compose_buffer(opts)
+end
+
+function M.promote_to_compose()
+  chat.ensure_chat_window({
+    activate_input_on_session_ready = false,
+  })
+  input.promote_input_to_compose()
+end
+
+function M.send_buffer()
+  input.send_buffer()
 end
 
 -- ── Delegated to model.lua ───────────────────────────────────────────────────
@@ -344,8 +370,8 @@ function M.start_lsp(opts)
   return lsp.start_lsp(opts)
 end
 
-function M.execute_slash_command(prompt, opts)
-  return require('copilot_agent.slash').execute(prompt, opts)
+function M.execute_slash_command(prompt_text, opts)
+  return require('copilot_agent.slash').execute(prompt_text, opts)
 end
 
 -- Expose internal state for :checkhealth and debugging.

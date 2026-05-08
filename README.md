@@ -258,6 +258,15 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
         diff_cmd = { 'delta' },          -- external diff viewer; false = builtin float
         diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; clean buffers auto-reload, conflicting modified buffers prompt before reload
       },
+      prompt = {
+        style = "cold",                  -- "cold" (default) = red-violet/violet/blue, "warm" = red/yellow/green
+      },
+      compose = {
+        width = 0.4,                     -- left split width; fraction of chat width, or absolute columns
+        min_width = 40,
+        max_width = 100,
+        promote_keymap = "<leader>cc",   -- set false to disable the prompt-buffer promotion mapping
+      },
       statusline = {
         enabled = false,                 -- default: keep plugin-owned chat/input local statuslines disabled
         components = {                   -- default: all true
@@ -344,7 +353,10 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 | `:CopilotAgentChat [fullscreen]` | Open the chat buffer; `fullscreen` opens in a new tab      |
 | `:CopilotAgentChatToggle`        | Toggle chat window (open if hidden, close if visible)      |
 | `:CopilotAgentChatFocus`         | Focus or switch to an open chat buffer                     |
-| `:CopilotAgentAsk [prompt]`      | Send a prompt; no argument opens `vim.ui.input()`          |
+| `:CopilotAgentAsk [prompt]`      | Send a prompt; no argument opens the input buffer          |
+| `:CopilotAgentCompose [tab]`     | Open the compose scratch buffer; `tab` opens it in a new tab |
+| `:CopilotAgentPromoteToCompose`  | Move current prompt-buffer text into compose               |
+| `:CopilotAgentSendBuffer`        | Send the active compose buffer                             |
 | `:CopilotAgentNewSession`        | Disconnect current session and start a fresh one           |
 | `:CopilotAgentSwitchSession`     | Pick from all persisted sessions and switch                |
 | `:CopilotAgentDeleteSession`     | Pick a session by summary + exact ID and delete it         |
@@ -378,10 +390,10 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<M-v>`              | Paste image from clipboard as attachment                                                          |
 | `<C-x>`              | Toggle session tools (enable/disable individual tools)                                            |
 | `<Tab>`              | Trigger completion (`@file` or `/command`)                                                        |
-| `@<path>`            | Attach a file by path or open buffer (autocomplete from working directory and named open buffers) |
+| `@<path>` / `@"path with spaces"` | Attach a file by path or open buffer (autocomplete from working directory and named open buffers) |
 | `/<cmd>`             | Run a built-in slash command (autocomplete with `<Tab>`)                                          |
-| `<C-w>` (insert)     | Delete previous word in the prompt while keeping the mode prefix (`ask❯`/`plan❯`/`agent❯`) intact |
-| `<C-u>` (insert)     | Delete from prompt start to cursor while keeping the mode prefix (`ask❯`/`plan❯`/`agent❯`) intact |
+| `<C-w>` (insert)     | Delete previous word in the prompt while keeping the mode prefix (`ask❯❯❯`/`plan❯❯❯`/`agent❯❯❯`) intact |
+| `<C-u>` (insert)     | Delete from prompt start to cursor while keeping the mode prefix (`ask❯❯❯`/`plan❯❯❯`/`agent❯❯❯`) intact |
 | `<C-p>` / `<M-p>`    | Previous prompt from history                                                                      |
 | `<C-n>` / `<M-n>`    | Next prompt from history                                                                          |
 | `<C-c>` (output)     | Cancel current turn                                                                               |
@@ -396,6 +408,21 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 The input buffer supports built-in slash commands handled by the plugin before the text is sent as a normal Copilot prompt. Type `/` and press `<Tab>` to browse and complete the available commands. Some of the commands are still experimental.
 
 `/agent` completion is optimized for inline prompting: selecting an agent suggestion inserts the agent name without the `/agent` prefix, so `/agent Git Commit Agent` completion becomes `Git Commit Agent`.
+
+## Compose Buffer
+
+Open with `:CopilotAgentCompose` to open it as a left-side split next to chat output, or `:CopilotAgentCompose tab` to edit in a new tab.
+
+The compose buffer is a separate markdown scratch buffer for long prompts. It keeps the same `@` attachment and slash-command completion as the normal input buffer. From the prompt buffer, press `<leader>cc` or run `:CopilotAgentPromoteToCompose` to promote the current prompt into compose and continue editing there. Customize or disable the mapping with `compose.promote_keymap`.
+
+| Key / Command             | Action                                |
+| ------------------------- | ------------------------------------- |
+| `<leader>cc` (prompt buffer) | Move current prompt into compose    |
+| `:CopilotAgentPromoteToCompose` | Move current prompt into compose |
+| `<leader>cs` / `<C-s>`    | Send compose buffer                   |
+| `:w` / `:wq`              | Send compose buffer                   |
+| `:CopilotAgentSendBuffer` | Send compose buffer                   |
+| `q` / `<Esc>`             | Close compose buffer                  |
 
 Supported slash commands:
 
@@ -416,6 +443,7 @@ Supported slash commands:
 | `/instructions`        | `[name]`                                                 | Open a discovered instructions file from the repository                                                                                                                                |
 | `/list-dir`            | —                                                        | List allowed directories for the current session                                                                                                                                       |
 | `/list-dirs`           | —                                                        | Alias for `/list-dir`                                                                                                                                                                  |
+| `/list-tools`          | —                                                        | List remembered tool approvals for the current session; if empty, explain that the backend does not expose a full available-tools inventory                                          |
 | `/lsp`                 | `[create\|status\|show\|test\|help]`                     | Bootstrap or inspect project LSP config for Copilot CLI                                                                                                                                |
 | `/mcp`                 | `[add\|show\|edit\|delete\|disable\|enable\|reload] ...` | Manage MCP servers in `.mcp.json`, `.vscode/mcp.json`, and `~/.copilot/mcp-config.json` (global): add/show/edit/delete entries, toggle disabled state, and reconnect the active session to reload discovery |
 | `/model`               | `[id]`                                                   | Pick or switch the active model                                                                                                                                                        |
@@ -426,13 +454,13 @@ Supported slash commands:
 | `/reset-allowed-tools` | —                                                        | Clear remembered tool approvals for the current session                                                                                                                                |
 | `/resume`              | `[session-id]`                                           | Resume or switch to another saved session; prompts if omitted                                                                                                                          |
 | `/review`              | `[focus]`                                                | Ask Copilot to review the current changes, optionally with extra focus text                                                                                                            |
-| `/rewind`              | `[checkpoint]`                                           | Rewind the session to a checkpoint such as `v003`                                                                                                                                      |
+| `/rewind`              | `[checkpoint]`                                           | Rewind the session to a checkpoint such as `v003`, then queue the target git hash and reverted checkpoint summaries into the next Copilot prompt                                      |
 | `/search`              | `[text]`                                                 | Search the current transcript and jump to a matching entry                                                                                                                             |
 | `/session`             | `[session-id\|new\|clear]`                               | Switch sessions, or use `new` / `clear` as shortcuts                                                                                                                                   |
 | `/share`               | `[markdown\|html] [path]`                                | Export the current transcript as Markdown or HTML                                                                                                                                      |
 | `/skills`              | `[name]`                                                 | Open a discovered skill from the repository                                                                                                                                            |
 | `/tasks`               | `[filter]`                                               | Show background task and sub-agent activity                                                                                                                                            |
-| `/undo`                | —                                                        | Restore the latest checkpoint for the current session                                                                                                                                  |
+| `/undo`                | —                                                        | Restore the latest checkpoint for the current session, then queue the restore git hash/context into the next Copilot prompt                                                           |
 | `/usage`               | —                                                        | Show session usage, discovery counts, and context-window stats                                                                                                                         |
 
 ### Attaching Files and Images

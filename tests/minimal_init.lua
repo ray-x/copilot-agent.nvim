@@ -4,20 +4,22 @@
 
 local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h')
 
--- Disable module cache so re-require always uses the dev copy.
-if vim.loader and vim.loader.disable then
-  vim.loader.disable()
-end
+-- Build a clean runtimepath containing only the Neovim runtime and the
+-- plugin under test.  This prevents user-installed plugins, ftplugins,
+-- and LSP configs from polluting the test environment.
+local nvim_runtime = vim.env.VIMRUNTIME
+vim.opt.runtimepath = { dev_root, nvim_runtime, nvim_runtime .. '/after' }
+vim.opt.packpath = {}
+
+-- reset module cache so re-require always uses the dev copy.
 if vim.loader and vim.loader.reset then
   vim.loader.reset()
 end
 
-vim.opt.runtimepath:prepend(dev_root)
-
 -- Ensure require() resolves to the development tree first by inserting a
 -- custom searcher at position 1 (after preload) that checks dev_root/lua/.
 local dev_lua = dev_root .. '/lua/'
-table.insert(package.searchers or package.loaders, 2, function(modname)
+table.insert(package.loaders, 2, function(modname)
   local path = dev_lua .. modname:gsub('%.', '/') .. '.lua'
   if vim.uv.fs_stat(path) then
     return loadfile(path)

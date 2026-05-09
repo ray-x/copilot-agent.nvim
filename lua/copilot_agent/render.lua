@@ -172,7 +172,7 @@ local function wrap_overlay_text(text, max_width, opts)
     text = text:gsub('%s+', ' ')
   end
   if trim_chunks then
-    text = text:match('^%s*(.-)%s*$') or ''
+    text = vim.trim(text)
   end
   if text == '' then
     return {}
@@ -282,7 +282,7 @@ local function activity_overlay_lines(max_lines)
   if type(detail) == 'string' and detail ~= '' and detail ~= tool then
     line = line .. ' — ' .. detail
   end
-  line = type(line) == 'string' and line:gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
+  line = type(line) == 'string' and vim.trim(line:gsub('%s+', ' ')) or ''
   if line == '' then
     return {}
   end
@@ -1014,7 +1014,7 @@ function M.should_merge_assistant(idx)
       end
     end
     -- Skip entries that are thinking-only or whitespace-only.
-    local trimmed = (e.content or ''):match('^%s*(.-)%s*$')
+    local trimmed = vim.trim(e.content or '')
     if trimmed ~= '' then
       return true
     end
@@ -1065,7 +1065,7 @@ local function align_tables(lines)
     local raw = vim.split(inner, '|', { plain = true })
     local cells = {}
     for _, cell in ipairs(raw) do
-      cells[#cells + 1] = cell:match('^%s*(.-)%s*$') or ''
+      cells[#cells + 1] = vim.trim(cell)
     end
     return cells
   end
@@ -1166,7 +1166,7 @@ local function align_tables(lines)
 end
 
 local function trim_text(text)
-  return (type(text) == 'string' and text or ''):match('^%s*(.-)%s*$') or ''
+  return vim.trim(type(text) == 'string' and text or '')
 end
 
 local function classify_content_line(line)
@@ -1645,7 +1645,7 @@ function M.entry_lines(entry, _idx, align)
     out[#out + 1] = ''
   elseif entry.kind == 'assistant' then
     -- Skip entries whose content is only whitespace after trimming.
-    local trimmed = content:match('^%s*(.-)%s*$')
+    local trimmed = vim.trim(content)
     if trimmed ~= '' then
       out[#out + 1] = 'Assistant:'
       for _, l in ipairs(verbatim_content_lines(split_lines(content))) do

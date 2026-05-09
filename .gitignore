@@ -1,6 +1,10 @@
 # Go build output
 server/copilot-agent
 server/copilot-agent.exe
+ROADMAP.md
+scripts.md
+log*.*
+thoughts/*
 
 .vscode/*
 .opencode/*

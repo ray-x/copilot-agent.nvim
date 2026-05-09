@@ -91,7 +91,9 @@ If any pre-commit check fails:
 3. summarize the meaningful issues by file and, when available, line
 4. explain likely impact
 5. suggest the smallest safe fixes
-6. rerun the relevant checks after making fixes when the user asks for remediation
+6. **prompt the user**: ask whether they want to fix the issues first or commit anyway despite the failures
+7. if the user chooses to commit anyway, proceed with the commit as normal
+8. if the user chooses to fix first, rerun the relevant checks after making fixes
 
 If checks fail only because a required tool is missing, say that plainly and stop instead of guessing.
 
@@ -112,4 +114,7 @@ If checks fail only because a required tool is missing, say that plainly and sto
 5. generate or refine the commit message from the staged diff
 6. if the user asked only for a message, return the proposed subject and body without committing
 7. if the user explicitly asked to create/apply the commit, preserve multiline formatting exactly: prefer writing the full message to a temporary file and use `git commit -F <file>` or `git commit --amend -F <file>` instead of shell-escaping newlines into a single argument
-8. report the created commit SHA and final subject line after the commit succeeds
+8. after the commit succeeds, report a **post-commit summary** that includes:
+   - the created commit SHA and final subject line
+   - a compact list of files committed (from `git diff-tree --no-commit-id --name-status -r HEAD`)
+   - any **pending issues**: unstaged changes, untracked files relevant to the commit scope, remaining lint warnings that were skipped, or follow-up work implied by the changes

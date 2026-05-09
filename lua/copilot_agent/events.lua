@@ -455,7 +455,8 @@ local function merge_assistant_message_content(current, incoming, ctx)
     return finish('replace-empty-or-thinking', incoming)
   end
   local function canonicalize(text)
-    return text:gsub('\r\n?', '\n'):gsub('’', "'"):gsub('‘', "'"):gsub('“', '"'):gsub('”', '"'):lower():gsub('[%p%c]+', ' '):gsub('%s+', ' '):match('^%s*(.-)%s*$')
+    -- Use vim.trim() instead of match to avoid O(n²) backtracking on large strings
+    return vim.trim(text:gsub('\r\n?', '\n'):gsub('’', "'"):gsub('‘', "'"):gsub('“', '"'):gsub('”', '"'):lower():gsub('[%p%c]+', ' '):gsub('%s+', ' '))
   end
   local function split_message_lines(text)
     return vim.split(text:gsub('\r\n?', '\n'), '\n', { plain = true })
@@ -3391,17 +3392,29 @@ local function handle_session_event(payload)
     local tool_requests = data.toolRequests or data.ToolRequests
     local has_tool_requests = type(tool_requests) == 'table' and not vim.tbl_isempty(tool_requests)
     if type(data.content) == 'string' then
-      local merged_content = merge_assistant_message_content(entry.content, data.content, {
-        message_id = data.messageId,
-        entry_key = key,
-        entry_index = idx,
-        prefer_incoming_suffix_replacement = entry._assistant_saw_delta == true or had_stream_start,
-      })
-      if has_tool_requests and looks_like_tool_call_scaffolding(merged_content) then
-        clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+      if state.history_loading then
+        -- During history replay, skip the expensive merge logic (which uses
+        -- O(n²) canonicalize/overlap checks on large strings).  The replayed
+        -- assistant.message events already carry the final snapshot, so a
+        -- simple assignment is correct and avoids pathological backtracking.
+        if has_tool_requests and looks_like_tool_call_scaffolding(data.content) then
+          clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+        else
+          entry.content = data.content
+        end
       else
-        entry.content = merged_content
-        clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+        local merged_content = merge_assistant_message_content(entry.content, data.content, {
+          message_id = data.messageId,
+          entry_key = key,
+          entry_index = idx,
+          prefer_incoming_suffix_replacement = entry._assistant_saw_delta == true or had_stream_start,
+        })
+        if has_tool_requests and looks_like_tool_call_scaffolding(merged_content) then
+          clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+        else
+          entry.content = merged_content
+          clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+        end
       end
     elseif has_tool_requests and looks_like_tool_call_scaffolding(entry.content or '') then
       clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
@@ -3447,6 +3460,24 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.turn_end' then
+    -- Before clearing live state, detect whether the turn's last assistant
+    -- entry has visible text content.  When the model ends a turn
+    -- immediately after tool calls (no concluding text), append a brief
+    -- system entry so the user knows the turn is finished.
+    local turn_had_no_conclusion = false
+    if not state.history_loading then
+      local asst_idx = state.active_turn_assistant_index
+      if asst_idx and state.entries[asst_idx] then
+        local content = state.entries[asst_idx].content or ''
+        local trimmed = vim.trim(content)
+        if trimmed == '' then
+          local had_activity = #(state.recent_activity_items or {}) > 0
+            or #(state.recent_activity_lines or {}) > 0
+          turn_had_no_conclusion = had_activity
+        end
+      end
+    end
+
     if not state.history_loading then
       refresh_session_name_from_server(state.session_id)
       local pending_turn = state.pending_checkpoint_turn
@@ -3477,6 +3508,9 @@ local function handle_session_event(payload)
       end
     end
     clear_live_turn_state('turn end')
+    if turn_had_no_conclusion then
+      append_entry('system', 'Turn complete.')
+    end
     render_chat() -- immediate full render on turn completion
     schedule_open_buffer_refresh()
     return
@@ -3916,6 +3950,26 @@ function M.start_event_stream(session_id)
   state.history_pending_user_entries = {}
   preload_history_checkpoint_ids(session_id)
   refresh_statuslines()
+
+  -- Safety timeout: if host.history_done never arrives, force-clear
+  -- history_loading so the UI doesn't stay frozen indefinitely.
+  local HISTORY_TIMEOUT_MS = 120000 -- 2 minutes
+  local history_timeout_session = session_id
+  vim.defer_fn(function()
+    if state.history_loading and state.session_id == history_timeout_session then
+      log(
+        string.format('history_loading safety timeout fired after %dms session_id=%s', HISTORY_TIMEOUT_MS, tostring(session_id)),
+        vim.log.levels.WARN
+      )
+      state.history_loading = false
+      state.history_checkpoint_ids = nil
+      state.history_pending_user_entries = {}
+      refresh_statuslines()
+      reset_frozen_render()
+      render_chat()
+      scroll_to_bottom()
+    end
+  end, HISTORY_TIMEOUT_MS)
 
   local replay_permission_history = state.config.session and state.config.session.replay_permission_history == true
   local history_query = string.format('/sessions/%s/events?history=true', session_id)

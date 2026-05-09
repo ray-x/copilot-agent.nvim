@@ -959,6 +959,98 @@ describe('dashboard', function()
     assert_eq(tonumber('98c379', 16), arrow3.fg)
   end)
 
+  it('wave animation: idle state shows all mode chars and arrows dim', function()
+    local p = require('copilot_agent.prompt')
+    p.configure_highlights()
+    local _, segments = p.build('🤖', 'agent', 0)
+    -- segments: icon + 5 mode chars + 3 arrows + space = 10
+    -- Icon has no hl
+    assert_eq('🤖', segments[1].text)
+    assert_eq(nil, segments[1].hl)
+    -- All 5 mode chars should be WaveDim
+    for i = 2, 6 do
+      assert_eq('CopilotAgentPromptWaveDim', segments[i].hl, 'mode char ' .. (i - 1) .. ' should be dim at typed=0')
+    end
+    -- All 3 arrows should also be WaveDim
+    for i = 7, 9 do
+      assert_eq('CopilotAgentPromptWaveDim', segments[i].hl, 'arrow ' .. (i - 6) .. ' should be dim at typed=0')
+    end
+  end)
+
+  it('wave animation: first keystroke lights up first char with gradient tail', function()
+    local p = require('copilot_agent.prompt')
+    p.configure_highlights()
+    local _, segments = p.build('🤖', 'agent', 1)
+    -- Position 1 (i=1): ahead = 1-1 = 0, fully lit → Wave1
+    assert_eq('CopilotAgentPromptWave1', segments[2].hl)
+    -- Position 2 (i=2): ahead = 2-1 = 1 → Wave2
+    assert_eq('CopilotAgentPromptWave2', segments[3].hl)
+    -- Position 3 (i=3): ahead = 3-1 = 2 → Wave3
+    assert_eq('CopilotAgentPromptWave3', segments[4].hl)
+    -- Position 4 (i=4): ahead = 4-1 = 3 → Wave4
+    assert_eq('CopilotAgentPromptWave4', segments[5].hl)
+    -- Position 5 (i=5): ahead = 5-1 = 4, >= tail(4) → WaveDim
+    assert_eq('CopilotAgentPromptWaveDim', segments[6].hl)
+  end)
+
+  it('wave animation: typing fills mode text then lights arrows', function()
+    local p = require('copilot_agent.prompt')
+    p.configure_highlights()
+    -- After 5 chars ("agent" is 5 chars), all mode text is fully lit
+    local _, seg5 = p.build('🤖', 'agent', 5)
+    for i = 2, 6 do
+      assert_eq('CopilotAgentPromptWave1', seg5[i].hl, 'mode char ' .. (i - 1) .. ' should be bright at typed=5')
+    end
+    -- Arrows start getting the gradient tail (positions 6,7,8 → ahead 1,2,3)
+    assert_eq('CopilotAgentPromptWave2', seg5[7].hl) -- arrow 1
+    assert_eq('CopilotAgentPromptWave3', seg5[8].hl) -- arrow 2
+    assert_eq('CopilotAgentPromptWave4', seg5[9].hl) -- arrow 3
+
+    -- After 8+ chars, arrows reach their natural palette colours
+    local _, seg8 = p.build('🤖', 'agent', 8)
+    assert_eq('CopilotAgentPromptArrow1', seg8[7].hl)
+    assert_eq('CopilotAgentPromptArrow2', seg8[8].hl)
+    assert_eq('CopilotAgentPromptArrow3', seg8[9].hl)
+  end)
+
+  it('wave animation: no mode text (dashboard) shows arrows at palette colours', function()
+    local p = require('copilot_agent.prompt')
+    p.configure_highlights()
+    local _, segments = p.build()
+    -- No icon, no mode text → only 3 arrows + space
+    assert_eq('❯', segments[1].text)
+    assert_eq('CopilotAgentPromptArrow1', segments[1].hl)
+    assert_eq('CopilotAgentPromptArrow2', segments[2].hl)
+    assert_eq('CopilotAgentPromptArrow3', segments[3].hl)
+  end)
+
+  it('wave animation: wave recedes when characters are deleted', function()
+    local p = require('copilot_agent.prompt')
+    p.configure_highlights()
+    -- Simulate typing 3 chars then deleting back to 1
+    local _, seg3 = p.build('', 'plan', 3)
+    -- 'plan' = 4 chars. At typed=3: first 3 bright, 4th in gradient
+    assert_eq('CopilotAgentPromptWave1', seg3[1].hl) -- p
+    assert_eq('CopilotAgentPromptWave1', seg3[2].hl) -- l
+    assert_eq('CopilotAgentPromptWave1', seg3[3].hl) -- a
+    assert_eq('CopilotAgentPromptWave2', seg3[4].hl) -- n (gradient)
+
+    local _, seg1 = p.build('', 'plan', 1)
+    assert_eq('CopilotAgentPromptWave1', seg1[1].hl) -- p (bright)
+    assert_eq('CopilotAgentPromptWave2', seg1[2].hl) -- l (gradient)
+    assert_eq('CopilotAgentPromptWave3', seg1[3].hl) -- a (gradient)
+    assert_eq('CopilotAgentPromptWave4', seg1[4].hl) -- n (gradient)
+  end)
+
+  it('wave highlight groups are configured for cold palette', function()
+    local p = require('copilot_agent.prompt')
+    p.configure_highlights()
+    local w1 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptWave1' })
+    local wdim = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptWaveDim' })
+    assert_eq(tonumber('c678dd', 16), w1.fg)
+    assert_eq(tonumber('371a47', 16), wdim.fg)
+  end)
+
   it('opens on startup when Neovim starts with an empty buffer', function()
     agent.state.config.dashboard.auto_open = true
 
@@ -6659,13 +6751,18 @@ describe('chat input behavior', function()
     local extmarks = vim.api.nvim_buf_get_extmarks(agent.state.input_bufnr, ns, 0, -1, { details = true })
     local virt_text = extmarks[1][4].virt_text
 
-    assert_eq('🤖agent', virt_text[1][1])
-    assert_eq('❯', virt_text[2][1])
-    assert_eq('CopilotAgentPromptArrow1', virt_text[2][2])
-    assert_eq('❯', virt_text[3][1])
-    assert_eq('CopilotAgentPromptArrow2', virt_text[3][2])
-    assert_eq('❯', virt_text[4][1])
-    assert_eq('CopilotAgentPromptArrow3', virt_text[4][2])
+    -- With wave animation the segments are: icon, 5 mode chars, 3 arrows, space.
+    -- At idle (typed=0 in fresh buffer) all mode chars and arrows use WaveDim.
+    assert_eq('🤖', virt_text[1][1]) -- icon (no hl)
+    assert_eq('a', virt_text[2][1])
+    assert_eq('CopilotAgentPromptWaveDim', virt_text[2][2])
+    -- Arrows (segments 7–9)
+    assert_eq('❯', virt_text[7][1])
+    assert_eq('CopilotAgentPromptWaveDim', virt_text[7][2])
+    assert_eq('❯', virt_text[8][1])
+    assert_eq('CopilotAgentPromptWaveDim', virt_text[8][2])
+    assert_eq('❯', virt_text[9][1])
+    assert_eq('CopilotAgentPromptWaveDim', virt_text[9][2])
   end)
 
   it('deletes previous input word with Ctrl-W without removing the prompt prefix', function()
@@ -9285,6 +9382,87 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(mcp_show_words, '/mcp show docs'))
     assert_true(vim.tbl_contains(mcp_show_words, '/mcp show browser'))
     assert_true(vim.tbl_contains(instruction_words, '/instructions .github/copilot-instructions.md'))
+  end)
+
+  it('treats a single trailing space as a trigger character for sub-command completion', function()
+    ensure_dev_input_module()
+    -- has_completion_trigger_space helper
+    assert_false(input._has_completion_trigger_space(nil))
+    assert_false(input._has_completion_trigger_space(''))
+    assert_true(input._has_completion_trigger_space(' '))
+    assert_true(input._has_completion_trigger_space('add '))
+    assert_false(input._has_completion_trigger_space('add  '))
+    assert_false(input._has_completion_trigger_space('  '))
+    assert_true(input._has_completion_trigger_space('show local '))
+    assert_false(input._has_completion_trigger_space('show local  '))
+  end)
+
+  it('includes raw_query length in auto_key so space re-triggers the popup', function()
+    ensure_dev_input_module()
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+
+    local function get_auto_key(command_text)
+      vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. command_text })
+      vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. command_text) })
+      local line = vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1]
+      local ctx = input._input_completion_context(line:sub(1, #(prefix .. command_text)))
+      return ctx and ctx.auto_key or nil
+    end
+
+    -- "/mcp" at end of token → has auto_key
+    local key_mcp = get_auto_key('/mcp')
+    assert_true(key_mcp ~= nil)
+    -- "/mcp " (single space) → has auto_key with different value
+    local key_mcp_space = get_auto_key('/mcp ')
+    assert_true(key_mcp_space ~= nil)
+    assert_true(key_mcp ~= key_mcp_space, 'auto_key should differ after space')
+    -- "/mcp  " (double space) → no auto_key
+    local key_mcp_double = get_auto_key('/mcp  ')
+    assert_eq(nil, key_mcp_double)
+  end)
+
+  it('shows full command paths in completion abbr for slash commands', function()
+    ensure_dev_input_module()
+    http.sync_request = function(method, path)
+      if path == '/models' then
+        return { models = { { id = 'test-model', name = 'Test Model' } } }, nil, 200
+      end
+      if path == '/sessions' then
+        return { persisted = {}, live = {} }, nil, 200
+      end
+      return nil, 'unexpected', 404
+    end
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+
+    local function completion_items(command_text)
+      vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. command_text })
+      vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. command_text) })
+      return input._input_omnifunc(0, '')
+    end
+
+    local model_items = completion_items('/model ')
+    local model_item = vim.tbl_filter(function(i) return i.word == '/model test-model' end, model_items)[1]
+    assert_true(model_item ~= nil)
+    assert_eq('/model test-model', model_item.abbr)
+
+    local lsp_items = completion_items('/lsp ')
+    local lsp_item = vim.tbl_filter(function(i) return i.word == '/lsp create' end, lsp_items)[1]
+    assert_true(lsp_item ~= nil)
+    assert_eq('/lsp create', lsp_item.abbr)
+
+    local mcp_items = completion_items('/mcp ')
+    local mcp_item = vim.tbl_filter(function(i) return i.word == '/mcp add' end, mcp_items)[1]
+    assert_true(mcp_item ~= nil)
+    assert_eq('/mcp add', mcp_item.abbr)
   end)
 
   it('completes nested attachment paths inside subfolders', function()

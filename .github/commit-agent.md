@@ -28,6 +28,15 @@ Edit the commands and guidance below to match your workflow.
 - summarize the highest-value issues first
 - suggest the smallest safe fix before proposing larger rewrites
 - call out staged vs unstaged mismatches before generating the commit message
+- **on check failure, prompt the user** whether to fix first or commit anyway — never silently block or silently proceed
+
+## Post-commit summary
+
+After every successful commit, output a short summary containing:
+
+- the commit SHA and subject line
+- the list of committed files (name + status)
+- any **pending issues**: unstaged/untracked changes, remaining lint warnings, or implied follow-up work
 
 ## Git and Neovim workflow
 

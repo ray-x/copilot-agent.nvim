@@ -259,6 +259,19 @@ local function attachment_completion_context(before)
   }
 end
 
+-- A single trailing space in the raw_query acts like a trigger character
+-- (similar to '.' in C++) that reopens the popup for the next argument slot.
+-- Multiple trailing spaces disable auto-completion.
+local function has_completion_trigger_space(raw_query)
+  if type(raw_query) ~= 'string' or raw_query == '' then
+    return false
+  end
+  if raw_query == ' ' then
+    return true
+  end
+  return raw_query:match('[^%s]%s$') ~= nil and raw_query:match('%s%s$') == nil
+end
+
 local function generic_slash_completion_context(before)
   before = type(before) == 'string' and before or ''
   local start_pos = before:find('/[^%s]*$')
@@ -297,6 +310,7 @@ local function input_completion_context(before)
 
   local command_context = command_completion_context(before)
   if command_context then
+    local trigger_space = has_completion_trigger_space(command_context.raw_query)
     return {
       kind = 'slash-command',
       command = command_context.kind,
@@ -306,7 +320,7 @@ local function input_completion_context(before)
       raw_query = command_context.raw_query,
       at_token_end = command_context.at_token_end,
       popup_key = string.format('slash:%s:%d', command_context.kind, command_context.start),
-      auto_key = command_context.at_token_end and string.format('slash:%s:%d', command_context.kind, command_context.start) or nil,
+      auto_key = (command_context.at_token_end or trigger_space) and string.format('slash:%s:%d:%d', command_context.kind, command_context.start, #(command_context.raw_query or '')) or nil,
     }
   end
 
@@ -1038,7 +1052,7 @@ local function slash_command_completion_items(completion_request)
       if query == '' or vim.startswith(name:lower(), query) then
         items[#items + 1] = {
           word = '/skills ' .. name,
-          abbr = name,
+          abbr = '/skills ' .. name,
           menu = '[skill]',
         }
       end
@@ -1052,7 +1066,7 @@ local function slash_command_completion_items(completion_request)
       if query == '' or vim.startswith(id:lower(), query) then
         items[#items + 1] = {
           word = '/model ' .. id,
-          abbr = id,
+          abbr = '/model ' .. id,
           menu = '[model]',
         }
       end
@@ -1066,7 +1080,7 @@ local function slash_command_completion_items(completion_request)
       if query == '' or vim.startswith(session.id:lower(), query) or vim.startswith(session.summary, query) then
         items[#items + 1] = {
           word = '/' .. command .. ' ' .. session.id,
-          abbr = session.label,
+          abbr = '/' .. command .. ' ' .. session.label,
           menu = '[session]',
         }
       end
@@ -1089,9 +1103,10 @@ local function slash_command_completion_items(completion_request)
       end
       for _, name in ipairs(discovered_mcp_names()) do
         if name_query == '' or vim.startswith(name:lower(), name_query) then
+          local full_word = '/mcp ' .. action .. ' ' .. name
           items[#items + 1] = {
-            word = '/mcp ' .. action .. ' ' .. name,
-            abbr = name,
+            word = full_word,
+            abbr = full_word,
             menu = '[mcp]',
           }
         end
@@ -1104,7 +1119,7 @@ local function slash_command_completion_items(completion_request)
       if action_query == '' or vim.startswith(item, action_query) then
         items[#items + 1] = {
           word = '/mcp ' .. item,
-          abbr = item,
+          abbr = '/mcp ' .. item,
           menu = '[mcp]',
         }
       end
@@ -1131,7 +1146,7 @@ local function slash_command_completion_items(completion_request)
       if query == '' or vim.startswith(name:lower(), query) then
         items[#items + 1] = {
           word = '/instructions ' .. name,
-          abbr = name,
+          abbr = '/instructions ' .. name,
           menu = '[instruction]',
         }
       end
@@ -1145,7 +1160,7 @@ local function slash_command_completion_items(completion_request)
       if query == '' or vim.startswith(action, query) then
         items[#items + 1] = {
           word = '/lsp ' .. action,
-          abbr = action,
+          abbr = '/lsp ' .. action,
           menu = '[lsp]',
         }
       end
@@ -1735,15 +1750,6 @@ local function create_input_buffer()
   -- copilot.lua skips prompt buffers by default; this explicit flag overrides it.
   vim.b[bufnr].copilot_enabled = true
 
-  local function refresh_prompt()
-    local mode = state.input_mode or 'agent'
-    local icon = _mode_icon[mode] or ''
-    local _, segments, placeholder = prompt.build(icon .. mode)
-    vim.fn.prompt_setprompt(bufnr, placeholder)
-    prompt.apply(bufnr, segments)
-    refresh_statuslines()
-  end
-
   local function get_input_text()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local prompt_prefix_text = vim.fn.prompt_getprompt(bufnr)
@@ -1752,6 +1758,16 @@ local function create_input_buffer()
       text = text:sub(#prompt_prefix_text + 1)
     end
     return text
+  end
+
+  local function refresh_prompt()
+    local mode = state.input_mode or 'agent'
+    local icon = _mode_icon[mode] or ''
+    local typed_count = vim.fn.strchars(get_input_text())
+    local _, segments, placeholder = prompt.build(icon, mode, typed_count)
+    vim.fn.prompt_setprompt(bufnr, placeholder)
+    prompt.apply(bufnr, segments)
+    refresh_statuslines()
   end
 
   local function set_input_text(text)
@@ -1851,6 +1867,19 @@ local function create_input_buffer()
 
   -- Set the initial prompt prefix to reflect the current mode.
   refresh_prompt()
+
+  -- Update the wave gradient on every keystroke (and normal-mode text edits).
+  local function update_prompt_wave()
+    local mode = state.input_mode or 'agent'
+    local icon = _mode_icon[mode] or ''
+    local typed_count = vim.fn.strchars(get_input_text())
+    local _, segments = prompt.build(icon, mode, typed_count)
+    prompt.apply(bufnr, segments)
+  end
+  vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChanged' }, {
+    buffer = bufnr,
+    callback = update_prompt_wave,
+  })
 
   setup_completion_keymaps(bufnr)
 
@@ -2139,5 +2168,7 @@ M._extract_inline_attachments = extract_inline_attachments
 M._confirm_completion_or_submit = confirm_completion_or_submit
 M._delete_input_previous_word = delete_input_previous_word
 M._delete_input_to_prompt_start = delete_input_to_prompt_start
+M._has_completion_trigger_space = has_completion_trigger_space
+M._input_completion_context = input_completion_context
 
 return M

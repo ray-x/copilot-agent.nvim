@@ -21,8 +21,8 @@ local palettes = {
 
 -- Wave gradient groups: 1 = brightest, 5 = dimmest (idle).
 -- As the user types, a colour wave sweeps across the mode label and into the
--- arrows: each new keystroke advances the fully-lit zone by one character,
--- with a smooth gradient tail fading into the dim state.
+-- arrows. The first typed character lights the prompt immediately, then the
+-- wave front advances in fixed-size typing steps.
 local wave_groups = {
   'CopilotAgentPromptWave1',
   'CopilotAgentPromptWave2',
@@ -30,8 +30,9 @@ local wave_groups = {
   'CopilotAgentPromptWave4',
   'CopilotAgentPromptWaveDim',
 }
+local wave_step_chars = 3
 local wave_palettes = {
-  cold = { '#c678dd', '#a15fb5', '#7b478e', '#552e66', '#371a47' },
+  cold = { '#c678dd', '#9256c7', '#7442ad', '#5c3590', '#462878' },
   warm = { '#98c379', '#79a25f', '#598045', '#3a5f2a', '#214415' },
 }
 
@@ -41,14 +42,16 @@ local function prompt_style()
   return palettes[configured] and configured or 'cold'
 end
 
---- Build the prompt segments with an optional per-character wave animation.
+--- Build the prompt segments with an optional stepped wave animation.
 ---
 --- @param icon string|nil  Emoji icon prefix (rendered as-is, outside the wave).
 --- @param mode_text string|nil  Mode label text (e.g. "agent"). Each character
 ---   participates in the wave gradient.  When nil the prompt contains only the
 ---   arrows.
 --- @param typed_count number|nil  Number of characters the user has typed in
----   the input buffer.  0 or nil = idle (everything dim).
+---   the input buffer.  0 or nil = idle.  The first typed character advances
+---   the wave immediately; subsequent wave steps occur every
+---   `wave_step_chars` typed characters.
 --- @return string visible  Full visible prompt text (for cursor positioning).
 --- @return table segments  Segment list for `apply()`.
 --- @return string placeholder  Invisible placeholder string for `prompt_setprompt`.
@@ -69,8 +72,8 @@ function M.build(icon, mode_text, typed_count)
   -- Each position has a `lit_hl` — the highlight to use once the wave has
   -- fully passed that position.
   local positions = {}
-  if mode_text ~= '' then
-    local chars = vim.fn.split(mode_text, '\\zs')
+  local chars = mode_text ~= '' and vim.fn.split(mode_text, '\\zs') or {}
+  if #chars > 0 then
     for _, c in ipairs(chars) do
       positions[#positions + 1] = { text = c, lit_hl = wave_groups[1] }
     end
@@ -82,15 +85,24 @@ function M.build(icon, mode_text, typed_count)
   -- Apply the wave gradient.  When there is no mode text (e.g. the dashboard
   -- prompt) the arrows use their natural palette colours without a wave.
   local has_wave = mode_text ~= ''
+  local mode_char_count = #chars
+  local wave_progress = 0
+  if typed_count > 0 then
+    wave_progress = 1 + math.floor(math.max(0, typed_count - 1) / wave_step_chars)
+  end
   local tail = #wave_groups - 1 -- number of gradient steps after bright
   for i, pos in ipairs(positions) do
     local hl
     if not has_wave then
       hl = pos.lit_hl
     elseif typed_count <= 0 then
-      hl = wave_groups[#wave_groups]
+      if i <= mode_char_count then
+        hl = wave_groups[math.min(i + 1, #wave_groups)]
+      else
+        hl = wave_groups[#wave_groups]
+      end
     else
-      local ahead = i - typed_count -- how far ahead of the wave front
+      local ahead = i - wave_progress -- how far ahead of the wave front
       if ahead <= 0 then
         hl = pos.lit_hl
       elseif ahead < tail then
@@ -171,5 +183,6 @@ M._arrow_groups = arrow_groups
 M._palettes = palettes
 M._wave_groups = wave_groups
 M._wave_palettes = wave_palettes
+M._wave_step_chars = wave_step_chars
 
 return M

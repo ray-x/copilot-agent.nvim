@@ -44,6 +44,7 @@ local append_reasoning_delta = render.append_reasoning_delta
 local clear_reasoning_preview = render.clear_reasoning_preview
 local refresh_reasoning_overlay = render.refresh_reasoning_overlay
 local reset_frozen_render = render.reset_frozen_render
+local invalidate_frozen_render_from = render.invalidate_frozen_render_from
 local scroll_to_bottom = render.scroll_to_bottom
 
 local is_thinking_content = utils.is_thinking_content
@@ -120,12 +121,14 @@ local function preview_log_text(text, max_len)
   if type(text) ~= 'string' then
     return '<non-string>'
   end
-  local preview = text:gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
   max_len = math.max(LOG_PREVIEW_MIN_CHARS, math.floor(tonumber(max_len) or log_content_length))
-  if #preview > max_len then
-    return preview:sub(1, max_len - 1) .. '…'
+  -- Truncate BEFORE gsub to avoid pattern-matching the entire string when
+  -- only a short prefix is kept.  During streaming, entry.content can grow
+  -- to tens of KB; processing the full text wastes significant CPU.
+  if #text > max_len then
+    text = text:sub(1, max_len - 1) .. '…'
   end
-  return preview
+  return text:gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
 end
 
 local function log_debug_trace(message, payload, opts)
@@ -3289,13 +3292,29 @@ local function preserve_reasoning_preview_on_late_turn_start()
   return true
 end
 
+-- High-frequency event types that need no activity capture and minimal work.
+-- Checked first to short-circuit before capture_turn_activity_summary,
+-- log_debug_trace, and the long if-chain in handle_session_event.
+local HIGH_FREQ_SKIP_CAPTURE = {
+  ['assistant.message_delta'] = true,
+  ['assistant.streaming_delta'] = true,
+  ['assistant.reasoning_delta'] = true,
+  ['session.background_tasks_changed'] = true,
+  ['permission.requested'] = true,
+  ['permission.completed'] = true,
+}
+
 local function handle_session_event(payload)
   local event_type = payload and payload.type or nil
   local data = payload and payload.data or {}
-  log_debug_trace('session.event received type=' .. tostring(event_type) .. ' data=', function()
-    return sanitize_session_log_value(data)
-  end, { max_len = 2400, depth = 8 })
-  capture_turn_activity_summary(event_type, data)
+
+  -- Fast path for high-frequency events that don't need activity capture.
+  if not HIGH_FREQ_SKIP_CAPTURE[event_type] then
+    log_debug_trace('session.event received type=' .. tostring(event_type) .. ' data=', function()
+      return sanitize_session_log_value(data)
+    end, { max_len = 2400, depth = 8 })
+    capture_turn_activity_summary(event_type, data)
+  end
 
   if event_type == 'assistant.message_delta' then
     -- Only redraw statuslines on the busy state *transition* (false→true).
@@ -3347,23 +3366,64 @@ local function handle_session_event(payload)
     entry.content = previous_content .. delta
     clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
     window.sync_chat_markdown_conceal(state.chat_winid)
-    log(
-      string.format(
-        'assistant.message_delta appended message_id=%s key=%s idx=%s result_len=%d boundary={%s} content=%s',
-        tostring(data.messageId or '<none>'),
-        tostring(key or '<none>'),
-        tostring(idx or '<none>'),
-        #(entry.content or ''),
-        preview_delta_boundary(previous_content, delta),
-        preview_log_text(entry.content)
-      ),
-      vim.log.levels.DEBUG
-    )
+    if should_log(TRACE_LOG_LEVEL) then
+      log(
+        string.format(
+          'assistant.message_delta appended message_id=%s key=%s idx=%s result_len=%d boundary={%s} content=%s',
+          tostring(data.messageId or '<none>'),
+          tostring(key or '<none>'),
+          tostring(idx or '<none>'),
+          #(entry.content or ''),
+          preview_delta_boundary(previous_content, delta),
+          preview_log_text(entry.content)
+        ),
+        TRACE_LOG_LEVEL
+      )
+    end
     if idx then
       stream_update(entry, idx)
     else
       schedule_render()
     end
+    return
+  end
+
+  -- streaming_delta and reasoning_delta are the highest-frequency events
+  -- (~20-40/sec during active streaming). Check them early to avoid falling
+  -- through the entire if-chain below.
+  if event_type == 'assistant.streaming_delta' then
+    if should_log(TRACE_LOG_LEVEL) then
+      log('assistant.streaming_delta ignored payload=' .. serialize_log_value(data, { max_len = 1600 }), TRACE_LOG_LEVEL)
+    end
+    return
+  end
+
+  if event_type == 'assistant.reasoning_delta' then
+    local was_busy = state.chat_busy
+    state.chat_busy = true
+    if not was_busy then
+      refresh_statuslines()
+    end
+    local _, _, key = ensure_assistant_entry(data.messageId)
+    local delta = first_non_empty(data.deltaContent, data.content, data.delta, data.text) or ''
+    if should_log(TRACE_LOG_LEVEL) then
+      local reasoning_cfg = (((state.config or {}).chat or {}).reasoning or {})
+      log(
+        string.format(
+          'reasoning_delta received message_id=%s key=%s len=%d chat_open=%s configured_enabled=%s reasoning_effort=%s stored_lines=%d text_len=%d',
+          tostring(data.messageId or '<none>'),
+          tostring(key or '<none>'),
+          #delta,
+          tostring(state.chat_bufnr ~= nil and vim.api.nvim_buf_is_valid(state.chat_bufnr)),
+          tostring(reasoning_cfg.enabled),
+          tostring(state.reasoning_effort or '<none>'),
+          #(state.reasoning_lines or {}),
+          #(state.reasoning_text or '')
+        ),
+        TRACE_LOG_LEVEL
+      )
+    end
+    append_reasoning_delta(key, delta)
     return
   end
 
@@ -3391,6 +3451,7 @@ local function handle_session_event(payload)
     local had_stream_start = state.stream_line_start ~= nil
     local tool_requests = data.toolRequests or data.ToolRequests
     local has_tool_requests = type(tool_requests) == 'table' and not vim.tbl_isempty(tool_requests)
+    local entry_content_changed = false
     if type(data.content) == 'string' then
       if state.history_loading then
         -- During history replay, skip the expensive merge logic (which uses
@@ -3400,6 +3461,7 @@ local function handle_session_event(payload)
         if has_tool_requests and looks_like_tool_call_scaffolding(data.content) then
           clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
         else
+          entry_content_changed = entry.content ~= data.content
           entry.content = data.content
         end
       else
@@ -3412,12 +3474,16 @@ local function handle_session_event(payload)
         if has_tool_requests and looks_like_tool_call_scaffolding(merged_content) then
           clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
         else
+          entry_content_changed = entry.content ~= merged_content
           entry.content = merged_content
           clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
         end
       end
     elseif has_tool_requests and looks_like_tool_call_scaffolding(entry.content or '') then
       clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+    end
+    if entry_content_changed and not state.history_loading and idx then
+      invalidate_frozen_render_from(idx)
     end
     entry._assistant_saw_delta = false
     if state.history_loading and first_message_for_entry then
@@ -3453,6 +3519,10 @@ local function handle_session_event(payload)
       or event_type == 'tool.execution_progress'
       or event_type == 'tool.execution_complete'
       or event_type == 'assistant.reasoning_delta'
+      or event_type == 'hook.start'
+      or event_type == 'hook.end'
+      or event_type == 'system.notification'
+      or event_type == 'system.message'
     then
       log(string.format('session.event skipped during history replay type=%s', tostring(event_type)), vim.log.levels.DEBUG)
       return
@@ -3460,24 +3530,6 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.turn_end' then
-    -- Before clearing live state, detect whether the turn's last assistant
-    -- entry has visible text content.  When the model ends a turn
-    -- immediately after tool calls (no concluding text), append a brief
-    -- system entry so the user knows the turn is finished.
-    local turn_had_no_conclusion = false
-    if not state.history_loading then
-      local asst_idx = state.active_turn_assistant_index
-      if asst_idx and state.entries[asst_idx] then
-        local content = state.entries[asst_idx].content or ''
-        local trimmed = vim.trim(content)
-        if trimmed == '' then
-          local had_activity = #(state.recent_activity_items or {}) > 0
-            or #(state.recent_activity_lines or {}) > 0
-          turn_had_no_conclusion = had_activity
-        end
-      end
-    end
-
     if not state.history_loading then
       refresh_session_name_from_server(state.session_id)
       local pending_turn = state.pending_checkpoint_turn
@@ -3508,9 +3560,11 @@ local function handle_session_event(payload)
       end
     end
     clear_live_turn_state('turn end')
-    if turn_had_no_conclusion then
-      append_entry('system', 'Turn complete.')
-    end
+    -- The previous render may have frozen only the pre-assistant prefix while a
+    -- checkpoint write was still pending. Force a full rebuild here so the
+    -- completed assistant block stays visible even if a later tool/assistant
+    -- event arrives before the checkpoint callback finishes.
+    reset_frozen_render()
     render_chat() -- immediate full render on turn completion
     schedule_open_buffer_refresh()
     return
@@ -3574,8 +3628,10 @@ local function handle_session_event(payload)
     state.active_tool_run_id = nil
     state.active_tool_detail = nil
     state.current_intent = nil
-    refresh_statuslines()
-    refresh_reasoning_overlay()
+    if not state.history_loading then
+      refresh_statuslines()
+      refresh_reasoning_overlay()
+    end
     return
   end
 
@@ -3720,38 +3776,6 @@ local function handle_session_event(payload)
       vim.log.levels.DEBUG
     )
     refresh_statuslines()
-    return
-  end
-
-  if event_type == 'assistant.reasoning_delta' then
-    local was_busy = state.chat_busy
-    state.chat_busy = true
-    if not was_busy then
-      refresh_statuslines()
-    end
-    local _, _, key = ensure_assistant_entry(data.messageId)
-    local delta = first_non_empty(data.deltaContent, data.content, data.delta, data.text) or ''
-    local reasoning_cfg = (((state.config or {}).chat or {}).reasoning or {})
-    log(
-      string.format(
-        'reasoning_delta received message_id=%s key=%s len=%d chat_open=%s configured_enabled=%s reasoning_effort=%s stored_lines=%d text_len=%d',
-        tostring(data.messageId or '<none>'),
-        tostring(key or '<none>'),
-        #delta,
-        tostring(state.chat_bufnr ~= nil and vim.api.nvim_buf_is_valid(state.chat_bufnr)),
-        tostring(reasoning_cfg.enabled),
-        tostring(state.reasoning_effort or '<none>'),
-        #(state.reasoning_lines or {}),
-        #(state.reasoning_text or '')
-      ),
-      vim.log.levels.DEBUG
-    )
-    append_reasoning_delta(key, delta)
-    return
-  end
-
-  if event_type == 'assistant.streaming_delta' then
-    log('assistant.streaming_delta ignored payload=' .. serialize_log_value(data, { max_len = 1600 }), vim.log.levels.DEBUG)
     return
   end
 
@@ -4000,8 +4024,17 @@ function M.start_event_stream(session_id)
     sse_batch_pending = false
     local chunks = sse_batch
     sse_batch = {}
+    local drain_t0 = os.clock()
+    local chunk_count = #chunks
     for _, chunk in ipairs(chunks) do
       handle_sse_chunk(chunk)
+    end
+    local drain_elapsed_ms = (os.clock() - drain_t0) * 1000
+    if drain_elapsed_ms > 20 then
+      log(
+        string.format('drain_sse_batch perf elapsed_ms=%.1f chunks=%d', drain_elapsed_ms, chunk_count),
+        vim.log.levels.DEBUG
+      )
     end
   end
 

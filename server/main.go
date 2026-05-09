@@ -40,7 +40,7 @@ const (
 	httpReadHeaderTimeout      = 10 * time.Second // Long enough for local clients while still rejecting stalled connections promptly.
 	httpShutdownTimeout        = 5 * time.Second  // Allow in-flight HTTP requests a brief grace period during service shutdown.
 	sseKeepAliveInterval       = 15 * time.Second // Keep reverse proxies and clients from treating idle event streams as dead.
-	sseSubscriberBufferSize    = 64               // Absorb short bursts of session events before dropping updates for slow subscribers.
+	sseSubscriberBufferSize    = 256              // Absorb bursts of session events (tool calls can produce 100+ events rapidly).
 	asyncResultChannelSize     = 1                // Each pending prompt/permission only needs to hold a single terminal response.
 	permissionRequestIDPrefix  = "perm"
 	userInputRequestIDPrefix   = "input"
@@ -870,6 +870,23 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := writeSSE(w, msg.Event, msg.Data); err != nil {
 				return
+			}
+			// Drain any additional buffered messages before flushing to
+			// reduce channel back-pressure during event bursts.
+		drain:
+			for {
+				select {
+				case msg, ok = <-sub:
+					if !ok {
+						flusher.Flush()
+						return
+					}
+					if err := writeSSE(w, msg.Event, msg.Data); err != nil {
+						return
+					}
+				default:
+					break drain
+				}
 			}
 			flusher.Flush()
 		}
@@ -1748,6 +1765,7 @@ func (m *managedSession) broadcast(msg sseMessage) {
 		select {
 		case ch <- msg:
 		default:
+			log.Printf("SSE subscriber channel full, dropped event: %s (session %s)", msg.Event, m.session.SessionID)
 		}
 	}
 }

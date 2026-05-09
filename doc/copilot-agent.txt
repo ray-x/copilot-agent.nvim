@@ -258,6 +258,7 @@ Normal and insert mode (unless noted):
   <M-v>               Paste image from clipboard as attachment
   <C-x>               Toggle individual session tools on/off
   <Tab>               Trigger completion (@file or /slash-command)
+  <C-e>               Dismiss the active completion popup
   <C-p> / <M-p>       Previous prompt from history
   <C-n> / <M-n>       Next prompt from history
   zA (normal)         Toggle collapsed Activity transcript blocks
@@ -331,7 +332,8 @@ permission mode automatically; override with <M-a>.
 ------------------------------------------------------------------------------
 6.4 Slash Commands                                *copilot-agent-slash*
 
-Type `/` in the input buffer and press <Tab> for completions. Examples:
+Type `/` in the input buffer and press <Tab> for completions. Press <C-e>
+to dismiss the popup without accepting an item. Examples:
 
   /clear              Clear the chat transcript
   /copy               Copy the last response to the clipboard

@@ -959,7 +959,7 @@ describe('dashboard', function()
     assert_eq(tonumber('98c379', 16), arrow3.fg)
   end)
 
-  it('wave animation: idle state shows all mode chars and arrows dim', function()
+  it('wave animation: idle state fades mode chars before dim arrows', function()
     local p = require('copilot_agent.prompt')
     p.configure_highlights()
     local _, segments = p.build('🤖', 'agent', 0)
@@ -967,10 +967,11 @@ describe('dashboard', function()
     -- Icon has no hl
     assert_eq('🤖', segments[1].text)
     assert_eq(nil, segments[1].hl)
-    -- All 5 mode chars should be WaveDim
-    for i = 2, 6 do
-      assert_eq('CopilotAgentPromptWaveDim', segments[i].hl, 'mode char ' .. (i - 1) .. ' should be dim at typed=0')
-    end
+    assert_eq('CopilotAgentPromptWave2', segments[2].hl)
+    assert_eq('CopilotAgentPromptWave3', segments[3].hl)
+    assert_eq('CopilotAgentPromptWave4', segments[4].hl)
+    assert_eq('CopilotAgentPromptWaveDim', segments[5].hl)
+    assert_eq('CopilotAgentPromptWaveDim', segments[6].hl)
     -- All 3 arrows should also be WaveDim
     for i = 7, 9 do
       assert_eq('CopilotAgentPromptWaveDim', segments[i].hl, 'arrow ' .. (i - 6) .. ' should be dim at typed=0')
@@ -981,36 +982,50 @@ describe('dashboard', function()
     local p = require('copilot_agent.prompt')
     p.configure_highlights()
     local _, segments = p.build('🤖', 'agent', 1)
-    -- Position 1 (i=1): ahead = 1-1 = 0, fully lit → Wave1
     assert_eq('CopilotAgentPromptWave1', segments[2].hl)
-    -- Position 2 (i=2): ahead = 2-1 = 1 → Wave2
     assert_eq('CopilotAgentPromptWave2', segments[3].hl)
-    -- Position 3 (i=3): ahead = 3-1 = 2 → Wave3
     assert_eq('CopilotAgentPromptWave3', segments[4].hl)
-    -- Position 4 (i=4): ahead = 4-1 = 3 → Wave4
     assert_eq('CopilotAgentPromptWave4', segments[5].hl)
-    -- Position 5 (i=5): ahead = 5-1 = 4, >= tail(4) → WaveDim
     assert_eq('CopilotAgentPromptWaveDim', segments[6].hl)
   end)
 
-  it('wave animation: typing fills mode text then lights arrows', function()
+  it('wave animation: advances after the first key in 3-char steps', function()
     local p = require('copilot_agent.prompt')
     p.configure_highlights()
-    -- After 5 chars ("agent" is 5 chars), all mode text is fully lit
-    local _, seg5 = p.build('🤖', 'agent', 5)
-    for i = 2, 6 do
-      assert_eq('CopilotAgentPromptWave1', seg5[i].hl, 'mode char ' .. (i - 1) .. ' should be bright at typed=5')
-    end
-    -- Arrows start getting the gradient tail (positions 6,7,8 → ahead 1,2,3)
-    assert_eq('CopilotAgentPromptWave2', seg5[7].hl) -- arrow 1
-    assert_eq('CopilotAgentPromptWave3', seg5[8].hl) -- arrow 2
-    assert_eq('CopilotAgentPromptWave4', seg5[9].hl) -- arrow 3
+    local _, seg3 = p.build('🤖', 'agent', 3)
+    local _, seg4 = p.build('🤖', 'agent', 4)
+    assert_eq(p._wave_step_chars, 3)
+    -- typed=3 still uses the first lit step.
+    assert_eq('CopilotAgentPromptWave1', seg3[2].hl)
+    assert_eq('CopilotAgentPromptWave2', seg3[3].hl)
+    assert_eq('CopilotAgentPromptWave3', seg3[4].hl)
+    assert_eq('CopilotAgentPromptWave4', seg3[5].hl)
+    assert_eq('CopilotAgentPromptWaveDim', seg3[6].hl)
+    -- typed=4 advances one more position.
+    assert_eq('CopilotAgentPromptWave1', seg4[2].hl)
+    assert_eq('CopilotAgentPromptWave1', seg4[3].hl)
+    assert_eq('CopilotAgentPromptWave2', seg4[4].hl)
+    assert_eq('CopilotAgentPromptWave3', seg4[5].hl)
+    assert_eq('CopilotAgentPromptWave4', seg4[6].hl)
+  end)
 
-    -- After 8+ chars, arrows reach their natural palette colours
-    local _, seg8 = p.build('🤖', 'agent', 8)
-    assert_eq('CopilotAgentPromptArrow1', seg8[7].hl)
-    assert_eq('CopilotAgentPromptArrow2', seg8[8].hl)
-    assert_eq('CopilotAgentPromptArrow3', seg8[9].hl)
+  it('wave animation: stepped typing fills mode text then lights arrows', function()
+    local p = require('copilot_agent.prompt')
+    p.configure_highlights()
+    -- After 13 chars the 5-char mode label is fully lit and arrows start fading in.
+    local _, seg13 = p.build('🤖', 'agent', 13)
+    for i = 2, 6 do
+      assert_eq('CopilotAgentPromptWave1', seg13[i].hl, 'mode char ' .. (i - 1) .. ' should be bright at typed=13')
+    end
+    assert_eq('CopilotAgentPromptWave2', seg13[7].hl) -- arrow 1
+    assert_eq('CopilotAgentPromptWave3', seg13[8].hl) -- arrow 2
+    assert_eq('CopilotAgentPromptWave4', seg13[9].hl) -- arrow 3
+
+    -- After 22+ chars, arrows reach their natural palette colours.
+    local _, seg22 = p.build('🤖', 'agent', 22)
+    assert_eq('CopilotAgentPromptArrow1', seg22[7].hl)
+    assert_eq('CopilotAgentPromptArrow2', seg22[8].hl)
+    assert_eq('CopilotAgentPromptArrow3', seg22[9].hl)
   end)
 
   it('wave animation: no mode text (dashboard) shows arrows at palette colours', function()
@@ -1024,18 +1039,17 @@ describe('dashboard', function()
     assert_eq('CopilotAgentPromptArrow3', segments[3].hl)
   end)
 
-  it('wave animation: wave recedes when characters are deleted', function()
+  it('wave animation: wave recedes in stepped increments when characters are deleted', function()
     local p = require('copilot_agent.prompt')
     p.configure_highlights()
-    -- Simulate typing 3 chars then deleting back to 1
-    local _, seg3 = p.build('', 'plan', 3)
-    -- 'plan' = 4 chars. At typed=3: first 3 bright, 4th in gradient
-    assert_eq('CopilotAgentPromptWave1', seg3[1].hl) -- p
-    assert_eq('CopilotAgentPromptWave1', seg3[2].hl) -- l
-    assert_eq('CopilotAgentPromptWave1', seg3[3].hl) -- a
-    assert_eq('CopilotAgentPromptWave2', seg3[4].hl) -- n (gradient)
-
+    local _, seg4 = p.build('', 'plan', 4)
     local _, seg1 = p.build('', 'plan', 1)
+    -- At typed=4 the wave has only advanced to the second character.
+    assert_eq('CopilotAgentPromptWave1', seg4[1].hl) -- p
+    assert_eq('CopilotAgentPromptWave1', seg4[2].hl) -- l
+    assert_eq('CopilotAgentPromptWave2', seg4[3].hl) -- a
+    assert_eq('CopilotAgentPromptWave3', seg4[4].hl) -- n
+
     assert_eq('CopilotAgentPromptWave1', seg1[1].hl) -- p (bright)
     assert_eq('CopilotAgentPromptWave2', seg1[2].hl) -- l (gradient)
     assert_eq('CopilotAgentPromptWave3', seg1[3].hl) -- a (gradient)
@@ -1046,9 +1060,11 @@ describe('dashboard', function()
     local p = require('copilot_agent.prompt')
     p.configure_highlights()
     local w1 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptWave1' })
+    local w2 = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptWave2' })
     local wdim = vim.api.nvim_get_hl(0, { name = 'CopilotAgentPromptWaveDim' })
     assert_eq(tonumber('c678dd', 16), w1.fg)
-    assert_eq(tonumber('371a47', 16), wdim.fg)
+    assert_eq(tonumber('9256c7', 16), w2.fg)
+    assert_eq(tonumber('462878', 16), wdim.fg)
   end)
 
   it('opens on startup when Neovim starts with an empty buffer', function()
@@ -2666,7 +2682,7 @@ describe('model state sync', function()
     agent.setup({
       auto_create_session = false,
       notify = false,
-      file_log_level = 'DEBUG',
+      file_log_level = 'TRACE',
       chat = {
         reasoning = {
           enabled = true,
@@ -6752,10 +6768,14 @@ describe('chat input behavior', function()
     local virt_text = extmarks[1][4].virt_text
 
     -- With wave animation the segments are: icon, 5 mode chars, 3 arrows, space.
-    -- At idle (typed=0 in fresh buffer) all mode chars and arrows use WaveDim.
+    -- At idle (typed=0 in fresh buffer) the mode label fades before dim arrows.
     assert_eq('🤖', virt_text[1][1]) -- icon (no hl)
     assert_eq('a', virt_text[2][1])
-    assert_eq('CopilotAgentPromptWaveDim', virt_text[2][2])
+    assert_eq('CopilotAgentPromptWave2', virt_text[2][2])
+    assert_eq('g', virt_text[3][1])
+    assert_eq('CopilotAgentPromptWave3', virt_text[3][2])
+    assert_eq('e', virt_text[4][1])
+    assert_eq('CopilotAgentPromptWave4', virt_text[4][2])
     -- Arrows (segments 7–9)
     assert_eq('❯', virt_text[7][1])
     assert_eq('CopilotAgentPromptWaveDim', virt_text[7][2])
@@ -9348,6 +9368,7 @@ describe('chat input behavior', function()
     local lsp_words = completion_words('/lsp ')
     local resume_words = completion_words('/resume ')
     local session_words = completion_words('/session ')
+    local mcp_root_words = completion_words('/mcp')
     local mcp_words = completion_words('/mcp ')
     local mcp_show_words = completion_words('/mcp show ')
     local instruction_words = completion_words('/instructions ')
@@ -9368,7 +9389,9 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(resume_words, '/resume live-456'))
     assert_true(vim.tbl_contains(session_words, '/session session-123'))
     assert_true(vim.tbl_contains(session_words, '/session live-456'))
+    assert_true(vim.tbl_contains(mcp_root_words, '/mcp'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp add'))
+    assert_true(vim.tbl_contains(mcp_words, '/mcp'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp show'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp edit'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp delete'))
@@ -9463,6 +9486,73 @@ describe('chat input behavior', function()
     local mcp_item = vim.tbl_filter(function(i) return i.word == '/mcp add' end, mcp_items)[1]
     assert_true(mcp_item ~= nil)
     assert_eq('/mcp add', mcp_item.abbr)
+  end)
+
+  it('removes prompt placeholder padding from continuation lines', function()
+    ensure_dev_input_module()
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.cmd('startinsert!')
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, {
+      prefix .. 'first line',
+      prefix .. 'second line',
+    })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 2, #prefix + #'second line' })
+    vim.api.nvim_exec_autocmds('TextChangedI', { buffer = agent.state.input_bufnr })
+    vim.wait(50)
+
+    assert.same({
+      prefix .. 'first line',
+      'second line',
+    }, vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, -1, false))
+    assert_eq('first line\nsecond line', table.concat(input._strip_prompt_prefix_from_text_lines(vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, -1, false), prefix), '\n'))
+    assert_eq(#'second line', vim.api.nvim_win_get_cursor(agent.state.input_winid)[2])
+  end)
+
+  it('re-renders a frozen assistant entry when a late final message updates it', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.open_chat()
+
+    local prompt_idx = render.append_entry('user', 'commit the messages')
+    agent.state.pending_checkpoint_turn = {
+      session_id = 'session-123',
+      prompt = 'commit the messages',
+      entry_index = prompt_idx,
+    }
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-commit',
+        content = 'Running the commit now…',
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+    vim.wait(50)
+
+    events.handle_session_event({
+      type = 'assistant.message',
+      data = {
+        messageId = 'assistant-commit',
+        content = 'Committed as `67b9268`.',
+      },
+    })
+    vim.wait(250)
+
+    local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
+    assert_true(vim.tbl_contains(lines, '  Committed as `67b9268`.'))
+    assert_false(vim.tbl_contains(lines, '  Running the commit now…'))
   end)
 
   it('completes nested attachment paths inside subfolders', function()

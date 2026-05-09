@@ -390,6 +390,7 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<M-v>`              | Paste image from clipboard as attachment                                                          |
 | `<C-x>`              | Toggle session tools (enable/disable individual tools)                                            |
 | `<Tab>`              | Trigger completion (`@file` or `/command`)                                                        |
+| `<C-e>`              | Dismiss the active completion popup                                                               |
 | `@<path>` / `@"path with spaces"` | Attach a file by path or open buffer (autocomplete from working directory and named open buffers) |
 | `/<cmd>`             | Run a built-in slash command (autocomplete with `<Tab>`)                                          |
 | `<C-w>` (insert)     | Delete previous word in the prompt while keeping the mode prefix (`ask❯❯❯`/`plan❯❯❯`/`agent❯❯❯`) intact |
@@ -405,7 +406,7 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 
 ### Slash Commands
 
-The input buffer supports built-in slash commands handled by the plugin before the text is sent as a normal Copilot prompt. Type `/` and press `<Tab>` to browse and complete the available commands. Some of the commands are still experimental.
+The input buffer supports built-in slash commands handled by the plugin before the text is sent as a normal Copilot prompt. Type `/` and press `<Tab>` to browse and complete the available commands. Press `<C-e>` while the popup is open to dismiss it without accepting a candidate. Some of the commands are still experimental.
 
 `/agent` completion is optimized for inline prompting: selecting an agent suggestion inserts the agent name without the `/agent` prefix, so `/agent Git Commit Agent` completion becomes `Git Commit Agent`.
 

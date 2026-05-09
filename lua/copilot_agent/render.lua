@@ -1045,6 +1045,12 @@ end
 -- Align markdown table columns in a list of lines.
 -- Detects consecutive pipe-delimited rows, computes max width per column,
 -- then pads each cell. Handles display-width for multibyte/emoji.
+--
+-- Safety limits — lines or blocks that exceed these are emitted verbatim
+-- rather than spending CPU on unreasonably large tables.
+local ALIGN_MAX_LINE_LEN = 500 -- max characters in a single table row
+local ALIGN_MAX_COLS = 30 -- max columns per row
+local ALIGN_MAX_ROWS = 200 -- max rows in a single table block
 local function align_tables(lines)
   local out = {}
   local i = 1
@@ -1057,12 +1063,18 @@ local function align_tables(lines)
 
   -- Parse cells from a table row, trimming whitespace.
   local function parse_cells(line)
+    if #line > ALIGN_MAX_LINE_LEN then
+      return nil
+    end
     -- Strip leading/trailing pipe
     local inner = line:match('^%s*|(.+)|%s*$')
     if not inner then
       return nil
     end
     local raw = vim.split(inner, '|', { plain = true })
+    if #raw > ALIGN_MAX_COLS then
+      return nil
+    end
     local cells = {}
     for _, cell in ipairs(raw) do
       cells[#cells + 1] = vim.trim(cell)
@@ -1096,7 +1108,7 @@ local function align_tables(lines)
       -- Collect the full table block.
       local block_start = i
       local rows = {} -- { cells = {...}, is_sep = bool, indent = str }
-      while i <= n and is_table_row(lines[i]) do
+      while i <= n and is_table_row(lines[i]) and #rows < ALIGN_MAX_ROWS do
         local indent = lines[i]:match('^(%s*)') or ''
         local cells = parse_cells(lines[i])
         if not cells then
@@ -1109,9 +1121,12 @@ local function align_tables(lines)
 
       if #rows < 2 then
         -- Not really a table, emit as-is.
-        for _ in ipairs(rows) do
-          out[#out + 1] = lines[block_start]
-          block_start = block_start + 1
+        for j = block_start, i - 1 do
+          out[#out + 1] = lines[j]
+        end
+        if i == block_start then
+          out[#out + 1] = lines[i]
+          i = i + 1
         end
       else
         -- Compute max column count and widths.

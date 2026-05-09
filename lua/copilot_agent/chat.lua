@@ -78,6 +78,7 @@ local function help_lines()
     '    <C-a>           Open attachment picker',
     '    <M-v>           Paste image from clipboard',
     '    <Tab>           Trigger completion',
+    '    <C-e>           Dismiss completion popup',
     '    @<path>         Attach a file or open buffer',
     '    @"path with spaces"  Attach a file whose path includes spaces',
     '    /<cmd>          Run a built-in slash command',

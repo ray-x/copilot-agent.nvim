@@ -87,6 +87,25 @@ local function completion_popup_info()
   }
 end
 
+local function strip_prompt_prefix_from_text_lines(lines, prompt_prefix_text)
+  if type(lines) ~= 'table' or #lines == 0 then
+    return {}, false
+  end
+  if type(prompt_prefix_text) ~= 'string' or prompt_prefix_text == '' then
+    return vim.deepcopy(lines), false
+  end
+
+  local normalized = vim.deepcopy(lines)
+  local changed = false
+  for idx, line in ipairs(normalized) do
+    if type(line) == 'string' and vim.startswith(line, prompt_prefix_text) then
+      normalized[idx] = line:sub(#prompt_prefix_text + 1)
+      changed = true
+    end
+  end
+  return normalized, changed
+end
+
 local function confirm_completion_or_submit()
   if completion_popup_info().pum_visible == 1 then
     return vim.api.nvim_replace_termcodes('<C-y>', true, false, true)
@@ -1114,6 +1133,14 @@ local function slash_command_completion_items(completion_request)
       return items
     end
 
+    if query == '' then
+      items[#items + 1] = {
+        word = '/mcp',
+        abbr = '/mcp',
+        menu = 'Manage MCP server configuration',
+      }
+    end
+
     local action_query = action
     for _, item in ipairs(mcp_action_items()) do
       if action_query == '' or vim.startswith(item, action_query) then
@@ -1753,11 +1780,8 @@ local function create_input_buffer()
   local function get_input_text()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local prompt_prefix_text = vim.fn.prompt_getprompt(bufnr)
-    local text = table.concat(lines, '\n')
-    if prompt_prefix_text ~= '' and vim.startswith(text, prompt_prefix_text) then
-      text = text:sub(#prompt_prefix_text + 1)
-    end
-    return text
+    local normalized = strip_prompt_prefix_from_text_lines(lines, prompt_prefix_text)
+    return table.concat(normalized, '\n')
   end
 
   local function refresh_prompt()
@@ -1768,6 +1792,56 @@ local function create_input_buffer()
     vim.fn.prompt_setprompt(bufnr, placeholder)
     prompt.apply(bufnr, segments)
     refresh_statuslines()
+  end
+
+  local cleaning_prompt_padding = false
+  local function sanitize_multiline_prompt_padding()
+    if cleaning_prompt_padding or not vim.api.nvim_buf_is_valid(bufnr) then
+      return
+    end
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    if #lines < 2 then
+      return
+    end
+
+    local prompt_prefix_text = vim.fn.prompt_getprompt(bufnr)
+    if type(prompt_prefix_text) ~= 'string' or prompt_prefix_text == '' then
+      return
+    end
+
+    local changed = false
+    local normalized = vim.deepcopy(lines)
+    for idx = 2, #normalized do
+      local line = normalized[idx]
+      if type(line) == 'string' and vim.startswith(line, prompt_prefix_text) then
+        normalized[idx] = line:sub(#prompt_prefix_text + 1)
+        changed = true
+      end
+    end
+    if not changed then
+      return
+    end
+
+    local cursor
+    local winid = state.input_winid
+    if winid and vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
+      cursor = vim.api.nvim_win_get_cursor(winid)
+    end
+
+    cleaning_prompt_padding = true
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized)
+    if cursor and cursor[1] > 1 then
+      local row = math.min(cursor[1], #normalized)
+      local col = cursor[2]
+      local original = lines[row] or ''
+      if vim.startswith(original, prompt_prefix_text) then
+        col = math.max(0, col - #prompt_prefix_text)
+      end
+      vim.api.nvim_win_set_cursor(winid, { row, math.min(col, #(normalized[row] or '')) })
+    end
+    cleaning_prompt_padding = false
+    refresh_prompt()
   end
 
   local function set_input_text(text)
@@ -1878,7 +1952,10 @@ local function create_input_buffer()
   end
   vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChanged' }, {
     buffer = bufnr,
-    callback = update_prompt_wave,
+    callback = function()
+      sanitize_multiline_prompt_padding()
+      update_prompt_wave()
+    end,
   })
 
   setup_completion_keymaps(bufnr)
@@ -2170,5 +2247,6 @@ M._delete_input_previous_word = delete_input_previous_word
 M._delete_input_to_prompt_start = delete_input_to_prompt_start
 M._has_completion_trigger_space = has_completion_trigger_space
 M._input_completion_context = input_completion_context
+M._strip_prompt_prefix_from_text_lines = strip_prompt_prefix_from_text_lines
 
 return M

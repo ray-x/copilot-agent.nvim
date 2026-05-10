@@ -142,6 +142,25 @@ local function selected_completion_item(info)
   return item, word
 end
 
+local function visible_completion_accept_keys(opts)
+  opts = opts or {}
+  local info = completion_popup_info()
+  local item, word = selected_completion_item(info)
+  if not item or not word then
+    return nil
+  end
+
+  local selected = tonumber(info.selected) or -1
+  local bufnr = opts.bufnr or vim.api.nvim_get_current_buf()
+  local line = opts.line or vim.api.nvim_get_current_line()
+  local cursor_col = opts.cursor_col
+  if cursor_col == nil then
+    cursor_col = vim.api.nvim_win_get_cursor(0)[2]
+  end
+  set_completion_suppression(bufnr, completed_line_for_word(line, cursor_col, word), #(completed_line_for_word(line, cursor_col, word)))
+  return replace_termcodes(selected >= 0 and '<C-y>' or '<C-n><C-y>')
+end
+
 local function select_visible_completion(opts)
   opts = opts or {}
   local info = completion_popup_info()
@@ -167,13 +186,7 @@ local function select_visible_completion(opts)
     end
   end
 
-  if item_index >= 0 then
-    local keys = selected >= 0 and '<C-y>' or '<C-n><C-y>'
-    vim.api.nvim_feedkeys(replace_termcodes(keys), 'n', false)
-    return true
-  end
-
-  vim.api.nvim_feedkeys(replace_termcodes('<C-e>'), 'n', false)
+  vim.api.nvim_feedkeys(replace_termcodes(selected >= 0 and '<C-y>' or '<C-n><C-y>'), 'n', false)
   return true
 end
 
@@ -231,15 +244,58 @@ local function set_input_prompt_prefix(bufnr, prompt_prefix_text)
     local row = math.min(cursor[1], #normalized)
     local col = cursor[2]
     if row == 1 then
-      col = math.max(0, col - #previous + #prompt_prefix_text)
+      col = math.max(#prompt_prefix_text, col - #previous + #prompt_prefix_text)
     end
     vim.api.nvim_win_set_cursor(state.input_winid, { row, math.min(col, #(normalized[row] or '')) })
   end
 end
 
+local function clamp_input_cursor_to_prompt(bufnr, winid)
+  if not (bufnr and winid and vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_win_is_valid(winid)) then
+    return
+  end
+  if vim.api.nvim_win_get_buf(winid) ~= bufnr then
+    return
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(winid)
+  local row, col = cursor[1], cursor[2]
+  if row ~= 1 then
+    return
+  end
+
+  local prefix = input_prompt_prefix(bufnr)
+  local line = vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] or ''
+  if prefix ~= '' and not vim.startswith(line, prefix) then
+    line = prefix .. line
+    vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { line })
+  end
+  vim.api.nvim_win_set_cursor(winid, { row, math.min(math.max(col, #prefix), #line) })
+end
+
+local function set_input_buffer_text(bufnr, text)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return
+  end
+
+  local prefix = input_prompt_prefix(bufnr)
+  local lines = split_lines((prefix or '') .. (text or ''))
+  if vim.tbl_isempty(lines) then
+    lines = { prefix ~= '' and prefix or '' }
+  end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+
+  local winid = state.input_winid
+  if winid and vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
+    vim.api.nvim_win_set_cursor(winid, { #lines, #(lines[#lines] or '') })
+    clamp_input_cursor_to_prompt(bufnr, winid)
+  end
+end
+
 local function confirm_completion_or_submit()
-  if select_visible_completion() then
-    return ''
+  local keys = visible_completion_accept_keys()
+  if keys then
+    return keys
   end
   return replace_termcodes('<CR>')
 end
@@ -1929,6 +1985,18 @@ local function delete_input_previous_word()
   replace_input_segment(ctx, idx, ctx.col)
 end
 
+local function input_backspace_or_ignore()
+  local ctx = active_input_cursor_context()
+  if not ctx then
+    return replace_termcodes('<BS>')
+  end
+  if ctx.col <= ctx.prompt_col then
+    vim.api.nvim_win_set_cursor(ctx.winid, { ctx.row, ctx.prompt_col })
+    return ''
+  end
+  return replace_termcodes('<BS>')
+end
+
 local _mode_permission = {
   ask = 'interactive',
   plan = 'interactive',
@@ -2022,24 +2090,24 @@ local function create_input_buffer()
   end
 
   local function set_input_text(text)
-    local prefix = input_prompt_prefix(bufnr)
-    local lines = split_lines((prefix or '') .. (text or ''))
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-    if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
-      vim.api.nvim_win_set_cursor(state.input_winid, { #lines, #lines[#lines] })
-    end
+    set_input_buffer_text(bufnr, text)
     vim.cmd('startinsert!')
   end
 
   local function submit(text)
     remember_prompt(text)
-    -- Clear the input line and reset history navigation, but keep the window open.
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
-    reset_prompt_history_navigation()
-    -- Re-apply the prompt prefix and overlay (cleared by buf_set_lines).
-    refresh_prompt()
-    vim.cmd('startinsert')
-    submit_message_text(text)
+    vim.schedule(function()
+      if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      -- Clear the input line and reset history navigation, but keep the window open.
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
+      reset_prompt_history_navigation()
+      -- Re-apply the prompt prefix and overlay (cleared by buf_set_lines).
+      refresh_prompt()
+      vim.cmd('startinsert')
+      submit_message_text(text)
+    end)
   end
 
   local function submit_buffer()
@@ -2047,8 +2115,9 @@ local function create_input_buffer()
   end
 
   local function confirm_completion_or_submit_input()
-    if select_visible_completion({ bufnr = bufnr }) then
-      return ''
+    local keys = visible_completion_accept_keys({ bufnr = bufnr })
+    if keys then
+      return keys
     end
     submit_buffer()
     return ''
@@ -2069,6 +2138,13 @@ local function create_input_buffer()
   vim.keymap.set('n', 'q', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('n', '<Esc>', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('i', '<Esc>', '<Esc>', { buffer = bufnr, silent = true, desc = 'Switch to normal mode' })
+  vim.keymap.set('i', '<BS>', input_backspace_or_ignore, {
+    buffer = bufnr,
+    expr = true,
+    replace_keycodes = false,
+    silent = true,
+    desc = 'Delete previous character without crossing the prompt prefix',
+  })
   vim.keymap.set('i', '<C-w>', delete_input_previous_word, { buffer = bufnr, silent = true, desc = 'Delete previous input word (keep prompt prefix)' })
   vim.keymap.set('i', '<C-u>', delete_input_to_prompt_start, { buffer = bufnr, silent = true, desc = 'Delete input to prompt start' })
   -- <C-t> in input also refreshes the prompt prefix and returns to insert mode.
@@ -2150,8 +2226,7 @@ function M.open_input_window()
       local text = state.prompt_prefill
       state.prompt_prefill = nil
       vim.schedule(function()
-        vim.api.nvim_buf_set_lines(state.input_bufnr, 0, -1, false, { text })
-        vim.cmd('normal! $')
+        set_input_buffer_text(state.input_bufnr, text)
         vim.cmd('startinsert!')
       end)
     end
@@ -2163,6 +2238,7 @@ function M.open_input_window()
       M._close_input_window({ preserve_contents = true, skip_focus = true })
     else
       vim.api.nvim_set_current_win(state.input_winid)
+      clamp_input_cursor_to_prompt(state.input_bufnr, state.input_winid)
       vim.cmd('startinsert')
       refresh_separator()
       apply_prefill()
@@ -2176,6 +2252,7 @@ function M.open_input_window()
 
   if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
     vim.api.nvim_set_current_win(state.input_winid)
+    clamp_input_cursor_to_prompt(state.input_bufnr, state.input_winid)
     vim.cmd('startinsert')
     refresh_separator()
     apply_prefill()
@@ -2207,6 +2284,7 @@ function M.open_input_window()
   refresh_statuslines()
   refresh_separator()
 
+  clamp_input_cursor_to_prompt(state.input_bufnr, state.input_winid)
   vim.cmd('startinsert')
   apply_prefill()
 
@@ -2425,6 +2503,7 @@ M._attachment_completion_context = attachment_completion_context
 M._extract_inline_attachments = extract_inline_attachments
 M._confirm_completion_or_submit = confirm_completion_or_submit
 M._select_visible_completion = select_visible_completion
+M._input_backspace_or_ignore = input_backspace_or_ignore
 M._delete_input_previous_word = delete_input_previous_word
 M._delete_input_to_prompt_start = delete_input_to_prompt_start
 M._has_completion_trigger_space = has_completion_trigger_space

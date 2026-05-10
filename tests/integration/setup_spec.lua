@@ -6957,14 +6957,18 @@ describe('chat input behavior', function()
     local insert_maps = vim.api.nvim_buf_get_keymap(agent.state.input_bufnr, 'i')
     local has_ctrl_w = false
     local has_ctrl_u = false
+    local has_backspace = false
     for _, map in ipairs(insert_maps) do
       if map.lhs == '<C-W>' then
         has_ctrl_w = true
       elseif map.lhs == '<C-U>' then
         has_ctrl_u = true
+      elseif map.lhs == '<BS>' then
+        has_backspace = true
       end
     end
 
+    assert_true(has_backspace)
     assert_true(has_ctrl_w)
     assert_true(has_ctrl_u)
   end)
@@ -6997,6 +7001,81 @@ describe('chat input behavior', function()
     assert_eq('CopilotAgentPromptWaveDim', virt_text[8][2])
     assert_eq('❯', virt_text[9][1])
     assert_eq('CopilotAgentPromptWaveDim', virt_text[9][2])
+  end)
+
+  it('places the input cursor after the prompt prefix when opening the buffer', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
+    assert_eq(#prefix, vim.api.nvim_win_get_cursor(agent.state.input_winid)[2])
+  end)
+
+  it('does not let Backspace move the cursor into the prompt prefix', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local bufnr = agent.state.input_bufnr
+    local winid = agent.state.input_winid
+    local prefix = input._input_prompt_prefix(bufnr)
+    vim.api.nvim_set_current_win(winid)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { prefix })
+    vim.api.nvim_win_set_cursor(winid, { 1, #prefix })
+
+    local backspace_map = vim.fn.maparg('<BS>', 'i', false, true)
+    assert_true(type(backspace_map.callback) == 'function')
+    assert_eq('', backspace_map.callback())
+    assert_eq(prefix, vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1])
+    assert_eq(#prefix, vim.api.nvim_win_get_cursor(winid)[2])
+  end)
+
+  it('submits input buffer text without the leading prompt prefix', function()
+    local original_ask = agent.ask
+    local sent
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. 'ship this change' })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. 'ship this change') })
+    agent.ask = function(prompt, opts)
+      sent = {
+        prompt = prompt,
+        attachments = opts and opts.attachments or nil,
+      }
+    end
+
+    local submit_map = vim.fn.maparg('<C-s>', 'i', false, true)
+    assert_true(type(submit_map.callback) == 'function')
+    submit_map.callback()
+    vim.wait(100, function()
+      return sent ~= nil
+    end)
+
+    agent.ask = original_ask
+
+    assert_eq('ship this change', sent.prompt)
+    assert_true(type(sent.attachments) == 'table')
+    assert_eq(nil, next(sent.attachments))
+    assert_eq(prefix, vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1])
+  end)
+
+  it('preserves the prompt prefix when applying prompt prefill text', function()
+    agent.open_chat()
+    agent.state.prompt_prefill = 'restore this draft'
+    input.open_input_window()
+
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
+    vim.wait(100, function()
+      local line = vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1] or ''
+      return line == prefix .. 'restore this draft'
+    end)
+
+    local line = vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1] or ''
+    assert_eq(prefix .. 'restore this draft', line)
+    assert_eq(#line, vim.api.nvim_win_get_cursor(agent.state.input_winid)[2])
   end)
 
   it('deletes previous input word with Ctrl-W without removing the prompt prefix', function()
@@ -9397,8 +9476,6 @@ describe('chat input behavior', function()
   it('uses Enter to confirm popup completion before prompt submission', function()
     local original_complete_info = vim.fn.complete_info
     local original_pumvisible = vim.fn.pumvisible
-    local original_select_popupmenu_item = vim.api.nvim_select_popupmenu_item
-    local selected_call
 
     vim.fn.complete_info = function()
       return {
@@ -9410,14 +9487,6 @@ describe('chat input behavior', function()
     end
     vim.fn.pumvisible = function()
       return 1
-    end
-    vim.api.nvim_select_popupmenu_item = function(idx, insert, finish, opts)
-      selected_call = {
-        idx = idx,
-        insert = insert,
-        finish = finish,
-        opts = opts,
-      }
     end
     local confirm_keys = input._confirm_completion_or_submit()
     vim.fn.complete_info = function()
@@ -9434,15 +9503,8 @@ describe('chat input behavior', function()
     local submit_keys = input._confirm_completion_or_submit()
     vim.fn.complete_info = original_complete_info
     vim.fn.pumvisible = original_pumvisible
-    vim.api.nvim_select_popupmenu_item = original_select_popupmenu_item
 
-    assert_eq('', confirm_keys)
-    assert.same({
-      idx = 0,
-      insert = true,
-      finish = true,
-      opts = {},
-    }, selected_call)
+    assert_eq(vim.api.nvim_replace_termcodes('<C-n><C-y>', true, false, true), confirm_keys)
     assert_eq(vim.api.nvim_replace_termcodes('<CR>', true, false, true), submit_keys)
   end)
 
@@ -9803,8 +9865,6 @@ describe('chat input behavior', function()
     ensure_dev_input_module()
     local original_complete_info = vim.fn.complete_info
     local original_pumvisible = vim.fn.pumvisible
-    local original_select_popupmenu_item = vim.api.nvim_select_popupmenu_item
-    local selected_call
 
     agent.open_chat()
     input.open_input_window()
@@ -9826,14 +9886,6 @@ describe('chat input behavior', function()
     vim.fn.pumvisible = function()
       return 1
     end
-    vim.api.nvim_select_popupmenu_item = function(idx, insert, finish, opts)
-      selected_call = {
-        idx = idx,
-        insert = insert,
-        finish = finish,
-        opts = opts,
-      }
-    end
 
     local enter_map = vim.fn.maparg('<CR>', 'i', false, true)
     assert_true(type(enter_map.callback) == 'function')
@@ -9841,15 +9893,8 @@ describe('chat input behavior', function()
 
     vim.fn.complete_info = original_complete_info
     vim.fn.pumvisible = original_pumvisible
-    vim.api.nvim_select_popupmenu_item = original_select_popupmenu_item
 
-    assert_eq('', result)
-    assert.same({
-      idx = 0,
-      insert = true,
-      finish = true,
-      opts = {},
-    }, selected_call)
+    assert_eq(vim.api.nvim_replace_termcodes('<C-n><C-y>', true, false, true), result)
     assert_eq(line, vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1])
   end)
 

@@ -217,6 +217,10 @@ local state = {
   recent_activity_tool_calls = {}, -- maps current-turn toolCallId -> recent_activity_items index
   activity_entries_visible = false, -- show full Activity transcript blocks instead of collapsed placeholders
   current_intent = nil, -- latest intent string from assistant.intent event
+  todo_items = {}, -- current-turn TODO items synthesized from assistant/tool/subagent events
+  todo_item_serial = 0, -- monotonic order for TODO rendering
+  todo_item_counter = 0, -- monotonic counter for generated TODO item ids
+  todo_root_id = nil, -- root TODO item id for the current turn
   reasoning_entry_key = nil, -- assistant entry currently receiving reasoning deltas
   reasoning_text = '', -- raw reasoning delta text accumulated for the active turn
   reasoning_lines = {}, -- normalized reasoning preview lines (trimmed, not transcript)
@@ -270,6 +274,7 @@ local SLASH_COMMANDS = {
   { word = '/mcp', info = 'Manage MCP server configuration' },
   { word = '/fleet', info = 'Enable fleet mode for parallel subagent execution' },
   { word = '/tasks', info = 'View and manage background tasks' },
+  { word = '/todo', info = 'Display the current turn TODO breakdown' },
   { word = '/allow-all', info = 'Enable all permissions' },
   { word = '/add-dir', info = 'Add a directory to the allowed list' },
   { word = '/list-dirs', info = 'Display all allowed directories' },

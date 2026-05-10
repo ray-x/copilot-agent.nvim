@@ -89,6 +89,8 @@ local function help_lines()
     '    :CopilotAgentDiff      Review file differences between checkpoints',
     '    /search <text>         Find transcript matches',
     '    /undo, /rewind [vNNN]  Restore from session checkpoints',
+    '    /todo                  Show the current turn TODO breakdown',
+    '    gT              Open TODO float',
     '    Diff float: q / <Esc><Esc> / <C-c> close',
     '',
     '  Output pane',
@@ -96,6 +98,7 @@ local function help_lines()
     '    <C-c>           Cancel current turn',
     '    zA              Toggle Activity details',
     '    gA              Open Activity details float',
+    '    gT              Open TODO float',
     '    [[ / ]]         Jump to prev/next conversation',
     '    [a / ]a         Jump to prev/next Assistant/Activity',
     '    R               Refresh/re-render',
@@ -516,6 +519,10 @@ function M.ensure_chat_window(opts)
   vim.keymap.set('n', 'gA', function()
     render.show_activity_details_under_cursor()
   end, { buffer = bufnr, silent = true, desc = 'Open Activity details float' })
+
+  vim.keymap.set('n', 'gT', function()
+    render.open_todo_float()
+  end, { buffer = bufnr, silent = true, desc = 'Open TODO float' })
 
   vim.keymap.set('n', '[[', function()
     render.jump_conversation(-1)

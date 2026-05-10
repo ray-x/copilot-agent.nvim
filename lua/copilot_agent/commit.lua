@@ -159,7 +159,17 @@ local function open_fugitive_commit(repo_root, message)
   vim.fn.mkdir(vim.fn.fnamemodify(message_path, ':h'), 'p')
   vim.fn.writefile(split_lines(sanitized), message_path)
 
-  local ok_cmd, cmd_err = pcall(vim.cmd, 'Git -C ' .. vim.fn.fnameescape(repo_root) .. ' commit --edit --verbose --cleanup=strip --file ' .. vim.fn.fnameescape(message_path))
+  local previous_cwd = vim.fn.getcwd()
+  local ok_lcd, lcd_err = pcall(vim.cmd, 'lcd ' .. vim.fn.fnameescape(repo_root))
+  if not ok_lcd then
+    return nil, tostring(lcd_err)
+  end
+
+  local ok_cmd, cmd_err = pcall(vim.cmd, 'Git commit --edit --verbose --cleanup=strip --file ' .. vim.fn.fnameescape(message_path))
+  local ok_restore, restore_err = pcall(vim.cmd, 'lcd ' .. vim.fn.fnameescape(previous_cwd))
+  if not ok_restore then
+    return nil, 'Failed to restore working directory: ' .. tostring(restore_err)
+  end
   if not ok_cmd then
     return nil, tostring(cmd_err)
   end
@@ -244,7 +254,9 @@ local function request_generated_commit_message(repo_root, callback)
   local function create_side_session(agent_name)
     request('POST', '/sessions', {
       clientName = state.config.client_name,
-      permissionMode = 'approve-reads',
+      -- The commit agent must run git shell commands; approve-reads would fall
+      -- back to interactive permission prompts with no UI attached here.
+      permissionMode = 'approve-all',
       workingDirectory = repo_root,
       streaming = state.config.session.streaming,
       enableConfigDiscovery = state.config.session.enable_config_discovery,

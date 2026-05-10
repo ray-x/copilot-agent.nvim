@@ -70,7 +70,6 @@ local FLOAT_VERTICAL_BORDER_LINES = 2 -- Account for the rounded-border float fr
 local CHECKPOINT_PICKER_LABEL_MAX_CHARS = 60 -- Checkpoint picker labels should stay readable while still surfacing the prompt context.
 local TURN_END_PROMPT_PREVIEW_CHARS = 200 -- Show enough of the prompt in turn-end logs to identify the completed request.
 local RECENT_ACTIVITY_LINE_MAX_CHARS = 120 -- Keep recent activity summaries compact enough for overlays and statusline-adjacent displays.
-local OVERLAY_STALE_IDLE_TIMEOUT_MS = 10 * 60 * 1000 -- Clear orphaned shell activity overlays after prolonged inactivity so stale "Activity: bash" banners never linger indefinitely.
 local intentionally_stopped_event_jobs = {}
 local sanitize_permission_text
 local summarize_tool_activity
@@ -103,6 +102,90 @@ local function assign_history_checkpoint_id(assistant_message_id)
       entry.checkpoint_id = mapping.id
       table.remove(state.history_pending_user_entries, idx)
       return
+    end
+  end
+end
+
+local function reset_todo_state()
+  state.todo_items = {}
+  state.todo_item_serial = 0
+  state.todo_item_counter = 0
+  state.todo_root_id = nil
+end
+
+local function next_todo_item_id(prefix)
+  state.todo_item_counter = (tonumber(state.todo_item_counter) or 0) + 1
+  return string.format('%s-%d', prefix or 'todo', state.todo_item_counter)
+end
+
+local function ensure_todo_item(id, data)
+  if type(id) ~= 'string' or id == '' then
+    id = next_todo_item_id('todo')
+  end
+  if type(state.todo_items) ~= 'table' then
+    state.todo_items = {}
+  end
+  local item = state.todo_items[id]
+  if type(item) ~= 'table' then
+    state.todo_item_serial = (tonumber(state.todo_item_serial) or 0) + 1
+    item = {
+      id = id,
+      order = state.todo_item_serial,
+      progress_messages = {},
+    }
+    state.todo_items[id] = item
+  end
+  if type(data) == 'table' then
+    for key, value in pairs(data) do
+      item[key] = value
+    end
+  end
+  item.id = id
+  if type(item.progress_messages) ~= 'table' then
+    item.progress_messages = {}
+  end
+  item.order = tonumber(item.order) or state.todo_item_serial
+  state.todo_item_serial = math.max(tonumber(state.todo_item_serial) or 0, tonumber(item.order) or 0)
+  return item
+end
+
+local function ensure_todo_root()
+  local root_id = state.todo_root_id
+  if type(state.todo_items) ~= 'table' then
+    state.todo_items = {}
+  end
+  if type(root_id) == 'string' and root_id ~= '' and type(state.todo_items[root_id]) == 'table' then
+    return root_id
+  end
+  root_id = 'intent'
+  state.todo_root_id = root_id
+  ensure_todo_item(root_id, {
+    kind = 'intent',
+    title = state.current_intent or 'Current task',
+    status = 'running',
+    order = 1,
+  })
+  return root_id
+end
+
+local function append_todo_progress(item, message)
+  message = sanitize_permission_text(message)
+  if type(item) ~= 'table' or not message then
+    return
+  end
+  item.progress_messages = item.progress_messages or {}
+  if #item.progress_messages == 0 or item.progress_messages[#item.progress_messages] ~= message then
+    item.progress_messages[#item.progress_messages + 1] = message
+  end
+end
+
+local function finish_running_todos(status)
+  if type(state.todo_items) ~= 'table' then
+    return
+  end
+  for _, item in pairs(state.todo_items) do
+    if type(item) == 'table' and (item.status == 'running' or item.status == 'pending') then
+      item.status = status
     end
   end
 end
@@ -624,10 +707,6 @@ end
 
 local function min_overlay_tool_duration_ms()
   return 3000
-end
-
-local function overlay_stale_idle_timeout_ms()
-  return OVERLAY_STALE_IDLE_TIMEOUT_MS
 end
 
 local function overlay_run_id_for_tool_call(tool_call_id)
@@ -2074,64 +2153,6 @@ local function schedule_overlay_tool_clear(delay_ms, run_id)
   end, math.max(0, math.floor(tonumber(delay_ms) or 0)))
 end
 
-local function schedule_overlay_tool_stale_clear(run_id, delay_ms)
-  if type(run_id) ~= 'number' then
-    return
-  end
-
-  local delay = math.max(0, math.floor(tonumber(delay_ms) or overlay_stale_idle_timeout_ms()))
-  vim.defer_fn(function()
-    local current = state.overlay_tool_display
-    if not current or current.run_id ~= run_id or current.completed == true then
-      return
-    end
-
-    local now_ms = overlay_now_ms()
-    local last_activity_ms = tonumber(current.last_activity_ms) or tonumber(current.display_started_ms) or now_ms
-    local idle_ms = now_ms - last_activity_ms
-    local stale_timeout_ms = overlay_stale_idle_timeout_ms()
-    if idle_ms < stale_timeout_ms then
-      schedule_overlay_tool_stale_clear(run_id, stale_timeout_ms - idle_ms)
-      return
-    end
-
-    log(string.format('overlay.tool stale clear run_id=%s idle_ms=%d', tostring(run_id), idle_ms), vim.log.levels.DEBUG)
-    state.overlay_tool_display = nil
-    if state.active_tool_run_id == run_id then
-      state.active_tool = nil
-      state.active_tool_run_id = nil
-      state.active_tool_detail = nil
-      state.pending_tool_detail = nil
-      refresh_statuslines()
-    end
-    refresh_reasoning_overlay(true)
-  end, delay)
-end
-
-local function enqueue_overlay_tool(tool_name, detail, tool_call_id)
-  if not looks_like_shell_tool(tool_name) then
-    return nil
-  end
-
-  state.overlay_tool_run_id = (tonumber(state.overlay_tool_run_id) or 0) + 1
-  local now_ms = overlay_now_ms()
-  local item = {
-    run_id = state.overlay_tool_run_id,
-    tool = tool_name,
-    detail = detail,
-    tool_call_id = sanitize_permission_text(tool_call_id),
-    completed = false,
-    display_started_ms = now_ms,
-    last_activity_ms = now_ms,
-  }
-
-  cancel_overlay_tool_schedule()
-  state.overlay_tool_display = item
-  schedule_overlay_tool_stale_clear(item.run_id)
-  refresh_reasoning_overlay(true)
-  return item.run_id
-end
-
 local function complete_overlay_tool(run_id)
   if type(run_id) ~= 'number' then
     return
@@ -2867,6 +2888,7 @@ local function handle_host_event(event_name, payload)
     state.context_limit = nil
     state.session_name = nil
     state.pending_user_input = nil
+    reset_todo_state()
     reset_live_activity_state()
     reset_prompt_state()
     refresh_statuslines()
@@ -3322,6 +3344,154 @@ local function preserve_reasoning_preview_on_late_turn_start()
   return true
 end
 
+local function handle_todo_event(event_type, data)
+  if event_type == 'assistant.intent' then
+    state.current_intent = sanitize_permission_text(data.intent)
+    local todo = ensure_todo_item(ensure_todo_root(), {
+      kind = 'intent',
+      title = state.current_intent or 'Current task',
+      status = 'running',
+      order = 1,
+    })
+    todo.kind = 'intent'
+    todo.title = state.current_intent or todo.title or 'Current task'
+    todo.status = 'running'
+    refresh_statuslines()
+    refresh_reasoning_overlay()
+    return true
+  end
+
+  if event_type == 'subagent.started' then
+    set_background_task('subagent:' .. (data.toolCallId or ''), {
+      kind = 'subagent',
+      status = 'running',
+      title = first_non_empty(data.agentDisplayName, data.agentName, 'Subagent'),
+      description = data.agentDescription,
+    })
+    local todo = ensure_todo_item(sanitize_permission_text(data.toolCallId) or next_todo_item_id('subagent'), {
+      kind = 'subagent',
+      parent_id = ensure_todo_root(),
+      title = first_non_empty(data.agentDisplayName, data.agentName, 'Subagent'),
+      description = data.agentDescription,
+      status = 'running',
+    })
+    todo.parent_id = ensure_todo_root()
+    todo.title = first_non_empty(data.agentDisplayName, data.agentName, todo.title, 'Subagent')
+    todo.description = data.agentDescription
+    return true
+  end
+
+  if event_type == 'subagent.completed' then
+    set_background_task('subagent:' .. (data.toolCallId or ''), {
+      kind = 'subagent',
+      status = 'completed',
+    })
+    local todo = ensure_todo_item(sanitize_permission_text(data.toolCallId) or next_todo_item_id('subagent'), {
+      kind = 'subagent',
+      parent_id = ensure_todo_root(),
+      title = first_non_empty(data.agentDisplayName, data.agentName, 'Subagent'),
+      status = 'done',
+    })
+    todo.parent_id = ensure_todo_root()
+    todo.status = 'done'
+    schedule_open_buffer_refresh()
+    return true
+  end
+
+  if event_type == 'subagent.failed' then
+    set_background_task('subagent:' .. (data.toolCallId or ''), {
+      kind = 'subagent',
+      status = 'failed',
+    })
+    local todo = ensure_todo_item(sanitize_permission_text(data.toolCallId) or next_todo_item_id('subagent'), {
+      kind = 'subagent',
+      parent_id = ensure_todo_root(),
+      title = first_non_empty(data.agentDisplayName, data.agentName, 'Subagent'),
+      status = 'blocked',
+    })
+    todo.parent_id = ensure_todo_root()
+    todo.status = 'blocked'
+    append_todo_progress(todo, type(data.error) == 'table' and data.error.message or data.message)
+    schedule_open_buffer_refresh()
+    return true
+  end
+
+  if event_type == 'tool.execution_start' then
+    local tool_call_id = sanitize_permission_text(data.toolCallId)
+    local todo = ensure_todo_item(tool_call_id or next_todo_item_id('tool'), {
+      kind = 'tool',
+      parent_id = ensure_todo_root(),
+      title = summarize_tool_activity(data.toolName, data) or fallback_tool_activity_summary(data.toolName, extract_shell_tool_detail(data.toolName, data)),
+      tool_name = sanitize_permission_text(data.toolName),
+      tool_call_id = tool_call_id,
+      tool_detail = extract_shell_tool_detail(data.toolName, data),
+      status = 'running',
+    })
+    todo.parent_id = ensure_todo_root()
+    todo.kind = 'tool'
+    todo.tool_name = sanitize_permission_text(data.toolName)
+    todo.tool_call_id = tool_call_id or todo.tool_call_id
+    todo.tool_detail = extract_shell_tool_detail(data.toolName, data) or todo.tool_detail
+    todo.title = summarize_tool_activity(data.toolName, data) or todo.title
+    todo.status = 'running'
+    return true
+  end
+
+  if event_type == 'tool.execution_progress' then
+    local tool_call_id = sanitize_permission_text(data.toolCallId)
+    local todo = ensure_todo_item(tool_call_id or next_todo_item_id('tool'), {
+      kind = 'tool',
+      parent_id = ensure_todo_root(),
+      title = summarize_tool_activity(state.active_tool, data) or fallback_tool_activity_summary(state.active_tool, state.active_tool_detail),
+      tool_name = sanitize_permission_text(state.active_tool or data.toolName),
+      tool_call_id = tool_call_id,
+      status = 'running',
+    })
+    append_todo_progress(todo, data.progressMessage)
+    return true
+  end
+
+  if event_type == 'tool.execution_complete' then
+    local tool_call_id = sanitize_permission_text(data.toolCallId)
+    local completion_run_id = overlay_run_id_for_tool_call(tool_call_id)
+    if not completion_run_id and not tool_call_id then
+      completion_run_id = state.active_tool_run_id
+    end
+
+    log(string.format('tool.execution_complete tool=%s payload=%s', tostring(state.active_tool or data.toolName or '<none>'), serialize_log_value(data, { max_len = 1600 })), vim.log.levels.DEBUG)
+    complete_overlay_tool(completion_run_id)
+    local todo = ensure_todo_item(tool_call_id or next_todo_item_id('tool'), {
+      kind = 'tool',
+      parent_id = ensure_todo_root(),
+      title = summarize_tool_activity(state.active_tool or data.toolName, data) or fallback_tool_activity_summary(state.active_tool or data.toolName, state.active_tool_detail),
+      tool_name = sanitize_permission_text(state.active_tool or data.toolName),
+      tool_call_id = tool_call_id,
+      status = data.success == true and 'done' or 'blocked',
+    })
+    todo.parent_id = ensure_todo_root()
+    todo.status = data.success == true and 'done' or 'blocked'
+    if type(data.error) == 'table' and type(data.error.message) == 'string' then
+      append_todo_progress(todo, data.error.message)
+    end
+
+    local clear_active_tool_state = completion_run_id ~= nil and state.active_tool_run_id == completion_run_id
+    if not clear_active_tool_state and not tool_call_id then
+      clear_active_tool_state = true
+    end
+    if clear_active_tool_state then
+      state.active_tool = nil
+      state.active_tool_run_id = nil
+      state.active_tool_detail = nil
+      state.pending_tool_detail = nil
+    end
+    refresh_statuslines()
+    refresh_reasoning_overlay()
+    return true
+  end
+
+  return false
+end
+
 -- High-frequency event types that need no activity capture and minimal work.
 -- Checked first to short-circuit before capture_turn_activity_summary,
 -- log_debug_trace, and the long if-chain in handle_session_event.
@@ -3571,6 +3741,10 @@ local function handle_session_event(payload)
     end
   end
 
+  if handle_todo_event(event_type, data) then
+    return
+  end
+
   if event_type == 'assistant.turn_end' then
     if not state.history_loading then
       refresh_session_name_from_server(state.session_id)
@@ -3601,6 +3775,7 @@ local function handle_session_event(payload)
         })
       end
     end
+    finish_running_todos('done')
     clear_live_turn_state('turn end')
     -- The previous render may have frozen only the pre-assistant prefix while a
     -- checkpoint write was still pending. Force a full rebuild here so the
@@ -3612,46 +3787,12 @@ local function handle_session_event(payload)
     return
   end
 
-  if event_type == 'subagent.started' then
-    set_background_task('subagent:' .. (data.toolCallId or ''), {
-      kind = 'subagent',
-      status = 'running',
-      title = first_non_empty(data.agentDisplayName, data.agentName, 'Subagent'),
-      description = data.agentDescription,
-    })
-    return
-  end
-
-  if event_type == 'subagent.completed' then
-    set_background_task('subagent:' .. (data.toolCallId or ''), {
-      kind = 'subagent',
-      status = 'completed',
-    })
-    schedule_open_buffer_refresh()
-    return
-  end
-
-  if event_type == 'subagent.failed' then
-    set_background_task('subagent:' .. (data.toolCallId or ''), {
-      kind = 'subagent',
-      status = 'failed',
-    })
-    schedule_open_buffer_refresh()
-    return
-  end
-
-  if event_type == 'assistant.intent' then
-    state.current_intent = sanitize_permission_text(data.intent)
-    refresh_statuslines()
-    refresh_reasoning_overlay()
-    return
-  end
-
   if event_type == 'assistant.turn_start' then
     local preserve_reasoning = preserve_reasoning_preview_on_late_turn_start()
     if not preserve_reasoning then
       clear_reasoning_preview('turn start')
     end
+    reset_todo_state()
     state.recent_activity_lines = {}
     state.recent_activity_items = {}
     state.recent_activity_tool_calls = {}
@@ -3677,26 +3818,6 @@ local function handle_session_event(payload)
     return
   end
 
-  if event_type == 'tool.execution_start' then
-    log(
-      string.format(
-        'tool.execution_start tool=%s detail=%s payload=%s',
-        tostring(data.toolName or '<none>'),
-        serialize_log_value(extract_shell_tool_detail(data.toolName, data), { max_len = 800 }),
-        serialize_log_value(data, { max_len = 1600 })
-      ),
-      vim.log.levels.DEBUG
-    )
-    state.chat_busy = true
-    state.active_tool = data.toolName or nil
-    state.active_tool_detail = extract_shell_tool_detail(state.active_tool, data)
-    state.active_tool_run_id = enqueue_overlay_tool(state.active_tool, state.active_tool_detail, data.toolCallId)
-    state.pending_tool_detail = nil
-    refresh_statuslines()
-    refresh_reasoning_overlay()
-    return
-  end
-
   if event_type == 'tool.execution_partial_result' then
     local tool_call_id = sanitize_permission_text(data.toolCallId)
     touch_overlay_tool_activity(overlay_run_id_for_tool_call(tool_call_id))
@@ -3710,27 +3831,9 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'tool.execution_complete' then
-    local tool_call_id = sanitize_permission_text(data.toolCallId)
-    local completion_run_id = overlay_run_id_for_tool_call(tool_call_id)
-    if not completion_run_id and not tool_call_id then
-      completion_run_id = state.active_tool_run_id
+    if handle_todo_event(event_type, data) then
+      return
     end
-
-    log(string.format('tool.execution_complete tool=%s payload=%s', tostring(state.active_tool or data.toolName or '<none>'), serialize_log_value(data, { max_len = 1600 })), vim.log.levels.DEBUG)
-    complete_overlay_tool(completion_run_id)
-
-    local clear_active_tool_state = completion_run_id ~= nil and state.active_tool_run_id == completion_run_id
-    if not clear_active_tool_state and not tool_call_id then
-      clear_active_tool_state = true
-    end
-    if clear_active_tool_state then
-      state.active_tool = nil
-      state.active_tool_run_id = nil
-      state.active_tool_detail = nil
-      state.pending_tool_detail = nil
-    end
-    refresh_statuslines()
-    refresh_reasoning_overlay()
     return
   end
 

@@ -263,6 +263,7 @@ Normal and insert mode (unless noted):
   <C-n> / <M-n>       Next prompt from history
   zA (normal)         Toggle collapsed Activity transcript blocks
   gA (normal)         Open Activity details float for the block under the cursor
+  gT (normal)         Open TODO float for the current turn
   g? (normal)         Show help with keybindings and session commands
 
 ------------------------------------------------------------------------------
@@ -338,6 +339,7 @@ to dismiss the popup without accepting an item. Examples:
   /clear              Clear the chat transcript
   /copy               Copy the last response to the clipboard
   /help               Show available slash commands
+  /todo               Show the current turn TODO breakdown
   /newfile            Ask Copilot to create a new file
   /fix                Fix the selected code
   /tests              Generate tests for the selection

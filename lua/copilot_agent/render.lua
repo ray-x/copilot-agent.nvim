@@ -1605,6 +1605,92 @@ local function build_activity_details_lines(entry)
   return lines
 end
 
+local function build_todo_lines()
+  local lines = { '# TODO' }
+  local items = type(state.todo_items) == 'table' and state.todo_items or {}
+  local roots = {}
+  local children = {}
+
+  for _, item in pairs(items) do
+    if type(item) == 'table' then
+      local parent_id = type(item.parent_id) == 'string' and item.parent_id or nil
+      if parent_id and items[parent_id] then
+        children[parent_id] = children[parent_id] or {}
+        children[parent_id][#children[parent_id] + 1] = item
+      else
+        roots[#roots + 1] = item
+      end
+    end
+  end
+
+  local function sort_items(list)
+    table.sort(list, function(left, right)
+      local left_order = tonumber(left.order) or math.huge
+      local right_order = tonumber(right.order) or math.huge
+      if left_order == right_order then
+        return tostring(left.id or '') < tostring(right.id or '')
+      end
+      return left_order < right_order
+    end)
+  end
+
+  local function item_suffix(status)
+    if status == 'running' then
+      return ' _(running)_'
+    end
+    if status == 'blocked' then
+      return ' _(blocked)_'
+    end
+    if status == 'done' then
+      return ' _(done)_'
+    end
+    return ''
+  end
+
+  local function append_item(item, depth)
+    local indent = string.rep('  ', depth or 0)
+    local title = sanitize_display_text(item.title or item.summary or item.id or 'TODO')
+    local status = type(item.status) == 'string' and item.status or 'pending'
+    local marker = (status == 'done' or status == 'blocked') and '[x]' or '[ ]'
+    lines[#lines + 1] = indent .. '- ' .. marker .. ' ' .. title .. item_suffix(status)
+
+    if type(item.description) == 'string' and item.description ~= '' then
+      for _, line in ipairs(split_lines(item.description)) do
+        if vim.trim(line) ~= '' then
+          lines[#lines + 1] = indent .. '  - ' .. sanitize_display_text(line)
+        end
+      end
+    end
+
+    if type(item.progress_messages) == 'table' then
+      for _, message in ipairs(item.progress_messages) do
+        if type(message) == 'string' and message ~= '' then
+          lines[#lines + 1] = indent .. '  - ' .. sanitize_display_text(message)
+        end
+      end
+    end
+
+    local nested = children[item.id] or {}
+    sort_items(nested)
+    for _, child in ipairs(nested) do
+      append_item(child, (depth or 0) + 1)
+    end
+  end
+
+  sort_items(roots)
+  if #roots == 0 then
+    lines[#lines + 1] = ''
+    lines[#lines + 1] = 'No TODO items yet.'
+    return lines
+  end
+
+  lines[#lines + 1] = ''
+  for _, item in ipairs(roots) do
+    append_item(item, 0)
+  end
+  return lines
+end
+
 local function open_activity_details_float(entry)
   local lines = build_activity_details_lines(entry)
   local width = math.min(math.max(60, math.floor(vim.o.columns * 0.85)), 140)
@@ -1626,6 +1712,46 @@ local function open_activity_details_float(entry)
     style = 'minimal',
     border = 'rounded',
     title = ' Activity details ',
+    title_pos = 'center',
+  })
+  window.protect_markdown_buffer(buf, winid)
+  window.set_window_syntax(winid, 'markdown')
+  vim.wo[winid].wrap = true
+  vim.wo[winid].linebreak = false
+
+  local function close()
+    if vim.api.nvim_win_is_valid(winid) then
+      vim.api.nvim_win_close(winid, true)
+    end
+  end
+
+  vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc><Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set({ 'n', 'i' }, '<C-c>', close, { buffer = buf, nowait = true })
+end
+
+function M.open_todo_float()
+  local lines = build_todo_lines()
+  local width = math.min(math.max(60, math.floor(vim.o.columns * 0.75)), 120)
+  local height = math.min(math.max(#lines + 2, 10), math.floor(vim.o.lines * 0.75))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].modifiable = false
+
+  local winid = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = height,
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = 'minimal',
+    border = 'rounded',
+    title = ' TODO ',
     title_pos = 'center',
   })
   window.protect_markdown_buffer(buf, winid)

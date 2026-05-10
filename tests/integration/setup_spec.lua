@@ -835,12 +835,73 @@ describe('fugitive commit command', function()
     }, opened)
   end)
 
+  it('uses approve-all when creating the side session for commit generation', function()
+    local requests = {}
+
+    package.loaded['copilot_agent.commit'] = nil
+    package.loaded['copilot_agent.http'] = nil
+    package.loaded['copilot_agent.slash'] = {
+      _extract_side_session_answer = function()
+        return 'feat: generated commit message', true, nil
+      end,
+    }
+
+    local http = require('copilot_agent.http')
+    http.request = function(method, path, body, callback)
+      requests[#requests + 1] = {
+        method = method,
+        path = path,
+        body = body,
+      }
+      if method == 'POST' and path == '/sessions' then
+        callback({ sessionId = 'side-session' }, nil)
+        return
+      end
+      if method == 'POST' and path == '/sessions/side-session/mode' then
+        callback({}, nil)
+        return
+      end
+      if method == 'POST' and path == '/sessions/side-session/messages' then
+        callback({}, nil)
+        return
+      end
+      if method == 'GET' and path == '/sessions/side-session/messages' then
+        callback({ events = {} }, nil)
+        return
+      end
+      if method == 'DELETE' and path == '/sessions/side-session?delete=true' then
+        callback({}, nil)
+        return
+      end
+      error('unexpected request: ' .. method .. ' ' .. path)
+    end
+
+    commit = require('copilot_agent.commit')
+    commit._build_commit_prompt = function()
+      return 'prompt'
+    end
+
+    local generated
+    local err
+    commit._request_generated_commit_message('/tmp/repo', function(message, callback_err)
+      generated = message
+      err = callback_err
+    end)
+
+    assert_eq(nil, err)
+    assert_eq('feat: generated commit message', generated)
+    assert_eq('POST', requests[1].method)
+    assert_eq('/sessions', requests[1].path)
+    assert_eq('approve-all', requests[1].body.permissionMode)
+  end)
+
   it('writes the prepared message into COMMIT_EDITMSG before opening fugitive', function()
     local temp_root = vim.fn.tempname()
     local message_path = temp_root .. '/COMMIT_EDITMSG'
     local original_exists = vim.fn.exists
+    local original_getcwd = vim.fn.getcwd
     local original_cmd = vim.cmd
-    local captured_cmd
+    local captured_cmds = {}
 
     vim.fn.mkdir(temp_root, 'p')
     commit._commit_message_path = function()
@@ -852,19 +913,26 @@ describe('fugitive commit command', function()
       end
       return original_exists(name)
     end
+    vim.fn.getcwd = function()
+      return '/tmp/original'
+    end
     vim.cmd = function(command_text)
-      captured_cmd = command_text
+      captured_cmds[#captured_cmds + 1] = command_text
     end
 
     local ok, err = commit._open_fugitive_commit('/tmp/repo', 'feat: seed commit buffer\n\nBody line')
 
     vim.fn.exists = original_exists
+    vim.fn.getcwd = original_getcwd
     vim.cmd = original_cmd
 
     assert_true(ok)
     assert_eq(nil, err)
-    assert_true(captured_cmd:find('Git -C ', 1, true) ~= nil)
-    assert_true(captured_cmd:find('commit --edit', 1, true) ~= nil)
+    assert.same({
+      'lcd /tmp/repo',
+      'Git commit --edit --verbose --cleanup=strip --file ' .. message_path,
+      'lcd /tmp/original',
+    }, captured_cmds)
     assert.same({ 'feat: seed commit buffer', '', 'Body line' }, vim.fn.readfile(message_path))
   end)
 end)

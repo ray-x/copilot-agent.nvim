@@ -25,6 +25,7 @@ local state = cfg.state
 local notify = cfg.notify
 local log = cfg.log
 local append_entry = render.append_entry
+local open_todo_float = render.open_todo_float
 local refresh_statuslines = sl.refresh_statuslines
 local request = http.request
 local split_lines = utils.split_lines
@@ -3156,6 +3157,11 @@ local function rewind_checkpoint(args)
   return true
 end
 
+local function todo_command()
+  open_todo_float()
+  return true
+end
+
 local handlers = {
   ['add-dir'] = add_directory,
   ask = ask_command,
@@ -3186,6 +3192,7 @@ local handlers = {
   share = share_session,
   skills = skills_command,
   tasks = session_tasks,
+  todo = todo_command,
   usage = usage_command,
   ['allow-all'] = allow_all_command,
   clear = clear_session_command,

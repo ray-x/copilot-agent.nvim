@@ -974,9 +974,28 @@ function M.ask(prompt, opts)
   -- Build attachment list for the API.
   local api_attachments = {}
   local temp_files = {} -- clipboard image temp files to delete after send
+  local function attachment_display_name(attachment)
+    if type(attachment) ~= 'table' then
+      return nil
+    end
+    if type(attachment.display) == 'string' and attachment.display ~= '' then
+      return attachment.display
+    end
+    if type(attachment.path) == 'string' and attachment.path ~= '' then
+      if attachment.type == 'directory' then
+        return vim.fn.fnamemodify(attachment.path:gsub('/$', ''), ':t') .. '/'
+      end
+      return vim.fn.fnamemodify(attachment.path, ':t')
+    end
+    return nil
+  end
   for _, a in ipairs(opts.attachments or {}) do
     if a.type == 'file' or a.type == 'directory' or a.type == 'image' then
-      table.insert(api_attachments, { type = 'file', path = a.path })
+      table.insert(api_attachments, {
+        type = 'file',
+        path = a.path,
+        displayName = attachment_display_name(a),
+      })
       if a.temp then
         temp_files[#temp_files + 1] = a.path
       end
@@ -984,6 +1003,7 @@ function M.ask(prompt, opts)
       table.insert(api_attachments, {
         type = 'selection',
         filePath = a.path,
+        displayName = attachment_display_name(a),
         text = a.text,
         lineRange = a.start_line and { start = a.start_line, ['end'] = a.end_line } or nil,
       })

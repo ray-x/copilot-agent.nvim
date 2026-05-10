@@ -4684,6 +4684,41 @@ describe('restore context prompt injection', function()
     assert_eq('Please continue from here', agent.state.entries[#agent.state.entries].content)
     assert_eq(nil, agent.state.pending_session_context)
   end)
+
+  it('includes attachment display names in the API payload so resumed sessions stay valid', function()
+    local captured_body
+
+    session.with_session = function(callback)
+      callback('session-123', nil)
+    end
+    http.request = function(method, path, body, callback)
+      if method == 'POST' and path == '/sessions/session-123/messages' then
+        captured_body = body
+      end
+      callback({}, nil)
+    end
+
+    package.loaded['copilot_agent.chat'] = nil
+    chat = require('copilot_agent.chat')
+    chat.ask('Review these attachments', {
+      attachments = {
+        { type = 'file', path = '/tmp/example.lua', display = 'example.lua' },
+        {
+          type = 'selection',
+          path = '/tmp/example.lua',
+          text = 'local value = 1',
+          start_line = 0,
+          end_line = 0,
+          display = 'selection:example.lua:1-1',
+        },
+      },
+    })
+
+    assert_not_nil(captured_body)
+    assert_eq(2, #(captured_body.attachments or {}))
+    assert_eq('example.lua', captured_body.attachments[1].displayName)
+    assert_eq('selection:example.lua:1-1', captured_body.attachments[2].displayName)
+  end)
 end)
 
 describe('diff command', function()

@@ -1592,7 +1592,13 @@ local function setup_completion_keymaps(bufnr)
     end
 
     runtime.active_completion_key = completion_request.popup_key
-    vim.fn.complete(start_col + 1, items)
+    -- complete() mutates the buffer/window and must run after the mapping returns.
+    local scheduled_bufnr = bufnr
+    vim.schedule(function()
+      if vim.api.nvim_buf_is_valid(scheduled_bufnr) and vim.api.nvim_get_current_buf() == scheduled_bufnr then
+        vim.fn.complete(start_col + 1, items)
+      end
+    end)
     return true
   end
   runtime.trigger_completion = trigger_completion

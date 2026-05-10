@@ -1533,7 +1533,7 @@ describe('statusline plugin config', function()
     assert_true(vim.wo[chat_winid].statusline:find('✅ready', 1, true) ~= nil)
     assert_true(vim.wo[chat_winid].statusline:find('✅approve-all', 1, true) == nil)
     assert_true(vim.wo[chat_winid].statusline:find('󱃕', 1, true) == nil)
-    assert_true(vim.wo[input_winid].statusline:find('(? for help)', 1, true) == nil)
+    assert_true(vim.wo[input_winid].statusline:find('(g? for help)', 1, true) == nil)
     assert_true(vim.wo[input_winid].statusline:find('✅ready', 1, true) ~= nil)
     assert_true(agent.statusline():find('󱃕', 1, true) == nil)
     assert_true(agent.statusline():find('✅ready', 1, true) ~= nil)
@@ -10596,6 +10596,53 @@ describe('chat input behavior', function()
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. '@lua/' })
     vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #(prefix .. '@lua/') })
     vim.api.nvim_exec_autocmds('TextChangedI', { buffer = agent.state.input_bufnr })
+    vim.wait(50, function()
+      return #completions > 0
+    end)
+
+    vim.fn.complete = original_complete
+    vim.fn.mode = original_mode
+
+    assert_eq(1, #completions)
+    assert_eq(#prefix + 1, completions[1].col)
+    local words = vim.tbl_map(function(item)
+      return item.word
+    end, completions[1].items)
+    assert_true(vim.tbl_contains(words, '@lua/copilot_agent/') or vim.tbl_contains(words, '@lua/copilot_agent'))
+  end)
+
+  it('defers manual <Tab> completion so it can run outside textlock', function()
+    ensure_dev_input_module()
+    stub_fd_output({
+      'lua/',
+      'lua/copilot_agent/',
+      'lua/copilot_agent/init.lua',
+    })
+    local original_complete = vim.fn.complete
+    local original_mode = vim.fn.mode
+    local completions = {}
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
+    local line = prefix .. '@lua/'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.cmd('startinsert!')
+    vim.fn.mode = function()
+      return 'i'
+    end
+    vim.fn.complete = function(col, items)
+      table.insert(completions, { col = col, items = items })
+    end
+
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    local tab_map = vim.fn.maparg('<Tab>', 'i', false, true)
+    assert_true(type(tab_map.callback) == 'function')
+    assert_eq('', tab_map.callback())
+
     vim.wait(50, function()
       return #completions > 0
     end)

@@ -614,7 +614,7 @@ function M.refresh_input_statusline()
         statusline_part('config', M.statusline_config_highlighted, width),
         statusline_part('attachments', M.statusline_attachments),
         statusline_part('help', function()
-          return '(? for help)'
+          return '(g? for help)'
         end)
       ),
       math.max(1, width - 1),

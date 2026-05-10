@@ -46,6 +46,7 @@ local mode_permission = {
   agent = 'approve-reads',
   autopilot = 'approve-all',
 }
+local plan_mode_command
 
 local function parse(text)
   if type(text) ~= 'string' then
@@ -439,8 +440,601 @@ local function clear_session_command()
   return true
 end
 
+local function merge_session_catalog(response)
+  local merged = {}
+  local order = {}
+
+  local function upsert(item, live_source)
+    local session_id = item and item.sessionId or nil
+    if type(session_id) ~= 'string' or session_id == '' then
+      return
+    end
+
+    local normalized = vim.deepcopy(item)
+    normalized.live = live_source == true or normalized.live == true
+    if not merged[session_id] then
+      merged[session_id] = normalized
+      order[#order + 1] = session_id
+      return
+    end
+
+    local existing = merged[session_id]
+    if normalized.live then
+      normalized.summary = normalized.summary or existing.summary
+      normalized.workingDirectory = normalized.workingDirectory or existing.workingDirectory
+      normalized.workspacePath = normalized.workspacePath or existing.workspacePath
+      normalized.modifiedTime = normalized.modifiedTime or existing.modifiedTime
+      normalized.startTime = normalized.startTime or existing.startTime
+      normalized.createdAt = normalized.createdAt or existing.createdAt
+      merged[session_id] = normalized
+      return
+    end
+
+    existing.summary = existing.summary or normalized.summary
+    existing.workingDirectory = existing.workingDirectory or normalized.workingDirectory
+    existing.workspacePath = existing.workspacePath or normalized.workspacePath
+    existing.modifiedTime = existing.modifiedTime or normalized.modifiedTime
+    existing.startTime = existing.startTime or normalized.startTime
+    existing.createdAt = existing.createdAt or normalized.createdAt
+  end
+
+  for _, item in ipairs((response and response.persisted) or {}) do
+    upsert(item, false)
+  end
+  for _, item in ipairs((response and response.live) or {}) do
+    upsert(item, true)
+  end
+
+  local sessions = {}
+  for _, session_id in ipairs(order) do
+    sessions[#sessions + 1] = merged[session_id]
+  end
+  table.sort(sessions, function(left, right)
+    local left_key = first_non_empty_string(left.modifiedTime, left.startTime, left.createdAt) or ''
+    local right_key = first_non_empty_string(right.modifiedTime, right.startTime, right.createdAt) or ''
+    return left_key > right_key
+  end)
+  return sessions
+end
+
+local function fetch_session_catalog(callback)
+  request('GET', '/sessions', nil, function(response, err)
+    if err then
+      callback(nil, err)
+      return
+    end
+    callback(merge_session_catalog(response), nil)
+  end)
+end
+
+local function session_label(session_id, summary)
+  local resolved = session_names.resolve(summary, session_id)
+  local formatted_id = utils.format_session_id(session_id)
+  if type(resolved) == 'string' and resolved ~= '' then
+    return resolved .. ' [' .. formatted_id .. ']'
+  end
+  return formatted_id
+end
+
+local function find_session_record(sessions, token)
+  token = vim.trim(token or '')
+  if token == '' then
+    return nil
+  end
+
+  local lowered = token:lower()
+  for _, item in ipairs(sessions or {}) do
+    local session_id = item.sessionId or ''
+    if session_id:lower() == lowered then
+      return item
+    end
+  end
+
+  for _, item in ipairs(sessions or {}) do
+    local session_id = item.sessionId or ''
+    if utils.format_session_id(session_id):lower() == lowered then
+      return item
+    end
+  end
+
+  for _, item in ipairs(sessions or {}) do
+    local resolved = session_names.resolve(item.summary, item.sessionId)
+    if type(resolved) == 'string' and resolved:lower() == lowered then
+      return item
+    end
+  end
+
+  local prefix_matches = {}
+  for _, item in ipairs(sessions or {}) do
+    local session_id = (item.sessionId or ''):lower()
+    if lowered ~= '' and vim.startswith(session_id, lowered) then
+      prefix_matches[#prefix_matches + 1] = item
+    end
+  end
+  if #prefix_matches == 1 then
+    return prefix_matches[1]
+  end
+
+  return nil
+end
+
+local function resolve_session_target(raw, opts, callback)
+  opts = opts or {}
+  raw = vim.trim(raw or '')
+  if raw == '' then
+    if state.session_id and state.session_id ~= '' then
+      callback({
+        session_id = state.session_id,
+        session = nil,
+        checkpoint_info = checkpoints.session_info(state.session_id),
+      }, nil)
+      return
+    end
+    callback(nil, opts.missing_message or 'No active session')
+    return
+  end
+
+  fetch_session_catalog(function(sessions, err)
+    if err then
+      callback(nil, err)
+      return
+    end
+
+    local record = find_session_record(sessions, raw)
+    local session_id = record and record.sessionId or raw
+    local checkpoint_info = checkpoints.session_info(session_id)
+    if not record and not checkpoint_info and not opts.allow_raw_id then
+      callback(nil, 'Session not found: ' .. raw)
+      return
+    end
+    callback({
+      session_id = session_id,
+      session = record,
+      checkpoint_info = checkpoint_info,
+    }, nil)
+  end)
+end
+
+local function parse_session_timestamp(value)
+  value = vim.trim(value or '')
+  if value == '' then
+    return nil
+  end
+
+  local normalized = value:gsub('%.%d+', '')
+  local zulu = normalized:match('^(%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d)Z$')
+  if zulu then
+    local parsed = tonumber(vim.fn.strptime('%Y-%m-%dT%H:%M:%S', zulu))
+    if parsed and parsed >= 0 then
+      return parsed
+    end
+    return nil
+  end
+
+  local base, sign, hours, minutes = normalized:match('^(%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d)([+-])(%d%d):?(%d%d)$')
+  if base and sign and hours and minutes then
+    local parsed = tonumber(vim.fn.strptime('%Y-%m-%dT%H:%M:%S', base))
+    if parsed then
+      local offset = tonumber(hours) * 3600 + tonumber(minutes) * 60
+      if sign == '+' then
+        return parsed - offset
+      end
+      return parsed + offset
+    end
+  end
+
+  local parsed = tonumber(vim.fn.strptime('%Y-%m-%dT%H:%M:%S', normalized))
+  if parsed and parsed >= 0 then
+    return parsed
+  end
+  return nil
+end
+
+local function render_session_info(target, live_summary)
+  local session_id = target.session_id
+  local summary = (live_summary and live_summary.summary) or (target.session and target.session.summary) or nil
+  local custom_name = session_names.get(session_id)
+  local checkpoint_info = target.checkpoint_info or checkpoints.session_info(session_id)
+  local lines = {
+    'Session info:',
+    '  Label: ' .. session_label(session_id, summary),
+    '  Session ID: ' .. session_id,
+  }
+
+  if custom_name and custom_name ~= '' then
+    lines[#lines + 1] = '  Saved name: ' .. custom_name
+  end
+  if type(summary) == 'string' and summary ~= '' and summary ~= custom_name then
+    lines[#lines + 1] = '  Summary: ' .. summary
+  end
+
+  local session_working_directory = first_non_empty_string(
+    live_summary and live_summary.workingDirectory,
+    target.session and target.session.workingDirectory,
+    checkpoint_info and checkpoint_info.deleted_working_directory,
+    session_id == state.session_id and state.session_working_directory or nil
+  )
+  if session_working_directory then
+    lines[#lines + 1] = '  Working directory: ' .. vim.fn.fnamemodify(session_working_directory, ':~')
+  end
+
+  local workspace_path = first_non_empty_string(live_summary and live_summary.workspacePath, target.session and target.session.workspacePath)
+  if workspace_path then
+    lines[#lines + 1] = '  Workspace path: ' .. workspace_path
+  end
+
+  local created_at = first_non_empty_string(live_summary and live_summary.createdAt, target.session and target.session.createdAt)
+  if created_at then
+    lines[#lines + 1] = '  Created: ' .. created_at
+  end
+  local modified_at = first_non_empty_string(target.session and target.session.modifiedTime, target.session and target.session.startTime)
+  if modified_at then
+    lines[#lines + 1] = '  Last activity: ' .. modified_at
+  end
+
+  lines[#lines + 1] = '  Attached here: ' .. ((session_id == state.session_id) and 'yes' or 'no')
+  lines[#lines + 1] = '  Live: ' .. (((live_summary and live_summary.live) or (target.session and target.session.live)) and 'yes' or 'no')
+
+  local model_name = first_non_empty_string(live_summary and live_summary.model, session_id == state.session_id and state.current_model or nil)
+  if model_name then
+    lines[#lines + 1] = '  Model: ' .. model_name
+  end
+  if live_summary and live_summary.agentMode then
+    lines[#lines + 1] = '  Mode: ' .. live_summary.agentMode
+  elseif session_id == state.session_id and state.input_mode then
+    lines[#lines + 1] = '  Mode: ' .. state.input_mode
+  end
+  if live_summary and live_summary.permissionMode then
+    lines[#lines + 1] = '  Permission: ' .. live_summary.permissionMode
+  elseif session_id == state.session_id and state.permission_mode then
+    lines[#lines + 1] = '  Permission: ' .. state.permission_mode
+  end
+  if live_summary and live_summary.agent then
+    lines[#lines + 1] = '  Agent: ' .. live_summary.agent
+  end
+
+  if checkpoint_info then
+    lines[#lines + 1] = '  Checkpoints: ' .. tostring(checkpoint_info.checkpoint_count or 0)
+    if checkpoint_info.deleted_at then
+      lines[#lines + 1] = '  Soft-deleted: ' .. checkpoint_info.deleted_at
+    end
+    if checkpoint_info.purge_after then
+      lines[#lines + 1] = '  Purge after: ' .. checkpoint_info.purge_after
+    end
+  end
+
+  if live_summary and live_summary.live then
+    lines[#lines + 1] = string.format(
+      '  Discovery: %d instructions, %d agents, %d skills, %d MCP servers',
+      tonumber(live_summary.instructionCount) or 0,
+      tonumber(live_summary.agentCount) or 0,
+      tonumber(live_summary.skillCount) or 0,
+      tonumber(live_summary.mcpCount) or 0
+    )
+  end
+
+  append_entry('system', table.concat(lines, '\n'))
+end
+
+local function session_info_command(args)
+  resolve_session_target(args, { missing_message = 'No active session to inspect' }, function(target, err)
+    if err then
+      append_entry('error', err)
+      return
+    end
+
+    if target.session_id == state.session_id then
+      request('GET', '/sessions/' .. target.session_id, nil, function(response, request_err)
+        if request_err then
+          render_session_info(target, target.session)
+          return
+        end
+        render_session_info(target, response)
+      end)
+      return
+    end
+
+    render_session_info(target, target.session)
+  end)
+  return true
+end
+
+local function session_checkpoints_command(args)
+  resolve_session_target(args, { missing_message = 'No active session to inspect checkpoints for' }, function(target, err)
+    if err then
+      append_entry('error', err)
+      return
+    end
+
+    local details, checkpoint_info = checkpoints.list_details(target.session_id)
+    local lines = {
+      'Session checkpoints:',
+      '  Session: ' .. session_label(target.session_id, target.session and target.session.summary),
+    }
+    if checkpoint_info and checkpoint_info.deleted_at then
+      lines[#lines + 1] = '  Soft-deleted: ' .. checkpoint_info.deleted_at
+    end
+    if checkpoint_info and checkpoint_info.purge_after then
+      lines[#lines + 1] = '  Purge after: ' .. checkpoint_info.purge_after
+    end
+
+    if vim.tbl_isempty(details) then
+      lines[#lines + 1] = '  No checkpoints recorded.'
+      append_entry('system', table.concat(lines, '\n'))
+      return
+    end
+
+    for _, item in ipairs(details) do
+      local header = '  - ' .. tostring(item.id or '<unknown>')
+      if item.created_at then
+        header = header .. '  ' .. item.created_at
+      end
+      lines[#lines + 1] = header
+      if item.prompt_summary then
+        lines[#lines + 1] = '    prompt: ' .. item.prompt_summary
+      end
+      if item.assistant_summary then
+        lines[#lines + 1] = '    reply: ' .. item.assistant_summary
+      end
+    end
+
+    append_entry('system', table.concat(lines, '\n'))
+  end)
+  return true
+end
+
+local function session_files_command(args)
+  resolve_session_target(args, { missing_message = 'No active session to inspect files for' }, function(target, err)
+    if err then
+      append_entry('error', err)
+      return
+    end
+
+    local files, file_err = checkpoints.list_files(target.session_id)
+    if file_err then
+      append_entry('error', 'Failed to list session files: ' .. file_err)
+      return
+    end
+
+    local lines = {
+      'Session files:',
+      '  Session: ' .. session_label(target.session_id, target.session and target.session.summary),
+    }
+    if not files or vim.tbl_isempty(files) then
+      lines[#lines + 1] = '  No checkpoint snapshot files recorded.'
+      append_entry('system', table.concat(lines, '\n'))
+      return
+    end
+
+    local max_items = 200
+    lines[#lines + 1] = '  Files: ' .. tostring(#files)
+    for idx = 1, math.min(#files, max_items) do
+      lines[#lines + 1] = '  - ' .. files[idx]
+    end
+    if #files > max_items then
+      lines[#lines + 1] = string.format('  … %d more files', #files - max_items)
+    end
+    append_entry('system', table.concat(lines, '\n'))
+  end)
+  return true
+end
+
+local function session_cleanup_command(args)
+  if vim.trim(args or '') ~= '' then
+    append_entry('error', 'Usage: /session cleanup')
+    return true
+  end
+
+  local removed, errors = checkpoints.prune_deleted()
+  local lines = {
+    'Session cleanup:',
+    string.format('  Pruned %d deleted checkpoint repo(s)', removed),
+  }
+  for _, message in ipairs(errors or {}) do
+    lines[#lines + 1] = '  - ' .. message
+  end
+  append_entry('system', table.concat(lines, '\n'))
+  return true
+end
+
+local function parse_session_prune_args(args)
+  local tokens = vim.split(vim.trim(args or ''), '%s+', { trimempty = true })
+  local parsed = {
+    dry_run = false,
+    include_named = false,
+    older_than_days = nil,
+  }
+
+  local idx = 1
+  while idx <= #tokens do
+    local token = tokens[idx]
+    if token == '--dry-run' then
+      parsed.dry_run = true
+    elseif token == '--include-named' then
+      parsed.include_named = true
+    elseif token == '--older-than' then
+      idx = idx + 1
+      local value = tonumber(tokens[idx] or '')
+      if not value or value < 0 then
+        return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+      end
+      parsed.older_than_days = value
+    else
+      local inline = token:match('^%-%-older%-than=(.+)$')
+      if inline then
+        local value = tonumber(inline)
+        if not value or value < 0 then
+          return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+        end
+        parsed.older_than_days = value
+      else
+        return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+      end
+    end
+    idx = idx + 1
+  end
+
+  if parsed.older_than_days == nil then
+    return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+  end
+  return parsed, nil
+end
+
+local function append_session_prune_report(title, opts, candidates, skipped, failures)
+  local lines = {
+    title,
+    string.format('  Older than: %d day(s)', opts.older_than_days),
+    '  Include named: ' .. (opts.include_named and 'yes' or 'no'),
+    '  Candidates: ' .. tostring(#candidates),
+  }
+
+  if skipped.live > 0 then
+    lines[#lines + 1] = '  Skipped live sessions: ' .. tostring(skipped.live)
+  end
+  if skipped.active > 0 then
+    lines[#lines + 1] = '  Skipped active sessions: ' .. tostring(skipped.active)
+  end
+  if skipped.named > 0 then
+    lines[#lines + 1] = '  Skipped named sessions: ' .. tostring(skipped.named)
+  end
+  if skipped.untimed > 0 then
+    lines[#lines + 1] = '  Skipped untimed sessions: ' .. tostring(skipped.untimed)
+  end
+
+  if vim.tbl_isempty(candidates) then
+    lines[#lines + 1] = '  No sessions matched.'
+  else
+    for _, candidate in ipairs(candidates) do
+      local line = '  - ' .. candidate.label
+      if candidate.timestamp then
+        line = line .. '  ' .. candidate.timestamp
+      end
+      if candidate.named then
+        line = line .. '  [named]'
+      end
+      lines[#lines + 1] = line
+    end
+  end
+
+  for _, failure in ipairs(failures or {}) do
+    lines[#lines + 1] = '  ! ' .. failure.label .. ' — ' .. failure.error
+  end
+
+  append_entry('system', table.concat(lines, '\n'))
+end
+
+local function session_prune_command(args)
+  local parsed, parse_err = parse_session_prune_args(args)
+  if parse_err then
+    append_entry('error', parse_err)
+    return true
+  end
+
+  fetch_session_catalog(function(sessions, err)
+    if err then
+      append_entry('error', 'Failed to list sessions: ' .. err)
+      return
+    end
+
+    local cutoff = os.time() - math.floor(parsed.older_than_days * 24 * 60 * 60)
+    local candidates = {}
+    local skipped = {
+      live = 0,
+      active = 0,
+      named = 0,
+      untimed = 0,
+    }
+
+    for _, item in ipairs(sessions) do
+      if item.live then
+        skipped.live = skipped.live + 1
+      elseif state.session_id and item.sessionId == state.session_id then
+        skipped.active = skipped.active + 1
+      else
+        local timestamp_text = first_non_empty_string(item.modifiedTime, item.startTime, item.createdAt)
+        local timestamp_unix = parse_session_timestamp(timestamp_text)
+        local named = type(session_names.get(item.sessionId)) == 'string' and session_names.get(item.sessionId) ~= ''
+        if named and not parsed.include_named then
+          skipped.named = skipped.named + 1
+        elseif not timestamp_unix then
+          skipped.untimed = skipped.untimed + 1
+        elseif timestamp_unix <= cutoff then
+          candidates[#candidates + 1] = {
+            id = item.sessionId,
+            label = session_label(item.sessionId, item.summary),
+            timestamp = timestamp_text,
+            named = named,
+            session = item,
+          }
+        end
+      end
+    end
+
+    if parsed.dry_run then
+      append_session_prune_report('Session prune preview:', parsed, candidates, skipped, {})
+      return
+    end
+    if vim.tbl_isempty(candidates) then
+      append_session_prune_report('Session prune:', parsed, candidates, skipped, {})
+      return
+    end
+
+    local failures = {}
+    local deleted = {}
+    local function prune_next(index)
+      if index > #candidates then
+        append_session_prune_report('Session prune:', parsed, deleted, skipped, failures)
+        return
+      end
+
+      local candidate = candidates[index]
+      session.delete_session_by_id(candidate.id, candidate.session, function(delete_err)
+        if delete_err then
+          failures[#failures + 1] = {
+            label = candidate.label,
+            error = delete_err,
+          }
+        else
+          deleted[#deleted + 1] = candidate
+        end
+        prune_next(index + 1)
+      end)
+    end
+
+    prune_next(1)
+  end)
+  return true
+end
+
+local function session_delete_command(args)
+  args = vim.trim(args or '')
+  if args == '' then
+    session.delete_session()
+    return true
+  end
+
+  fetch_session_catalog(function(sessions, err)
+    local picked = nil
+    if not err then
+      picked = find_session_record(sessions, args)
+    end
+    local session_id = picked and picked.sessionId or args
+    session.delete_session_by_id(session_id, picked, function(delete_err)
+      if delete_err then
+        local message = 'Failed to delete session ' .. utils.format_session_id(session_id) .. ': ' .. delete_err
+        append_entry('error', message)
+        notify(message, vim.log.levels.ERROR)
+      end
+    end)
+  end)
+  return true
+end
+
 local function session_command(args)
-  local action = vim.trim(args or '')
+  local action, rest = vim.trim(args or ''):match('^(%S+)%s*(.*)$')
+  action = action and action:lower() or ''
+  rest = rest or ''
+
   if action == '' then
     session.switch_session()
     return true
@@ -453,7 +1047,31 @@ local function session_command(args)
     session.clear_and_new_session()
     return true
   end
-  session.switch_to_session_id(action)
+  if action == 'info' then
+    return session_info_command(rest)
+  end
+  if action == 'checkpoints' then
+    return session_checkpoints_command(rest)
+  end
+  if action == 'files' then
+    return session_files_command(rest)
+  end
+  if action == 'plan' then
+    return plan_mode_command(rest)
+  end
+  if action == 'rename' then
+    return rename_session(rest)
+  end
+  if action == 'cleanup' then
+    return session_cleanup_command(rest)
+  end
+  if action == 'prune' then
+    return session_prune_command(rest)
+  end
+  if action == 'delete' then
+    return session_delete_command(rest)
+  end
+  session.switch_to_session_id(vim.trim(args or ''))
   return true
 end
 
@@ -489,7 +1107,7 @@ local function set_input_mode(mode)
   append_entry('system', 'Mode: ' .. next_mode)
 end
 
-local function plan_mode_command(args)
+plan_mode_command = function(args)
   set_input_mode('plan')
   args = vim.trim(args or '')
   if args ~= '' then

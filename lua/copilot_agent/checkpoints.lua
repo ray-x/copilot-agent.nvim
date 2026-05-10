@@ -478,6 +478,86 @@ function M.list(session_id)
   return load_index(session_id).checkpoints
 end
 
+function M.session_info(session_id)
+  if type(session_id) ~= 'string' or session_id == '' then
+    return nil
+  end
+  if vim.fn.isdirectory(session_dir(session_id)) ~= 1 and vim.fn.filereadable(index_path(session_id)) ~= 1 then
+    return nil
+  end
+
+  local index = load_index(session_id)
+  return {
+    session_id = session_id,
+    checkpoint_count = #(index.checkpoints or {}),
+    deleted_at = index.deleted_at,
+    purge_after = index.purge_after,
+    purge_after_unix = index.purge_after_unix,
+    deleted_session_name = index.deleted_session_name,
+    deleted_working_directory = index.deleted_working_directory,
+  }
+end
+
+function M.list_details(session_id)
+  if type(session_id) ~= 'string' or session_id == '' then
+    return {}, nil
+  end
+
+  local index = load_index(session_id)
+  local details = {}
+  for _, item in ipairs(index.checkpoints or {}) do
+    details[#details + 1] = checkpoint_restore_item(session_id, item)
+      or {
+        id = item.id,
+        commit = item.commit,
+        prompt = item.prompt,
+        prompt_summary = prompt_summary(item.prompt),
+        assistant_summary = nil,
+        created_at = item.created_at,
+      }
+  end
+
+  return details,
+    {
+      session_id = session_id,
+      checkpoint_count = #details,
+      deleted_at = index.deleted_at,
+      purge_after = index.purge_after,
+      purge_after_unix = index.purge_after_unix,
+      deleted_session_name = index.deleted_session_name,
+      deleted_working_directory = index.deleted_working_directory,
+    }
+end
+
+function M.list_files(session_id)
+  if type(session_id) ~= 'string' or session_id == '' then
+    return nil, 'session_id is required'
+  end
+  if type(vim.system) ~= 'function' then
+    return nil, 'vim.system is required for checkpoint file listing'
+  end
+  if vim.fn.isdirectory(git_dir(session_id)) ~= 1 then
+    return {}, nil
+  end
+
+  local verify = vim.system({ 'git', '--git-dir=' .. git_dir(session_id), 'rev-parse', '--verify', 'HEAD' }, { text = true }):wait()
+  if verify.code ~= 0 then
+    return {}, nil
+  end
+
+  local listed = vim.system({ 'git', '--git-dir=' .. git_dir(session_id), 'ls-tree', '-r', '--name-only', 'HEAD' }, { text = true }):wait()
+  if listed.code ~= 0 then
+    local message = vim.trim((listed.stderr or '') ~= '' and listed.stderr or (listed.stdout or ''))
+    return nil, message ~= '' and message or ('git ls-tree failed for ' .. session_id)
+  end
+
+  local files = {}
+  for _, path in ipairs(vim.split(vim.trim(listed.stdout or ''), '\n', { trimempty = true })) do
+    files[#files + 1] = path
+  end
+  return files, nil
+end
+
 function M.soft_delete_session(session_id, opts, callback)
   callback = callback or function() end
   if type(session_id) ~= 'string' or session_id == '' then

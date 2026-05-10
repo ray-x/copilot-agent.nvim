@@ -5057,6 +5057,267 @@ describe('share command', function()
   end)
 end)
 
+describe('session slash command', function()
+  local agent
+  local slash
+  local http
+  local session
+  local checkpoints
+  local session_names
+  local original_request
+  local original_delete_session_by_id
+  local original_session_info
+  local original_list_details
+  local original_list_files
+  local original_session_name_get
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.http'] = nil
+    package.loaded['copilot_agent.session'] = nil
+    package.loaded['copilot_agent.checkpoints'] = nil
+    package.loaded['copilot_agent.session_names'] = nil
+
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    http = require('copilot_agent.http')
+    session = require('copilot_agent.session')
+    checkpoints = require('copilot_agent.checkpoints')
+    session_names = require('copilot_agent.session_names')
+
+    original_request = http.request
+    original_delete_session_by_id = session.delete_session_by_id
+    original_session_info = checkpoints.session_info
+    original_list_details = checkpoints.list_details
+    original_list_files = checkpoints.list_files
+    original_session_name_get = session_names.get
+  end)
+
+  after_each(function()
+    http.request = original_request
+    session.delete_session_by_id = original_delete_session_by_id
+    checkpoints.session_info = original_session_info
+    checkpoints.list_details = original_list_details
+    checkpoints.list_files = original_list_files
+    session_names.get = original_session_name_get
+  end)
+
+  it('shows session info for the active session', function()
+    agent.state.session_id = 'active-session'
+    agent.state.session_working_directory = '/tmp/project'
+
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions/active-session', path)
+      callback({
+        sessionId = 'active-session',
+        summary = 'Current session',
+        workingDirectory = '/tmp/project',
+        workspacePath = '/tmp/project',
+        model = 'gpt-5.4',
+        agentMode = 'plan',
+        permissionMode = 'interactive',
+        live = true,
+        instructionCount = 2,
+        agentCount = 1,
+        skillCount = 3,
+        mcpCount = 4,
+      }, nil)
+    end
+    checkpoints.session_info = function(session_id)
+      assert_eq('active-session', session_id)
+      return {
+        session_id = session_id,
+        checkpoint_count = 2,
+      }
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session info'))
+
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session info:', 1, true) ~= nil)
+    assert_true(content:find('Label: Current session [active-session]', 1, true) ~= nil)
+    assert_true(content:find('Model: gpt%-5%.4') ~= nil)
+    assert_true(content:find('Checkpoints: 2', 1, true) ~= nil)
+  end)
+
+  it('shows checkpoint summaries for the active session', function()
+    agent.state.session_id = 'active-session'
+    checkpoints.list_details = function(session_id)
+      assert_eq('active-session', session_id)
+      return {
+        {
+          id = 'v001',
+          prompt_summary = 'initial prompt',
+          assistant_summary = 'first reply',
+          created_at = '2026-05-01T00:00:00Z',
+        },
+      }, {
+        session_id = session_id,
+        checkpoint_count = 1,
+      }
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session checkpoints'))
+
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session checkpoints:', 1, true) ~= nil)
+    assert_true(content:find('v001', 1, true) ~= nil)
+    assert_true(content:find('prompt: initial prompt', 1, true) ~= nil)
+    assert_true(content:find('reply: first reply', 1, true) ~= nil)
+  end)
+
+  it('shows snapshot files for the active session', function()
+    agent.state.session_id = 'active-session'
+    checkpoints.list_files = function(session_id)
+      assert_eq('active-session', session_id)
+      return {
+        'README.md',
+        'lua/copilot_agent/slash.lua',
+      }, nil
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session files'))
+
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session files:', 1, true) ~= nil)
+    assert_true(content:find('README.md', 1, true) ~= nil)
+    assert_true(content:find('lua/copilot_agent/slash.lua', 1, true) ~= nil)
+  end)
+
+  it('deletes a named target session through the session slash subcommand', function()
+    local deleted
+
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions', path)
+      callback({
+        persisted = {
+          {
+            sessionId = 'delete-me',
+            summary = 'Delete me',
+            workingDirectory = '/tmp/delete-me',
+          },
+        },
+      }, nil)
+    end
+    session.delete_session_by_id = function(session_id, session_record, callback)
+      deleted = {
+        session_id = session_id,
+        session_record = session_record,
+      }
+      callback(nil)
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session delete delete-me'))
+
+    assert_eq('delete-me', deleted.session_id)
+    assert_eq('Delete me', deleted.session_record.summary)
+  end)
+
+  it('previews session prune candidates while skipping named and live sessions by default', function()
+    local now = os.time()
+    local old_timestamp = os.date('!%Y-%m-%dT%H:%M:%SZ', now - 45 * 24 * 60 * 60)
+    local recent_timestamp = os.date('!%Y-%m-%dT%H:%M:%SZ', now - 5 * 24 * 60 * 60)
+
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions', path)
+      callback({
+        persisted = {
+          {
+            sessionId = 'old-session',
+            summary = 'Old session',
+            modifiedTime = old_timestamp,
+          },
+          {
+            sessionId = 'named-session',
+            summary = 'Named session',
+            modifiedTime = old_timestamp,
+          },
+          {
+            sessionId = 'recent-session',
+            summary = 'Recent session',
+            modifiedTime = recent_timestamp,
+          },
+        },
+        live = {
+          {
+            sessionId = 'live-session',
+            summary = 'Live session',
+            modifiedTime = old_timestamp,
+            live = true,
+          },
+        },
+      }, nil)
+    end
+    session_names.get = function(session_id)
+      if session_id == 'named-session' then
+        return 'Important session'
+      end
+      return nil
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session prune --older-than 30 --dry-run'))
+
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session prune preview:', 1, true) ~= nil)
+    assert_true(content:find('Candidates: 1', 1, true) ~= nil)
+    assert_true(content:find('Old session %[old%-session%]') ~= nil)
+    assert_true(content:find('Skipped named sessions: 1', 1, true) ~= nil)
+    assert_true(content:find('Skipped live sessions: 1', 1, true) ~= nil)
+    assert_true(content:find('named-session', 1, true) == nil)
+  end)
+
+  it('prunes matching saved sessions when dry-run is omitted', function()
+    local now = os.time()
+    local old_timestamp = os.date('!%Y-%m-%dT%H:%M:%SZ', now - 45 * 24 * 60 * 60)
+    local deleted = {}
+
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions', path)
+      callback({
+        persisted = {
+          {
+            sessionId = 'old-session',
+            summary = 'Old session',
+            modifiedTime = old_timestamp,
+          },
+        },
+      }, nil)
+    end
+    session.delete_session_by_id = function(session_id, session_record, callback)
+      deleted[#deleted + 1] = {
+        session_id = session_id,
+        summary = session_record.summary,
+      }
+      callback(nil)
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session prune --older-than 30'))
+
+    assert_eq(1, #deleted)
+    assert_eq('old-session', deleted[1].session_id)
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session prune:', 1, true) ~= nil)
+    assert_true(content:find('Old session %[old%-session%]') ~= nil)
+  end)
+end)
+
 describe('lsp slash command', function()
   local agent
   local slash
@@ -6950,7 +7211,7 @@ describe('chat input behavior', function()
     assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
   end)
 
-  it('registers insert-mode Ctrl-W and Ctrl-U keymaps in the input buffer', function()
+  it('registers insert-mode prompt-boundary keymaps in the input buffer', function()
     agent.open_chat()
     input.open_input_window()
 
@@ -6958,6 +7219,7 @@ describe('chat input behavior', function()
     local has_ctrl_w = false
     local has_ctrl_u = false
     local has_backspace = false
+    local has_ctrl_h = false
     for _, map in ipairs(insert_maps) do
       if map.lhs == '<C-W>' then
         has_ctrl_w = true
@@ -6965,10 +7227,13 @@ describe('chat input behavior', function()
         has_ctrl_u = true
       elseif map.lhs == '<BS>' then
         has_backspace = true
+      elseif map.lhs == '<C-H>' or map.lhs == '<C-h>' then
+        has_ctrl_h = true
       end
     end
 
     assert_true(has_backspace)
+    assert_true(has_ctrl_h)
     assert_true(has_ctrl_w)
     assert_true(has_ctrl_u)
   end)
@@ -7026,6 +7291,58 @@ describe('chat input behavior', function()
     assert_true(type(backspace_map.callback) == 'function')
     assert_eq('', backspace_map.callback())
     assert_eq(prefix, vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1])
+    assert_eq(#prefix, vim.api.nvim_win_get_cursor(winid)[2])
+  end)
+
+  it('does not let Ctrl-H move the cursor into the prompt prefix', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local bufnr = agent.state.input_bufnr
+    local winid = agent.state.input_winid
+    local prefix = input._input_prompt_prefix(bufnr)
+    vim.api.nvim_set_current_win(winid)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { prefix })
+    vim.api.nvim_win_set_cursor(winid, { 1, #prefix })
+
+    local ctrl_h_map = vim.fn.maparg('<C-h>', 'i', false, true)
+    assert_true(type(ctrl_h_map.callback) == 'function')
+    assert_eq('', ctrl_h_map.callback())
+    assert_eq(prefix, vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1])
+    assert_eq(#prefix, vim.api.nvim_win_get_cursor(winid)[2])
+  end)
+
+  it('restores the prompt prefix if text changes delete into it', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local bufnr = agent.state.input_bufnr
+    local winid = agent.state.input_winid
+    local prefix = input._input_prompt_prefix(bufnr)
+    vim.api.nvim_set_current_win(winid)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { prefix:sub(1, #prefix - 1) })
+    vim.api.nvim_win_set_cursor(winid, { 1, #prefix - 1 })
+
+    vim.api.nvim_exec_autocmds('TextChangedI', { buffer = bufnr })
+
+    local restored_prefix = input._input_prompt_prefix(bufnr)
+    assert_eq(restored_prefix, vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1])
+    assert_eq(#restored_prefix, vim.api.nvim_win_get_cursor(winid)[2])
+  end)
+
+  it('clamps cursor movement to the end of the prompt prefix in insert mode', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local bufnr = agent.state.input_bufnr
+    local winid = agent.state.input_winid
+    local prefix = input._input_prompt_prefix(bufnr)
+    vim.api.nvim_set_current_win(winid)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { prefix })
+    vim.api.nvim_win_set_cursor(winid, { 1, math.max(0, #prefix - 1) })
+
+    vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
     assert_eq(#prefix, vim.api.nvim_win_get_cursor(winid)[2])
   end)
 
@@ -9679,6 +9996,9 @@ describe('chat input behavior', function()
     local lsp_words = completion_words('/lsp ')
     local resume_words = completion_words('/resume ')
     local session_words = completion_words('/session ')
+    local session_info_words = completion_words('/session info ')
+    local session_delete_words = completion_words('/session delete ')
+    local session_prune_words = completion_words('/session prune ')
     local mcp_root_words = completion_words('/mcp')
     local mcp_words = completion_words('/mcp ')
     local mcp_show_words = completion_words('/mcp show ')
@@ -9698,8 +10018,21 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(lsp_words, '/lsp test'))
     assert_true(vim.tbl_contains(resume_words, '/resume session-123'))
     assert_true(vim.tbl_contains(resume_words, '/resume live-456'))
-    assert_true(vim.tbl_contains(session_words, '/session session-123'))
-    assert_true(vim.tbl_contains(session_words, '/session live-456'))
+    assert_true(vim.tbl_contains(session_words, '/session info'))
+    assert_true(vim.tbl_contains(session_words, '/session checkpoints'))
+    assert_true(vim.tbl_contains(session_words, '/session files'))
+    assert_true(vim.tbl_contains(session_words, '/session plan'))
+    assert_true(vim.tbl_contains(session_words, '/session rename'))
+    assert_true(vim.tbl_contains(session_words, '/session cleanup'))
+    assert_true(vim.tbl_contains(session_words, '/session prune'))
+    assert_true(vim.tbl_contains(session_words, '/session delete'))
+    assert_true(vim.tbl_contains(session_info_words, '/session info session-123'))
+    assert_true(vim.tbl_contains(session_info_words, '/session info live-456'))
+    assert_true(vim.tbl_contains(session_delete_words, '/session delete session-123'))
+    assert_true(vim.tbl_contains(session_delete_words, '/session delete live-456'))
+    assert_true(vim.tbl_contains(session_prune_words, '/session prune --older-than'))
+    assert_true(vim.tbl_contains(session_prune_words, '/session prune --dry-run'))
+    assert_true(vim.tbl_contains(session_prune_words, '/session prune --include-named'))
     assert_true(vim.tbl_contains(mcp_root_words, '/mcp'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp add'))
     assert_true(vim.tbl_contains(mcp_words, '/mcp'))
@@ -9761,7 +10094,7 @@ describe('chat input behavior', function()
 
   it('shows full command paths in completion abbr for slash commands', function()
     ensure_dev_input_module()
-    http.sync_request = function(method, path)
+    http.sync_request = function(_, path)
       if path == '/models' then
         return { models = { { id = 'test-model', name = 'Test Model' } } }, nil, 200
       end

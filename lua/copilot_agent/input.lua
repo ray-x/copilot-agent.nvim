@@ -30,7 +30,7 @@ local M = {}
 
 local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
 local session_label_max_len = 32
-local is_list = vim.islist or vim.tbl_islist
+local islist = vim.islist
 local separator_ns = vim.api.nvim_create_namespace('copilot_agent_input_separator')
 local attachment_completion_max_items = 80
 local completion_runtime = {}
@@ -59,6 +59,22 @@ local mcp_name_action_lookup = {
   delete = true,
   disable = true,
   enable = true,
+}
+local session_action_items = {
+  'info',
+  'checkpoints',
+  'files',
+  'plan',
+  'rename',
+  'cleanup',
+  'prune',
+  'delete',
+}
+local session_target_action_lookup = {
+  info = true,
+  checkpoints = true,
+  files = true,
+  delete = true,
 }
 
 local function conversation_separator_text(width)
@@ -267,7 +283,9 @@ local function clamp_input_cursor_to_prompt(bufnr, winid)
   local prefix = input_prompt_prefix(bufnr)
   local line = vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] or ''
   if prefix ~= '' and not vim.startswith(line, prefix) then
-    line = prefix .. line
+    local leading_spaces = #(line:match('^ *') or '')
+    local missing = math.max(0, #prefix - leading_spaces)
+    line = string.rep(' ', missing) .. line
     vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { line })
   end
   vim.api.nvim_win_set_cursor(winid, { row, math.min(math.max(col, #prefix), #line) })
@@ -1123,7 +1141,7 @@ local function discovered_mcp_names()
 
   local function add_from_value(value)
     if type(value) == 'table' then
-      if is_list(value) then
+      if islist(value) then
         for _, entry in ipairs(value) do
           if type(entry) == 'string' then
             add(entry)
@@ -1301,7 +1319,7 @@ local function slash_command_completion_items(completion_request)
     return items
   end
 
-  if command == 'resume' or command == 'session' then
+  if command == 'resume' then
     local query = (completion_request.query or ''):lower()
     for _, session in ipairs(discovered_session_items()) do
       if query == '' or vim.startswith(session.id:lower(), query) or vim.startswith(session.summary, query) then
@@ -1310,6 +1328,85 @@ local function slash_command_completion_items(completion_request)
           abbr = '/' .. command .. ' ' .. session.label,
           menu = '[session]',
         }
+      end
+    end
+    return items
+  end
+
+  if command == 'session' then
+    local raw_query = completion_request.raw_query or completion_request.query or ''
+    local query = vim.trim(raw_query)
+    local tokens = query == '' and {} or vim.split(query, '%s+', { trimempty = true })
+    local has_trailing_space = type(raw_query) == 'string' and raw_query:match('%s$') ~= nil
+    local action = (#tokens > 0 and tokens[1]:lower()) or ''
+
+    if session_target_action_lookup[action] and (#tokens > 1 or has_trailing_space) then
+      local target_query = ''
+      if #tokens > 1 and not has_trailing_space then
+        target_query = tokens[#tokens]:lower()
+      end
+      for _, session in ipairs(discovered_session_items()) do
+        if target_query == '' or vim.startswith(session.id:lower(), target_query) or vim.startswith(session.summary, target_query) then
+          local full_word = '/session ' .. action .. ' ' .. session.id
+          items[#items + 1] = {
+            word = full_word,
+            abbr = '/session ' .. action .. ' ' .. session.label,
+            menu = '[session]',
+          }
+        end
+      end
+      return items
+    end
+
+    if action == 'prune' then
+      local flag_items = {
+        '--older-than',
+        '--dry-run',
+        '--include-named',
+      }
+      local used_flags = {}
+      for idx = 2, #tokens do
+        local token = tokens[idx]
+        local key = token:match('^(%-%-[%w%-]+)=') or token
+        used_flags[key] = true
+      end
+      local flag_query = ''
+      if #tokens > 1 and not has_trailing_space then
+        flag_query = tokens[#tokens]:lower()
+      end
+      for _, flag in ipairs(flag_items) do
+        if not used_flags[flag] and (flag_query == '' or vim.startswith(flag, flag_query)) then
+          items[#items + 1] = {
+            word = '/session prune ' .. flag,
+            abbr = '/session prune ' .. flag,
+            menu = '[session]',
+          }
+        end
+      end
+      return items
+    end
+
+    local action_query = action
+    for _, item in ipairs(session_action_items) do
+      if action_query == '' or vim.startswith(item, action_query) then
+        items[#items + 1] = {
+          word = '/session ' .. item,
+          abbr = '/session ' .. item,
+          menu = '[session]',
+        }
+      end
+    end
+
+    if query ~= '' and not vim.tbl_contains(session_action_items, action) then
+      local target_query = action:lower()
+      for _, session in ipairs(discovered_session_items()) do
+        if target_query == '' or vim.startswith(session.id:lower(), target_query) or vim.startswith(session.summary, target_query) then
+          items[#items + 1] = {
+            word = '/session ' .. session.id,
+            abbr = '/session ' .. session.label,
+            menu = '[session]',
+          }
+        end
       end
     end
     return items
@@ -1788,7 +1885,7 @@ local function configured_promote_keymaps()
   if type(keymap) == 'string' then
     return { keymap }
   end
-  if type(keymap) == 'table' and is_list(keymap) then
+  if type(keymap) == 'table' and islist(keymap) then
     return keymap
   end
   cfg.notify('compose.promote_keymap must be a string, list, or false', vim.log.levels.WARN)
@@ -2039,6 +2136,20 @@ local function create_input_buffer()
     refresh_statuslines()
   end
 
+  local protecting_prompt_boundary = false
+  local function protect_prompt_boundary()
+    if protecting_prompt_boundary then
+      return
+    end
+    local winid = state.input_winid
+    if not (winid and vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr) then
+      return
+    end
+    protecting_prompt_boundary = true
+    clamp_input_cursor_to_prompt(bufnr, winid)
+    protecting_prompt_boundary = false
+  end
+
   local cleaning_prompt_padding = false
   local function sanitize_multiline_prompt_padding()
     if cleaning_prompt_padding or not vim.api.nvim_buf_is_valid(bufnr) then
@@ -2138,13 +2249,15 @@ local function create_input_buffer()
   vim.keymap.set('n', 'q', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('n', '<Esc>', cancel_existing_input_window, { buffer = bufnr, silent = true, desc = 'Cancel prompt' })
   vim.keymap.set('i', '<Esc>', '<Esc>', { buffer = bufnr, silent = true, desc = 'Switch to normal mode' })
-  vim.keymap.set('i', '<BS>', input_backspace_or_ignore, {
-    buffer = bufnr,
-    expr = true,
-    replace_keycodes = false,
-    silent = true,
-    desc = 'Delete previous character without crossing the prompt prefix',
-  })
+  for _, lhs in ipairs({ '<BS>', '<C-h>' }) do
+    vim.keymap.set('i', lhs, input_backspace_or_ignore, {
+      buffer = bufnr,
+      expr = true,
+      replace_keycodes = false,
+      silent = true,
+      desc = 'Delete previous character without crossing the prompt prefix',
+    })
+  end
   vim.keymap.set('i', '<C-w>', delete_input_previous_word, { buffer = bufnr, silent = true, desc = 'Delete previous input word (keep prompt prefix)' })
   vim.keymap.set('i', '<C-u>', delete_input_to_prompt_start, { buffer = bufnr, silent = true, desc = 'Delete input to prompt start' })
   -- <C-t> in input also refreshes the prompt prefix and returns to insert mode.
@@ -2210,9 +2323,15 @@ local function create_input_buffer()
   vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChanged' }, {
     buffer = bufnr,
     callback = function()
+      protect_prompt_boundary()
       sanitize_multiline_prompt_padding()
+      protect_prompt_boundary()
       update_prompt_wave()
     end,
+  })
+  vim.api.nvim_create_autocmd({ 'CursorMovedI', 'InsertEnter' }, {
+    buffer = bufnr,
+    callback = protect_prompt_boundary,
   })
 
   setup_completion_keymaps(bufnr)

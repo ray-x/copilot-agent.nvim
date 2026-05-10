@@ -1361,7 +1361,8 @@ local function activity_preview_priority(line)
   return 2
 end
 
-local function collapsed_activity_line(content)
+local function collapsed_activity_line(entry)
+  local content = type(entry) == 'table' and entry.content or entry
   local lines = normalize_content_lines(split_lines(sanitize_display_text(content)))
   local count = 0
   local preview_source
@@ -1377,6 +1378,17 @@ local function collapsed_activity_line(content)
         preview_source = line
       end
     end
+  end
+
+  local item_count = 0
+  if type(entry) == 'table' then
+    local items = type(entry.activity_items) == 'table' and entry.activity_items or nil
+    if items then
+      item_count = #items
+    end
+  end
+  if item_count > 0 then
+    count = item_count
   end
 
   if count <= 0 then
@@ -1644,7 +1656,7 @@ function M.entry_lines(entry, _idx, align)
   local content = sanitize_display_text(entry.content or '')
   if entry.kind == 'activity' then
     if not activity_entries_visible() then
-      out[#out + 1] = collapsed_activity_line(content)
+      out[#out + 1] = collapsed_activity_line(entry)
     else
       out[#out + 1] = 'Activity:'
       for _, l in ipairs(normalize_content_lines(split_lines(content))) do
@@ -2349,6 +2361,10 @@ end
 function M.reset_frozen_render()
   state._frozen_entry_count = 0
   state._frozen_line_count = 0
+end
+
+function M.invalidate_frozen_render_from(_idx)
+  M.reset_frozen_render()
 end
 
 -- Snapshot the current buffer as the frozen watermark.  Called when the user

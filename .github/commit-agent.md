@@ -19,6 +19,7 @@ Edit the commands and guidance below to match your workflow.
 - add a body for non-obvious rationale, follow-up work, or notable tradeoffs
 - when the message has a body, format it with a blank line after the subject and real newline characters; never include literal `\n` sequences
 - prefer a short bullet list for bodies that summarize multiple independent changes
+- do not add `Co-authored-by` trailers to commit messages
 - when the user asks to commit, apply the generated message with a non-interactive `git commit`
 - preserve multiline commit messages with `git commit -F <file>` / `git commit --amend -F <file>` rather than shell-escaped newline text
 

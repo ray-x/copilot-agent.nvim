@@ -33,6 +33,7 @@ local session_label_max_len = 32
 local is_list = vim.islist or vim.tbl_islist
 local separator_ns = vim.api.nvim_create_namespace('copilot_agent_input_separator')
 local attachment_completion_max_items = 80
+local completion_runtime = {}
 local attachment_fd_cache = {
   cwd = nil,
   entries = nil,
@@ -118,14 +119,46 @@ local function replace_termcodes(keys)
   return vim.api.nvim_replace_termcodes(keys, true, false, true)
 end
 
-local function select_visible_completion()
+local completed_line_for_word
+local set_completion_suppression
+
+local function selected_completion_item(info)
+  info = type(info) == 'table' and info or completion_popup_info()
+  if type(info.items) ~= 'table' or vim.tbl_isempty(info.items) then
+    return nil, nil
+  end
+
+  local selected = tonumber(info.selected) or -1
+  local item_index = selected >= 0 and (selected + 1) or 1
+  local item = info.items[item_index] or info.items[1]
+  if type(item) ~= 'table' then
+    return nil, nil
+  end
+
+  local word = item.word or item.abbr
+  if type(word) ~= 'string' or word == '' then
+    return nil, nil
+  end
+  return item, word
+end
+
+local function select_visible_completion(opts)
+  opts = opts or {}
   local info = completion_popup_info()
-  if info.pum_visible ~= 1 then
+  local item, word = selected_completion_item(info)
+  if not item or not word then
     return false
   end
 
   local selected = tonumber(info.selected) or -1
   local item_index = selected >= 0 and selected or 0
+  local bufnr = opts.bufnr or vim.api.nvim_get_current_buf()
+  local line = opts.line or vim.api.nvim_get_current_line()
+  local cursor_col = opts.cursor_col
+  if cursor_col == nil then
+    cursor_col = vim.api.nvim_win_get_cursor(0)[2]
+  end
+  set_completion_suppression(bufnr, completed_line_for_word(line, cursor_col, word), #(completed_line_for_word(line, cursor_col, word)))
 
   if item_index >= 0 and type(vim.api.nvim_select_popupmenu_item) == 'function' then
     local ok = pcall(vim.api.nvim_select_popupmenu_item, item_index, true, true, {})
@@ -161,6 +194,47 @@ local function strip_prompt_prefix_from_text_lines(lines, prompt_prefix_text)
     end
   end
   return normalized, changed
+end
+
+local function input_prompt_prefix(bufnr)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return ''
+  end
+  local prefix = vim.b[bufnr].copilot_prompt_placeholder
+  return type(prefix) == 'string' and prefix or ''
+end
+
+local function set_input_prompt_prefix(bufnr, prompt_prefix_text)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return
+  end
+
+  local previous = input_prompt_prefix(bufnr)
+  prompt_prefix_text = type(prompt_prefix_text) == 'string' and prompt_prefix_text or ''
+  vim.b[bufnr].copilot_prompt_placeholder = prompt_prefix_text
+
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local normalized = strip_prompt_prefix_from_text_lines(lines, previous)
+  if vim.tbl_isempty(normalized) then
+    normalized = { '' }
+  end
+  normalized[1] = prompt_prefix_text .. (normalized[1] or '')
+
+  local cursor
+  local winid = state.input_winid
+  if winid and vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == bufnr then
+    cursor = vim.api.nvim_win_get_cursor(winid)
+  end
+
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized)
+  if cursor and state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+    local row = math.min(cursor[1], #normalized)
+    local col = cursor[2]
+    if row == 1 then
+      col = math.max(0, col - #previous + #prompt_prefix_text)
+    end
+    vim.api.nvim_win_set_cursor(state.input_winid, { row, math.min(col, #(normalized[row] or '')) })
+  end
 end
 
 local function confirm_completion_or_submit()
@@ -413,6 +487,27 @@ local function input_completion_context(before)
   end
 
   return nil
+end
+
+completed_line_for_word = function(line, cursor_col, word)
+  line = type(line) == 'string' and line or ''
+  cursor_col = math.max(0, math.floor(tonumber(cursor_col) or #line))
+  local completion_request = input_completion_context(line:sub(1, cursor_col))
+  if not completion_request then
+    return line
+  end
+  return line:sub(1, completion_request.start - 1) .. word .. line:sub(cursor_col + 1)
+end
+
+set_completion_suppression = function(bufnr, line, cursor_col)
+  local runtime = completion_runtime[bufnr]
+  if type(runtime) ~= 'table' then
+    return
+  end
+
+  local completion_request = input_completion_context((line or ''):sub(1, math.max(0, math.floor(tonumber(cursor_col) or 0))))
+  runtime.suppressed_line = line
+  runtime.suppressed_auto_key = completion_request and completion_request.auto_key or nil
 end
 
 local function normalize_attachment_path(path)
@@ -1317,9 +1412,11 @@ local function setup_completion_keymaps(bufnr)
   vim.api.nvim_buf_set_option(bufnr, 'completefunc', "v:lua.require'copilot_agent'.input_completefunc")
   publish_input_completefunc()
 
-  local active_completion_key
-  local last_auto_completion_key
-  local auto_completion_scheduled = false
+  local runtime = completion_runtime[bufnr] or {}
+  completion_runtime[bufnr] = runtime
+  runtime.active_completion_key = nil
+  runtime.last_auto_completion_key = nil
+  runtime.auto_completion_scheduled = false
 
   local function trigger_completion(opts)
     opts = opts or {}
@@ -1336,37 +1433,46 @@ local function setup_completion_keymaps(bufnr)
     local items = input_completefunc(0, completion_request.token or '')
     if not items or vim.tbl_isempty(items) then
       if opts.auto then
-        active_completion_key = nil
+        runtime.active_completion_key = nil
       end
       return false
     end
 
-    active_completion_key = completion_request.popup_key
+    runtime.active_completion_key = completion_request.popup_key
     vim.fn.complete(start_col + 1, items)
     return true
   end
+  runtime.trigger_completion = trigger_completion
 
   local function maybe_auto_trigger_completion()
     local completion_request = current_completion_request()
     local popup = completion_popup_info()
     local key = completion_request and completion_request.auto_key or nil
+    local line = vim.api.nvim_get_current_line()
+    if runtime.suppressed_line and runtime.suppressed_line ~= line then
+      runtime.suppressed_line = nil
+      runtime.suppressed_auto_key = nil
+    end
     if not key then
-      last_auto_completion_key = nil
+      runtime.last_auto_completion_key = nil
       if popup.pum_visible ~= 1 then
-        active_completion_key = nil
+        runtime.active_completion_key = nil
       end
       return
     end
-    if auto_completion_scheduled then
+    if runtime.suppressed_line == line and runtime.suppressed_auto_key == key then
       return
     end
-    if key == last_auto_completion_key and popup.pum_visible == 1 and active_completion_key == completion_request.popup_key then
+    if runtime.auto_completion_scheduled then
+      return
+    end
+    if key == runtime.last_auto_completion_key and popup.pum_visible == 1 and runtime.active_completion_key == completion_request.popup_key then
       return
     end
 
-    auto_completion_scheduled = true
+    runtime.auto_completion_scheduled = true
     vim.schedule(function()
-      auto_completion_scheduled = false
+      runtime.auto_completion_scheduled = false
       if not vim.api.nvim_buf_is_valid(bufnr) then
         return
       end
@@ -1379,7 +1485,7 @@ local function setup_completion_keymaps(bufnr)
         return
       end
       if trigger_completion({ auto = true }) then
-        last_auto_completion_key = key
+        runtime.last_auto_completion_key = key
       end
     end)
   end
@@ -1441,7 +1547,7 @@ local function get_existing_input_text()
   end
 
   local lines = vim.api.nvim_buf_get_lines(state.input_bufnr, 0, -1, false)
-  local prompt_prefix_text = vim.fn.prompt_getprompt(state.input_bufnr)
+  local prompt_prefix_text = input_prompt_prefix(state.input_bufnr)
   local text = table.concat(lines, '\n')
   if prompt_prefix_text ~= '' and vim.startswith(text, prompt_prefix_text) then
     text = text:sub(#prompt_prefix_text + 1)
@@ -1775,7 +1881,7 @@ local function active_input_cursor_context()
   local cursor = vim.api.nvim_win_get_cursor(winid)
   local row, col = cursor[1], cursor[2]
   local line = vim.api.nvim_buf_get_lines(bufnr, row - 1, row, false)[1] or ''
-  local prompt_col = row == 1 and #vim.fn.prompt_getprompt(bufnr) or 0
+  local prompt_col = row == 1 and #input_prompt_prefix(bufnr) or 0
 
   return {
     bufnr = bufnr,
@@ -1840,17 +1946,17 @@ local _mode_icon = {
 local function create_input_buffer()
   local bufnr = find_named_buffer('copilot-agent-input') or vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(bufnr, 'copilot-agent-input')
-  vim.bo[bufnr].buftype = 'prompt'
+  vim.bo[bufnr].buftype = 'nofile'
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].bufhidden = 'hide'
   vim.bo[bufnr].filetype = 'markdown'
-  -- copilot.lua skips prompt buffers by default; this explicit flag overrides it.
+  -- Keep copilot.lua enabled for the dedicated chat input buffer.
   vim.b[bufnr].copilot_enabled = true
 
   local function get_input_text()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local prompt_prefix_text = vim.fn.prompt_getprompt(bufnr)
+    local prompt_prefix_text = input_prompt_prefix(bufnr)
     local normalized = strip_prompt_prefix_from_text_lines(lines, prompt_prefix_text)
     return table.concat(normalized, '\n')
   end
@@ -1860,7 +1966,7 @@ local function create_input_buffer()
     local icon = _mode_icon[mode] or ''
     local typed_count = vim.fn.strchars(get_input_text())
     local _, segments, placeholder = prompt.build(icon, mode, typed_count)
-    vim.fn.prompt_setprompt(bufnr, placeholder)
+    set_input_prompt_prefix(bufnr, placeholder)
     prompt.apply(bufnr, segments)
     refresh_statuslines()
   end
@@ -1876,7 +1982,7 @@ local function create_input_buffer()
       return
     end
 
-    local prompt_prefix_text = vim.fn.prompt_getprompt(bufnr)
+    local prompt_prefix_text = input_prompt_prefix(bufnr)
     if type(prompt_prefix_text) ~= 'string' or prompt_prefix_text == '' then
       return
     end
@@ -1916,7 +2022,7 @@ local function create_input_buffer()
   end
 
   local function set_input_text(text)
-    local prefix = vim.fn.prompt_getprompt(bufnr)
+    local prefix = input_prompt_prefix(bufnr)
     local lines = split_lines((prefix or '') .. (text or ''))
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
     if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
@@ -1936,20 +2042,24 @@ local function create_input_buffer()
     submit_message_text(text)
   end
 
-  vim.fn.prompt_setcallback(bufnr, function(text)
-    submit(text or '')
-  end)
-
   local function submit_buffer()
     submit(vim.trim(get_input_text()))
+  end
+
+  local function confirm_completion_or_submit_input()
+    if select_visible_completion({ bufnr = bufnr }) then
+      return ''
+    end
+    submit_buffer()
+    return ''
   end
 
   -- Apply all shared action keymaps, then override the ones that differ in input context.
   setup_action_keymaps(bufnr)
 
-  -- <C-s> submits in prompt mode; <CR> submits via prompt_setcallback().
+  -- <C-s> submits directly; <CR> first accepts completion, otherwise submits.
   vim.keymap.set({ 'n', 'i' }, '<C-s>', submit_buffer, { buffer = bufnr, silent = true, desc = 'Submit prompt to Copilot' })
-  vim.keymap.set('i', '<CR>', confirm_completion_or_submit, {
+  vim.keymap.set('i', '<CR>', confirm_completion_or_submit_input, {
     buffer = bufnr,
     expr = true,
     replace_keycodes = false,
@@ -2100,7 +2210,7 @@ function M.open_input_window()
   vim.cmd('startinsert')
   apply_prefill()
 
-  -- copilot.lua's default should_attach rejects buftype='prompt' and buflisted=false.
+  -- copilot.lua's default should_attach rejects unlisted scratch buffers.
   -- Force-attach the LSP client directly so virtual-text suggestions work.
   vim.schedule(function()
     if not vim.api.nvim_buf_is_valid(state.input_bufnr) then
@@ -2319,6 +2429,7 @@ M._delete_input_previous_word = delete_input_previous_word
 M._delete_input_to_prompt_start = delete_input_to_prompt_start
 M._has_completion_trigger_space = has_completion_trigger_space
 M._input_completion_context = input_completion_context
+M._input_prompt_prefix = input_prompt_prefix
 M._strip_prompt_prefix_from_text_lines = strip_prompt_prefix_from_text_lines
 
 return M

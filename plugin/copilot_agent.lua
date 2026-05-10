@@ -128,3 +128,13 @@ end, { desc = 'Re-show the last dismissed ask_user prompt' })
 vim.api.nvim_create_user_command('CopilotAgentDiff', function()
   copilot_agent.review_diff()
 end, { desc = 'Pick two checkpoints and open vimdiff for a changed file between them' })
+
+vim.api.nvim_create_user_command('CopilotAgentFugitiveCommit', function(command)
+  copilot_agent.fugitive_commit(vim.trim(table.concat(command.fargs, ' ')))
+end, {
+  nargs = '?',
+  complete = function()
+    return { 'last' }
+  end,
+  desc = 'Generate a commit message and open fugitive commit, or reuse the last assistant reply with "last"',
+})

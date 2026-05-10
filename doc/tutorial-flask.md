@@ -87,7 +87,7 @@ In agent mode, Copilot can create files, run shell commands, and iterate on fixe
 
 ## Step 5 - Getting help
 
-Press ? in the chat buffer, you will see a help menu of all key bindings and slash commands and session commands
+Press `g?` in the chat buffer to open the help menu with key bindings, slash commands, and session commands.
 
 ---
 

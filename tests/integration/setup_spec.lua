@@ -762,6 +762,7 @@ describe('user commands', function()
     'CopilotAgentStop',
     'CopilotAgentStatus',
     'CopilotAgentLsp',
+    'CopilotAgentFugitiveCommit',
   }
 
   for _, cmd in ipairs(expected_commands) do
@@ -769,6 +770,103 @@ describe('user commands', function()
       assert_true(command_exists(cmd), cmd .. ' should exist')
     end)
   end
+end)
+
+describe('fugitive commit command', function()
+  local agent
+  local commit
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.commit'] = nil
+    package.loaded['copilot_agent.http'] = nil
+
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, auto_start = false, notify = false })
+    commit = require('copilot_agent.commit')
+  end)
+
+  it('reuses the last assistant message when called with last', function()
+    local opened
+
+    commit._resolve_repo_root = function()
+      return '/tmp/repo'
+    end
+    commit._open_fugitive_commit = function(repo_root, message)
+      opened = { repo_root = repo_root, message = message }
+      return true
+    end
+
+    agent.state.entries = {
+      {
+        kind = 'assistant',
+        content = '```text\nfeat: add fugitive commit command\n\nRestore the missing command.\n```',
+      },
+    }
+
+    commit.fugitive_commit('last')
+
+    assert.same({
+      repo_root = '/tmp/repo',
+      message = 'feat: add fugitive commit command\n\nRestore the missing command.',
+    }, opened)
+  end)
+
+  it('generates a commit message before opening fugitive', function()
+    local opened
+
+    commit._resolve_repo_root = function()
+      return '/tmp/repo'
+    end
+    commit._request_generated_commit_message = function(repo_root, callback)
+      assert_eq('/tmp/repo', repo_root)
+      callback('feat: prefill fugitive commit', nil)
+    end
+    commit._open_fugitive_commit = function(repo_root, message)
+      opened = { repo_root = repo_root, message = message }
+      return true
+    end
+
+    commit.fugitive_commit()
+
+    assert.same({
+      repo_root = '/tmp/repo',
+      message = 'feat: prefill fugitive commit',
+    }, opened)
+  end)
+
+  it('writes the prepared message into COMMIT_EDITMSG before opening fugitive', function()
+    local temp_root = vim.fn.tempname()
+    local message_path = temp_root .. '/COMMIT_EDITMSG'
+    local original_exists = vim.fn.exists
+    local original_cmd = vim.cmd
+    local captured_cmd
+
+    vim.fn.mkdir(temp_root, 'p')
+    commit._commit_message_path = function()
+      return message_path
+    end
+    vim.fn.exists = function(name)
+      if name == ':Git' then
+        return 2
+      end
+      return original_exists(name)
+    end
+    vim.cmd = function(command_text)
+      captured_cmd = command_text
+    end
+
+    local ok, err = commit._open_fugitive_commit('/tmp/repo', 'feat: seed commit buffer\n\nBody line')
+
+    vim.fn.exists = original_exists
+    vim.cmd = original_cmd
+
+    assert_true(ok)
+    assert_eq(nil, err)
+    assert_true(captured_cmd:find('Git -C ', 1, true) ~= nil)
+    assert_true(captured_cmd:find('commit --edit', 1, true) ~= nil)
+    assert.same({ 'feat: seed commit buffer', '', 'Body line' }, vim.fn.readfile(message_path))
+  end)
 end)
 
 describe('dashboard', function()
@@ -3476,6 +3574,7 @@ describe('workspace file reload', function()
   local events
   local original_notify
   local original_confirm
+  local original_eventignore
   local notifications
   local temp_file
   local temp_file_two
@@ -3488,6 +3587,8 @@ describe('workspace file reload', function()
     events = require('copilot_agent.events')
     original_notify = vim.notify
     original_confirm = vim.fn.confirm
+    original_eventignore = vim.o.eventignore
+    vim.o.eventignore = 'BufEnter,FileType'
     notifications = {}
     vim.notify = function(message, level)
       notifications[#notifications + 1] = { message = message, level = level }
@@ -3500,9 +3601,29 @@ describe('workspace file reload', function()
     agent.state.config.chat.diff_review = false
   end)
 
+  local function open_file(path)
+    vim.cmd('noautocmd edit ' .. vim.fn.fnameescape(path))
+    local bufnr = vim.api.nvim_get_current_buf()
+    events.remember_buffer_disk_state(bufnr)
+    return bufnr
+  end
+
+  local function open_split(path)
+    vim.cmd('noautocmd vsplit ' .. vim.fn.fnameescape(path))
+    local bufnr = vim.api.nvim_get_current_buf()
+    events.remember_buffer_disk_state(bufnr)
+    return bufnr
+  end
+
+  local function focus_buffer(bufnr)
+    vim.cmd('noautocmd buffer ' .. bufnr)
+    events.remember_buffer_disk_state(bufnr)
+  end
+
   after_each(function()
     vim.notify = original_notify
     vim.fn.confirm = original_confirm
+    vim.o.eventignore = original_eventignore
     for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
       if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == temp_file then
         pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
@@ -3518,8 +3639,7 @@ describe('workspace file reload', function()
   end)
 
   it('prompts before reloading a modified buffer updated by the plugin', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr = vim.api.nvim_get_current_buf()
+    local bufnr = open_file(temp_file)
     local confirm_message
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'local value = 99', 'return value' })
     vim.bo[bufnr].modified = true
@@ -3546,11 +3666,9 @@ describe('workspace file reload', function()
   end)
 
   it('checks all loaded file buffers on focus changes and reloads hidden ones', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr_one = vim.api.nvim_get_current_buf()
-    vim.cmd('vsplit ' .. vim.fn.fnameescape(temp_file_two))
-    local bufnr_two = vim.api.nvim_get_current_buf()
-    vim.cmd('buffer ' .. bufnr_one)
+    local bufnr_one = open_file(temp_file)
+    local bufnr_two = open_split(temp_file_two)
+    focus_buffer(bufnr_one)
 
     vim.fn.writefile({ 'local other = 2', 'print(other)', 'return other' }, temp_file_two)
     vim.api.nvim_exec_autocmds('FocusGained', {})
@@ -3562,8 +3680,7 @@ describe('workspace file reload', function()
   end)
 
   it('reloads clean visible buffers during sweeps with edit instead of checktime', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr = vim.api.nvim_get_current_buf()
+    local bufnr = open_file(temp_file)
     local original_cmd = vim.cmd
     local checktime_called = false
     local edit_called = false
@@ -3598,8 +3715,7 @@ describe('workspace file reload', function()
   end)
 
   it('does not force overwrite a modified visible buffer during sweeps', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr = vim.api.nvim_get_current_buf()
+    local bufnr = open_file(temp_file)
     local original_cmd = vim.cmd
     local confirm_message
     local edit_called = false
@@ -3645,8 +3761,7 @@ describe('workspace file reload', function()
   end)
 
   it('checks open file buffers when the turn completes', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr = vim.api.nvim_get_current_buf()
+    local bufnr = open_file(temp_file)
 
     vim.fn.writefile({ 'local value = 4', 'print(value)', 'return value' }, temp_file)
     events.handle_session_event({
@@ -3661,8 +3776,7 @@ describe('workspace file reload', function()
   end)
 
   it('checks open file buffers when a background task completes', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr = vim.api.nvim_get_current_buf()
+    local bufnr = open_file(temp_file)
 
     vim.fn.writefile({ 'local value = 5', 'print(value)', 'return value' }, temp_file)
     events.handle_session_event({
@@ -3682,11 +3796,9 @@ describe('workspace file reload', function()
   end)
 
   it('checks all open clean file buffers when the turn completes', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
-    local bufnr_one = vim.api.nvim_get_current_buf()
-    vim.cmd('vsplit ' .. vim.fn.fnameescape(temp_file_two))
-    local bufnr_two = vim.api.nvim_get_current_buf()
-    vim.cmd('buffer ' .. bufnr_one)
+    local bufnr_one = open_file(temp_file)
+    local bufnr_two = open_split(temp_file_two)
+    focus_buffer(bufnr_one)
 
     vim.fn.writefile({ 'local value = 6', 'print(value)', 'return value' }, temp_file)
     vim.fn.writefile({ 'local other = 6', 'print(other)', 'return other' }, temp_file_two)
@@ -3705,8 +3817,7 @@ describe('workspace file reload', function()
   end)
 
   it('prompts before reloading externally changed buffers with unsaved edits during focus checks', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file_two))
-    local bufnr = vim.api.nvim_get_current_buf()
+    local bufnr = open_file(temp_file_two)
     local confirm_message
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'local other = 99', 'return other' })
     vim.bo[bufnr].modified = true
@@ -5180,7 +5291,7 @@ describe('workspace file opening avoids chat windows', function()
   end
 
   it('reuses the left workspace split instead of replacing the chat window', function()
-    vim.cmd('edit ' .. vim.fn.fnameescape(temp_file))
+    vim.cmd('noautocmd edit ' .. vim.fn.fnameescape(temp_file))
     local file_winid = vim.api.nvim_get_current_win()
     local chat_bufnr = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(chat_bufnr, 'CopilotAgentChat')
@@ -5250,9 +5361,13 @@ describe('mcp slash command', function()
   local original_resume_session
 
   before_each(function()
+    package.loaded['copilot_agent.config'] = nil
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.slash'] = nil
     package.loaded['copilot_agent.session'] = nil
+    package.loaded['copilot_agent.service'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    package.loaded['copilot_agent.statusline'] = nil
     agent = require('copilot_agent')
     temp_workspace = vim.fn.tempname()
     root_mcp = temp_workspace .. '/.mcp.json'
@@ -5287,6 +5402,7 @@ describe('mcp slash command', function()
 
   it('supports show, add, disable, enable, delete, and edit actions', function()
     assert_true(slash.execute('/mcp show'))
+    vim.wait(20)
     local show_message = agent.state.entries[#agent.state.entries].content
     assert_true(show_message:find('local', 1, true) ~= nil)
     assert_true(show_message:find('browser', 1, true) ~= nil)
@@ -5334,6 +5450,7 @@ describe('mcp slash command', function()
     end
 
     assert_true(slash.execute('/mcp reload'))
+    vim.wait(20)
     assert_eq('disconnect', calls[1].kind)
     assert_eq('session-123', calls[1].session_id)
     assert_eq(false, calls[1].delete_state)
@@ -5346,6 +5463,7 @@ describe('mcp slash command', function()
     agent.state.session_id = nil
     agent.state.creating_session = false
     assert_true(slash.execute('/mcp reload'))
+    vim.wait(20)
     assert_true(agent.state.entries[#agent.state.entries].content:find('No active session', 1, true) ~= nil)
   end)
 end)
@@ -6008,6 +6126,9 @@ describe('session picker labels', function()
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.chat'] = nil
+    package.loaded['copilot_agent.input'] = nil
+    package.loaded['copilot_agent.window'] = nil
     package.loaded['copilot_agent.session'] = nil
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false })
@@ -6385,6 +6506,9 @@ describe('checkpoint retention', function()
   before_each(function()
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.checkpoints'] = nil
+    package.loaded['copilot_agent.service'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    package.loaded['copilot_agent.statusline'] = nil
     original_stdpath = vim.fn.stdpath
     temp_state = vim.fn.tempname()
     temp_workspace = vim.fn.tempname()
@@ -6515,12 +6639,21 @@ describe('chat session activation', function()
   local session
 
   before_each(function()
+    package.loaded['copilot_agent.config'] = nil
     package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.chat'] = nil
     package.loaded['copilot_agent.session'] = nil
+    package.loaded['copilot_agent.service'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    package.loaded['copilot_agent.statusline'] = nil
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false })
     agent.state.session_id = nil
     agent.state.session_name = nil
+    agent.state.creating_session = false
+    agent.state.open_input_on_session_ready = false
+    agent.state.pending_session_callbacks = {}
+    pcall(vim.cmd, 'silent! bwipeout CopilotAgentChat')
     session = require('copilot_agent.session')
   end)
 
@@ -6551,6 +6684,9 @@ describe('chat session activation', function()
 
     agent.state.config.auto_create_session = true
     agent.open_chat()
+    agent.state.session_id = nil
+    agent.state.creating_session = false
+    agent.state.pending_session_callbacks = {}
     agent.ask()
 
     session.with_session = original_with_session
@@ -6794,7 +6930,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. 'draft message' })
 
     vim.ui.select = function(items, opts, on_choice)
@@ -6869,7 +7005,7 @@ describe('chat input behavior', function()
 
     local bufnr = agent.state.input_bufnr
     local winid = agent.state.input_winid
-    local prefix = vim.fn.prompt_getprompt(bufnr)
+    local prefix = input._input_prompt_prefix(bufnr)
     vim.api.nvim_set_current_win(winid)
 
     local sentence = prefix .. 'alpha beta gamma'
@@ -6897,7 +7033,7 @@ describe('chat input behavior', function()
 
     local bufnr = agent.state.input_bufnr
     local winid = agent.state.input_winid
-    local prefix = vim.fn.prompt_getprompt(bufnr)
+    local prefix = input._input_prompt_prefix(bufnr)
     vim.api.nvim_set_current_win(winid)
 
     local line = prefix .. 'alpha beta'
@@ -6986,7 +7122,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prompt = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prompt = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prompt .. 'move this into compose' })
 
     input._promote_input_to_compose()
@@ -6996,7 +7132,7 @@ describe('chat input behavior', function()
     assert_eq(agent.state.compose_winid, vim.api.nvim_get_current_win())
 
     input.open_input_window()
-    local restored_prompt = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local restored_prompt = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.wait(100, function()
       local line = vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1] or ''
       return line ~= '' and line ~= restored_prompt
@@ -7035,7 +7171,7 @@ describe('chat input behavior', function()
     vim.g.loaded_copilot_agent_plugin = 0
     dofile(plugin_root .. '/plugin/copilot_agent.lua')
 
-    local prompt = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prompt = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prompt .. 'promote by command' })
     vim.cmd('CopilotAgentPromoteToCompose')
 
@@ -9386,7 +9522,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { prefix .. 'draft message' })
 
     local stale_chat_win = agent.state.chat_winid
@@ -9463,7 +9599,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_set_current_win(agent.state.input_winid)
 
     local function completion_words(command_text, cursor_col)
@@ -9538,7 +9674,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_set_current_win(agent.state.input_winid)
 
     local function get_auto_key(command_text)
@@ -9576,7 +9712,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_set_current_win(agent.state.input_winid)
 
     local function completion_items(command_text)
@@ -9663,12 +9799,120 @@ describe('chat input behavior', function()
     assert_eq(1, enter_map.expr)
   end)
 
+  it('uses the input-buffer Enter mapping to accept slash completion', function()
+    ensure_dev_input_module()
+    local original_complete_info = vim.fn.complete_info
+    local original_pumvisible = vim.fn.pumvisible
+    local original_select_popupmenu_item = vim.api.nvim_select_popupmenu_item
+    local selected_call
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
+    local line = prefix .. '/share'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    vim.fn.complete_info = function()
+      return {
+        mode = 'eval',
+        pum_visible = 1,
+        selected = -1,
+        items = { { word = '/share' } },
+      }
+    end
+    vim.fn.pumvisible = function()
+      return 1
+    end
+    vim.api.nvim_select_popupmenu_item = function(idx, insert, finish, opts)
+      selected_call = {
+        idx = idx,
+        insert = insert,
+        finish = finish,
+        opts = opts,
+      }
+    end
+
+    local enter_map = vim.fn.maparg('<CR>', 'i', false, true)
+    assert_true(type(enter_map.callback) == 'function')
+    local result = enter_map.callback()
+
+    vim.fn.complete_info = original_complete_info
+    vim.fn.pumvisible = original_pumvisible
+    vim.api.nvim_select_popupmenu_item = original_select_popupmenu_item
+
+    assert_eq('', result)
+    assert.same({
+      idx = 0,
+      insert = true,
+      finish = true,
+      opts = {},
+    }, selected_call)
+    assert_eq(line, vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1])
+  end)
+
+  it('uses the input-buffer Tab mapping to accept slash completion', function()
+    ensure_dev_input_module()
+    local original_complete_info = vim.fn.complete_info
+    local original_pumvisible = vim.fn.pumvisible
+    local original_select_popupmenu_item = vim.api.nvim_select_popupmenu_item
+    local selected_call
+
+    agent.open_chat()
+    input.open_input_window()
+
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
+    local line = prefix .. '/share'
+    vim.api.nvim_set_current_win(agent.state.input_winid)
+    vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+    vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+
+    vim.fn.complete_info = function()
+      return {
+        mode = 'eval',
+        pum_visible = 1,
+        selected = -1,
+        items = { { word = '/share' } },
+      }
+    end
+    vim.fn.pumvisible = function()
+      return 1
+    end
+    vim.api.nvim_select_popupmenu_item = function(idx, insert, finish, opts)
+      selected_call = {
+        idx = idx,
+        insert = insert,
+        finish = finish,
+        opts = opts,
+      }
+    end
+
+    local tab_map = vim.fn.maparg('<Tab>', 'i', false, true)
+    assert_true(type(tab_map.callback) == 'function')
+    local result = tab_map.callback()
+
+    vim.fn.complete_info = original_complete_info
+    vim.fn.pumvisible = original_pumvisible
+    vim.api.nvim_select_popupmenu_item = original_select_popupmenu_item
+
+    assert_eq('', result)
+    assert.same({
+      idx = 0,
+      insert = true,
+      finish = true,
+      opts = {},
+    }, selected_call)
+    assert_eq(line, vim.api.nvim_buf_get_lines(agent.state.input_bufnr, 0, 1, false)[1])
+  end)
+
   it('removes prompt placeholder padding from continuation lines', function()
     ensure_dev_input_module()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.cmd('startinsert!')
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, {
@@ -9741,7 +9985,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     local line = prefix .. '@lua/cop'
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
@@ -9769,7 +10013,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     local line = prefix .. '@init'
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
@@ -9795,7 +10039,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     local line = prefix .. '@"my fi'
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
@@ -9824,7 +10068,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     local line = prefix .. '@init'
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
@@ -9858,7 +10102,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.cmd('startinsert!')
     vim.fn.mode = function()
@@ -9897,7 +10141,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     local line = prefix .. '@lua/'
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
@@ -9940,7 +10184,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.cmd('startinsert!')
     vim.fn.mode = function()
@@ -9991,7 +10235,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     local line = prefix .. '/agent Git'
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
@@ -10026,7 +10270,7 @@ describe('chat input behavior', function()
     agent.open_chat()
     input.open_input_window()
 
-    local prefix = vim.fn.prompt_getprompt(agent.state.input_bufnr)
+    local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
     local line = prefix .. '/mcp bro'
     vim.api.nvim_set_current_win(agent.state.input_winid)
     vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })

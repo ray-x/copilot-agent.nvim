@@ -1091,17 +1091,13 @@ local function diff_command(args)
     return true, nil
   end
 
-  local function configure_native_diff_buffer(bufnr, name, lines, filename)
+  local function configure_native_diff_buffer(bufnr, name, lines)
     vim.bo[bufnr].buftype = 'nofile'
     vim.bo[bufnr].bufhidden = 'wipe'
     vim.bo[bufnr].swapfile = false
     vim.bo[bufnr].modifiable = true
     vim.api.nvim_buf_set_name(bufnr, name)
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-    local ft = vim.filetype.match({ filename = filename }) or ''
-    if ft ~= '' then
-      vim.bo[bufnr].filetype = ft
-    end
     vim.bo[bufnr].modifiable = false
     vim.bo[bufnr].readonly = true
   end
@@ -1110,14 +1106,14 @@ local function diff_command(args)
     vim.cmd('tabnew')
     local from_win = vim.api.nvim_get_current_win()
     local from_buf = vim.api.nvim_get_current_buf()
-    configure_native_diff_buffer(from_buf, string.format('%s (%s)', path, from_commit_label), from_lines, path)
+    configure_native_diff_buffer(from_buf, string.format('%s (%s)', path, from_commit_label), from_lines)
     window.disable_folds(from_win)
     vim.cmd('diffthis')
 
     vim.cmd('vnew')
     local to_win = vim.api.nvim_get_current_win()
     local to_buf = vim.api.nvim_get_current_buf()
-    configure_native_diff_buffer(to_buf, string.format('%s (%s)', path, to_commit_label), to_lines, path)
+    configure_native_diff_buffer(to_buf, string.format('%s (%s)', path, to_commit_label), to_lines)
     window.disable_folds(to_win)
     vim.cmd('diffthis')
   end

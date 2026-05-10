@@ -99,7 +99,7 @@ local function help_lines()
     '    [[ / ]]         Jump to prev/next conversation',
     '    [a / ]a         Jump to prev/next Assistant/Activity',
     '    R               Refresh/re-render',
-    '    ?               This help',
+    '    g?              This help',
     '',
     '  Press any key to close',
   }
@@ -133,6 +133,18 @@ function M.find_chat_window()
   end
 
   state.chat_winid = nil
+  return nil
+end
+
+local function find_chat_buffer_by_name(buf_name)
+  if type(buf_name) ~= 'string' or buf_name == '' then
+    return nil
+  end
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == buf_name then
+      return bufnr
+    end
+  end
   return nil
 end
 
@@ -420,6 +432,27 @@ function M.ensure_chat_window(opts)
     end
     -- Buffer exists but window was closed — reopen it.
     open_chat_win(state.chat_bufnr, opts)
+    reset_frozen_render()
+    render_chat()
+    refresh_chat_statusline()
+    if not follow_active_conversation(false) then
+      scroll_to_bottom()
+    end
+    state._chat_was_open = true
+    return state.chat_bufnr
+  end
+
+  local existing_bufnr = find_chat_buffer_by_name(buf_name)
+  if existing_bufnr then
+    state.chat_bufnr = existing_bufnr
+    local chat_winid = M.find_chat_window()
+    if chat_winid then
+      attach_chat_markdown(chat_winid)
+      vim.api.nvim_set_current_win(chat_winid)
+      state._chat_was_open = true
+      return state.chat_bufnr
+    end
+    open_chat_win(existing_bufnr, opts)
     reset_frozen_render()
     render_chat()
     refresh_chat_statusline()
@@ -878,8 +911,8 @@ function M.setup_action_keymaps(bufnr)
     end)
   end, { buffer = bufnr, silent = true, desc = 'Configure session tools' })
 
-  -- Help popup (? in normal mode).
-  vim.keymap.set('n', '?', function()
+  -- Help popup (g? in normal mode).
+  vim.keymap.set('n', 'g?', function()
     local lines = help_lines()
     local max_w = 0
     for _, l in ipairs(lines) do
@@ -905,7 +938,7 @@ function M.setup_action_keymaps(bufnr)
     })
     win.disable_folds(help_win)
     vim.wo[help_win].cursorline = false
-    for _, key in ipairs({ '<Space>', '<CR>', '<Esc>', 'q', '?' }) do
+    for _, key in ipairs({ '<Space>', '<CR>', '<Esc>', 'q', 'g?' }) do
       vim.keymap.set('n', key, function()
         vim.api.nvim_win_close(help_win, true)
       end, { buffer = help_buf, silent = true, nowait = true })

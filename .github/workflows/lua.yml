@@ -7,15 +7,15 @@ on:
   push:
     branches: [master]
     paths:
-      - 'lua/**'
-      - 'tests/**'
-      - '.github/workflows/lua.yml'
+      - "lua/**"
+      - "tests/**"
+      - ".github/workflows/lua.yml"
   pull_request:
     branches: [master]
     paths:
-      - 'lua/**'
-      - 'tests/**'
-      - '.github/workflows/lua.yml'
+      - "lua/**"
+      - "tests/**"
+      - ".github/workflows/lua.yml"
 
 jobs:
   busted:
@@ -41,8 +41,8 @@ jobs:
       matrix:
         nvim:
           - nightly
+          - v0.12.2
           - v0.12.0
-          - v0.11.0
 
     steps:
       - uses: actions/checkout@v4

@@ -366,6 +366,7 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 | `:CopilotAgentStop!`             | Delete the active session; checkpoint cleanup waits 7 days |
 | `:CopilotAgentCancel`            | Cancel the current agent turn                              |
 | `:CopilotAgentDiff`              | Pick two checkpoints and open vimdiff for a changed file   |
+| `:CopilotAgentFugitiveCommit [last]` | Generate a commit message and open fugitive commit; `last` reuses the latest assistant reply |
 | `:CopilotAgentStatus`            | Show service URL, session id, stream status                |
 | `:CopilotAgentLsp`               | Start (or reuse) the LSP client for code actions           |
 | `:CopilotAgentPasteImage`        | Paste clipboard image as attachment                        |
@@ -402,7 +403,7 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `gA` (output)        | Open a floating Activity details viewer for the block under the cursor                            |
 | `[[` / `]]` (output) | Jump to previous/next conversation (`User:` block)                                                |
 | `[a` / `]a` (output) | Jump to previous/next `Assistant:` or `Activity:` block                                           |
-| `?` (normal)         | Show help float with keybindings, session commands, and recovery tips                             |
+| `g?` (normal)        | Show help float with keybindings, session commands, and recovery tips                             |
 
 ### Slash Commands
 

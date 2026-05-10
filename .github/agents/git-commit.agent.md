@@ -78,6 +78,7 @@ Message rules:
 - add a body when the reason or scope is not obvious from the subject alone
 - when a body is present, separate it from the subject with a blank line and use real newline characters, never literal `\n` escape sequences
 - prefer a short markdown-style bullet list in the body when summarizing several distinct changes
+- do not add `Co-authored-by` trailers to commit messages
 - wrap body lines to a readable width instead of emitting one long line
 
 If the user provides a draft message, review it against the staged diff and suggest a better version when it is vague, misleading, too broad, or misclassified.

@@ -1157,16 +1157,17 @@ local function remember_recent_activity_item(item)
   return item, idx
 end
 
-local function find_recent_tool_activity_item(tool_call_id)
+local function find_recent_tool_activity_item(tool_call_id, tool_name)
   local items = type(state.recent_activity_items) == 'table' and state.recent_activity_items or {}
   local tool_calls = type(state.recent_activity_tool_calls) == 'table' and state.recent_activity_tool_calls or {}
   local idx = type(tool_call_id) == 'string' and tool_call_id ~= '' and tool_calls[tool_call_id] or nil
   if type(idx) == 'number' and type(items[idx]) == 'table' then
     return items[idx], idx
   end
+  local normalized_tool_name = sanitize_permission_text(tool_name)
   for i = #items, 1, -1 do
     local item = items[i]
-    if type(item) == 'table' and item.kind == 'tool' then
+    if type(item) == 'table' and item.kind == 'tool' and (normalized_tool_name == nil or item.tool_name == normalized_tool_name) then
       return item, i
     end
   end
@@ -1651,7 +1652,7 @@ local function fallback_tool_activity_summary(tool_name, detail)
 end
 
 local function ensure_recent_tool_activity_item(tool_call_id, tool_name, detail)
-  local item, idx = find_recent_tool_activity_item(tool_call_id)
+  local item, idx = find_recent_tool_activity_item(tool_call_id, tool_name)
   if item then
     return item, idx
   end
@@ -1673,7 +1674,7 @@ local function capture_tool_execution_start(data)
 
   remember_recent_activity_line(summary)
 
-  local item, idx = find_recent_tool_activity_item(tool_call_id)
+  local item, idx = find_recent_tool_activity_item(tool_call_id, data.toolName)
   if not item or (tool_call_id and item.tool_call_id ~= tool_call_id) then
     remember_recent_activity_item({
       kind = 'tool',
@@ -1681,6 +1682,7 @@ local function capture_tool_execution_start(data)
       tool_name = sanitize_permission_text(data.toolName),
       tool_call_id = tool_call_id,
       tool_detail = detail,
+      start_data = vim.deepcopy(data),
       progress_messages = {},
     })
     return
@@ -1691,6 +1693,7 @@ local function capture_tool_execution_start(data)
   item.tool_name = sanitize_permission_text(data.toolName)
   item.tool_call_id = tool_call_id or item.tool_call_id
   item.tool_detail = detail or item.tool_detail
+  item.start_data = vim.deepcopy(data)
   item.progress_messages = item.progress_messages or {}
   if tool_call_id then
     ensure_recent_activity_items()
@@ -1731,6 +1734,7 @@ local function capture_tool_execution_complete(data)
   item.success = data.success == true
   item.error_message = type(data.error) == 'table' and normalize_activity_output_text(data.error.message) or nil
   item.tool_telemetry = type(data.toolTelemetry) == 'table' and data.toolTelemetry or nil
+  item.complete_data = vim.deepcopy(data)
   item.output_text = extract_tool_execution_output_text(data) or item.output_text or item.partial_output
 end
 
@@ -1745,8 +1749,19 @@ function assistant_usage.current_turn_accepts()
 end
 
 function assistant_usage.append_to_last_activity_entry(summary, item)
-  local entry = type(state.entries) == 'table' and state.entries[#state.entries] or nil
-  if type(entry) ~= 'table' or entry.kind ~= 'activity' then
+  if type(state.entries) ~= 'table' then
+    return false
+  end
+
+  local entry = nil
+  for idx = #state.entries, 1, -1 do
+    local candidate = state.entries[idx]
+    if type(candidate) == 'table' and candidate.kind == 'activity' then
+      entry = candidate
+      break
+    end
+  end
+  if type(entry) ~= 'table' then
     return false
   end
 
@@ -1851,7 +1866,7 @@ local function capture_post_tool_use_end(data)
     end
   end
   if not item then
-    item, idx = find_recent_tool_activity_item(hook_state and hook_state.tool_call_id or nil)
+    item, idx = find_recent_tool_activity_item(hook_state and hook_state.tool_call_id or nil, hook_state and hook_state.tool_name or nil)
   end
 
   local start_input = hook_state and hook_state.start_input or nil
@@ -2014,6 +2029,7 @@ end
 local function flush_recent_activity_summary()
   local lines = state.recent_activity_lines or {}
   local items = state.recent_activity_items or {}
+  local preserved_items = items
 
   if #lines == 0 and #items > 0 then
     for _, item in ipairs(items) do
@@ -2023,8 +2039,17 @@ local function flush_recent_activity_summary()
   end
 
   if #lines > 0 then
+    if state.history_loading ~= true then
+      preserved_items = vim.deepcopy(items)
+      for _, item in ipairs(preserved_items) do
+        if type(item) == 'table' then
+          item.start_data = nil
+          item.complete_data = nil
+        end
+      end
+    end
     append_entry('activity', table.concat(lines, '\n'), nil, {
-      activity_items = items,
+      activity_items = preserved_items,
     })
   end
 
@@ -3470,18 +3495,30 @@ local function handle_session_event(payload)
           entry.content = data.content
         end
       else
-        local merged_content = merge_assistant_message_content(entry.content, data.content, {
-          message_id = data.messageId,
-          entry_key = key,
-          entry_index = idx,
-          prefer_incoming_suffix_replacement = entry._assistant_saw_delta == true or had_stream_start,
-        })
-        if has_tool_requests and looks_like_tool_call_scaffolding(merged_content) then
-          clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+        local should_merge_snapshot = state.chat_busy == true or (type(data.content) == 'string' and (data.content:match('^%s*\n') ~= nil or (entry.content or ''):match('\n%s*$') ~= nil))
+
+        if not should_merge_snapshot then
+          entry_content_changed = entry.content ~= data.content
+          entry.content = data.content
+          if has_tool_requests and looks_like_tool_call_scaffolding(entry.content or '') then
+            clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+          else
+            clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+          end
         else
-          entry_content_changed = entry.content ~= merged_content
-          entry.content = merged_content
-          clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+          local merged_content = merge_assistant_message_content(entry.content, data.content, {
+            message_id = data.messageId,
+            entry_key = key,
+            entry_index = idx,
+            prefer_incoming_suffix_replacement = entry._assistant_saw_delta == true or had_stream_start,
+          })
+          if has_tool_requests and looks_like_tool_call_scaffolding(merged_content) then
+            clear_leaked_tool_call_content(entry, idx, key, data.messageId, 'assistant.message')
+          else
+            entry_content_changed = entry.content ~= merged_content
+            entry.content = merged_content
+            clear_reasoning_preview_on_assistant_content(entry.content, 'assistant content started')
+          end
         end
       end
     elseif has_tool_requests and looks_like_tool_call_scaffolding(entry.content or '') then

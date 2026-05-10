@@ -22,6 +22,7 @@ local dashboard = require('copilot_agent.dashboard')
 local input = require('copilot_agent.input')
 local lsp = require('copilot_agent.lsp')
 local prompt = require('copilot_agent.prompt')
+local commit = require('copilot_agent.commit')
 
 -- ── Local aliases ─────────────────────────────────────────────────────────────
 local ensure_service_running = service.ensure_service_running
@@ -227,6 +228,25 @@ function M.open_chat(opts)
     end
   end
 
+  -- Defensive: if the buffer handle was lost but the chat window still exists,
+  -- recover the buffer from that window so callers can keep using it safely.
+  if not state.chat_bufnr or not vim.api.nvim_buf_is_valid(state.chat_bufnr) then
+    local winid = state.chat_winid
+    if not (winid and vim.api.nvim_win_is_valid(winid)) then
+      local ok, found = pcall(chat.find_chat_window)
+      if ok and found then
+        winid = found
+        state.chat_winid = found
+      end
+    end
+    if winid and vim.api.nvim_win_is_valid(winid) then
+      local ok, bufnr = pcall(vim.api.nvim_win_get_buf, winid)
+      if ok and type(bufnr) == 'number' and vim.api.nvim_buf_is_valid(bufnr) then
+        state.chat_bufnr = bufnr
+      end
+    end
+  end
+
   return state.chat_bufnr
 end
 
@@ -315,6 +335,10 @@ end
 
 function M.review_diff()
   events.review_diff()
+end
+
+function M.fugitive_commit(arg)
+  commit.fugitive_commit(arg)
 end
 
 function M.get_reasoning(max_lines)

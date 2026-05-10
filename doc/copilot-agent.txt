@@ -263,7 +263,7 @@ Normal and insert mode (unless noted):
   <C-n> / <M-n>       Next prompt from history
   zA (normal)         Toggle collapsed Activity transcript blocks
   gA (normal)         Open Activity details float for the block under the cursor
-  ? (normal)          Show help with keybindings and session commands
+  g? (normal)         Show help with keybindings and session commands
 
 ------------------------------------------------------------------------------
 6.2 Attachments                                   *copilot-agent-attachments*

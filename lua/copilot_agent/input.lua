@@ -75,16 +75,73 @@ local function find_named_buffer(name)
 end
 
 local function completion_popup_info()
-  local ok, info = pcall(vim.fn.complete_info, { 'mode', 'pum_visible', 'selected' })
+  -- Prefer complete_info when it reports an active completion mode. If complete_info
+  -- reports no active mode (empty string) fall back to vim.fn.pumvisible() which
+  -- is easier to monkey-patch in tests and more consistent across Neovim versions.
+  local ok, info = pcall(vim.fn.complete_info, { 'mode', 'pum_visible', 'selected', 'items' })
   local fallback_visible = vim.fn.pumvisible()
-  if not ok or type(info) ~= 'table' then
-    return { mode = '', pum_visible = fallback_visible, selected = -1 }
+
+  local mode = ''
+  local info_pum = nil
+  local selected = -1
+  local items = {}
+  if ok and type(info) == 'table' then
+    mode = info.mode or ''
+    if info.pum_visible ~= nil then
+      info_pum = tonumber(info.pum_visible)
+    end
+    if info.selected ~= nil then
+      selected = tonumber(info.selected) or -1
+    end
+    if type(info.items) == 'table' then
+      items = info.items
+    end
   end
+
+  local pum_visible = info_pum
+  if pum_visible == nil or mode == '' then
+    pum_visible = fallback_visible
+  end
+  if pum_visible ~= 1 and (selected >= 0 or #items > 0) then
+    pum_visible = 1
+  end
+
   return {
-    mode = info.mode or '',
-    pum_visible = tonumber(info.pum_visible) or fallback_visible,
-    selected = tonumber(info.selected) or -1,
+    mode = mode,
+    pum_visible = pum_visible,
+    selected = selected or -1,
+    items = items,
   }
+end
+
+local function replace_termcodes(keys)
+  return vim.api.nvim_replace_termcodes(keys, true, false, true)
+end
+
+local function select_visible_completion()
+  local info = completion_popup_info()
+  if info.pum_visible ~= 1 then
+    return false
+  end
+
+  local selected = tonumber(info.selected) or -1
+  local item_index = selected >= 0 and selected or 0
+
+  if item_index >= 0 and type(vim.api.nvim_select_popupmenu_item) == 'function' then
+    local ok = pcall(vim.api.nvim_select_popupmenu_item, item_index, true, true, {})
+    if ok then
+      return true
+    end
+  end
+
+  if item_index >= 0 then
+    local keys = selected >= 0 and '<C-y>' or '<C-n><C-y>'
+    vim.api.nvim_feedkeys(replace_termcodes(keys), 'n', false)
+    return true
+  end
+
+  vim.api.nvim_feedkeys(replace_termcodes('<C-e>'), 'n', false)
+  return true
 end
 
 local function strip_prompt_prefix_from_text_lines(lines, prompt_prefix_text)
@@ -107,10 +164,10 @@ local function strip_prompt_prefix_from_text_lines(lines, prompt_prefix_text)
 end
 
 local function confirm_completion_or_submit()
-  if completion_popup_info().pum_visible == 1 then
-    return vim.api.nvim_replace_termcodes('<C-y>', true, false, true)
+  if select_visible_completion() then
+    return ''
   end
-  return vim.api.nvim_replace_termcodes('<CR>', true, false, true)
+  return replace_termcodes('<CR>')
 end
 
 local function refresh_separator()
@@ -1327,7 +1384,21 @@ local function setup_completion_keymaps(bufnr)
     end)
   end
 
-  vim.keymap.set('i', '<Tab>', trigger_completion, { buffer = bufnr, silent = true, desc = 'Trigger completion' })
+  local function confirm_or_trigger_completion()
+    if select_visible_completion() then
+      return ''
+    end
+    trigger_completion()
+    return ''
+  end
+
+  vim.keymap.set('i', '<Tab>', confirm_or_trigger_completion, {
+    buffer = bufnr,
+    expr = true,
+    replace_keycodes = false,
+    silent = true,
+    desc = 'Trigger or accept completion',
+  })
   vim.api.nvim_create_autocmd({ 'TextChangedI', 'CompleteChanged' }, {
     buffer = bufnr,
     callback = maybe_auto_trigger_completion,
@@ -2243,6 +2314,7 @@ M._discovered_session_items = discovered_session_items
 M._attachment_completion_context = attachment_completion_context
 M._extract_inline_attachments = extract_inline_attachments
 M._confirm_completion_or_submit = confirm_completion_or_submit
+M._select_visible_completion = select_visible_completion
 M._delete_input_previous_word = delete_input_previous_word
 M._delete_input_to_prompt_start = delete_input_to_prompt_start
 M._has_completion_trigger_space = has_completion_trigger_space

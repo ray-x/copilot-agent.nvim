@@ -190,21 +190,56 @@ local function quota_display_name(quota_id)
 end
 
 local function statusline_quota()
-  local usage = type(state.last_assistant_usage) == 'table' and state.last_assistant_usage or nil
+  local usage = type(state.last_assistant_usage) == 'table' and state.last_assistant_usage or (type(state.last_assistant_usage_snapshot) == 'table' and state.last_assistant_usage_snapshot or nil)
   local quota = usage and type(usage.primary_quota) == 'table' and usage.primary_quota or nil
   if not quota then
     return ''
   end
 
-  local label = quota_display_name(quota.id)
+  local label = quota_display_name(quota.id) or quota.id or ''
   local remaining = format_usage_percentage(quota.remaining_percentage)
-  if not label and not remaining then
+  local used = (quota.used_requests ~= nil) and tonumber(quota.used_requests) or nil
+  local total = (quota.entitlement_requests ~= nil) and tonumber(quota.entitlement_requests) or nil
+  local used_label
+  -- Only show used/total when total is a positive number to avoid confusing "0/0".
+  if total and total > 0 then
+    used_label = tostring(used or 0) .. '/' .. tostring(total)
+  elseif used and used > 0 then
+    used_label = tostring(used)
+  end
+
+  local parts = {}
+  if label ~= '' then
+    table.insert(parts, label)
+  end
+  if used_label then
+    table.insert(parts, used_label)
+  end
+  if remaining then
+    table.insert(parts, remaining)
+  end
+
+  if #parts == 0 then
     return ''
   end
-  if label and remaining then
-    return '💳' .. label .. ' ' .. remaining
+
+  -- Compute remaining percentage number for warning (handle 0-1 fractions and 0-100 numbers)
+  local rem_num = tonumber(quota.remaining_percentage)
+  local rem_percent
+  if rem_num ~= nil then
+    if rem_num >= 0 and rem_num <= 1 then
+      rem_percent = rem_num * 100
+    else
+      rem_percent = rem_num
+    end
   end
-  return '💳' .. (label or remaining or '')
+
+  local prefix = '💳'
+  if rem_percent ~= nil and rem_percent <= 0 then
+    prefix = '⚠️'
+  end
+
+  return prefix .. table.concat(parts, ' ')
 end
 
 function M.statusline_tool()

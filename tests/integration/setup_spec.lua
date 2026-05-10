@@ -4868,6 +4868,84 @@ describe('diff command', function()
   end)
 end)
 
+describe('share command', function()
+  local agent
+  local slash
+  local render
+  local original_ui_select
+  local original_ui_input
+  local original_entry_lines
+  local export_path
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.slash'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, notify = false })
+    agent.state.entries = {
+      { kind = 'user', content = 'share this session' },
+      { kind = 'assistant', content = 'done' },
+    }
+    slash = require('copilot_agent.slash')
+    render = require('copilot_agent.render')
+    original_ui_select = vim.ui.select
+    original_ui_input = vim.ui.input
+    original_entry_lines = render.entry_lines
+    export_path = vim.fn.tempname() .. '.md'
+  end)
+
+  after_each(function()
+    vim.ui.select = original_ui_select
+    vim.ui.input = original_ui_input
+    render.entry_lines = original_entry_lines
+    pcall(os.remove, export_path)
+  end)
+
+  it('exports markdown through the interactive /share picker flow', function()
+    vim.ui.select = function(items, opts, on_choice)
+      assert_eq('Share session as', opts.prompt)
+      on_choice(items[1], 1)
+    end
+    vim.ui.input = function(opts, on_input)
+      assert_true(opts.default:sub(-3) == '.md')
+      on_input(export_path)
+    end
+
+    assert_true(slash.execute('/share'))
+    vim.wait(100, function()
+      return vim.fn.filereadable(export_path) == 1
+    end)
+
+    assert_eq(1, vim.fn.filereadable(export_path))
+    local lines = vim.fn.readfile(export_path)
+    assert_true(vim.tbl_contains(lines, 'User:'))
+    assert_true(vim.tbl_contains(lines, '  share this session'))
+    assert_true(vim.tbl_contains(lines, 'Assistant:'))
+    assert_true(vim.tbl_contains(lines, '  done'))
+  end)
+
+  it('falls back to raw transcript formatting when render.entry_lines fails during /share', function()
+    render.entry_lines = function()
+      error('boom')
+    end
+    agent.state.entries = {
+      { kind = 'user', content = 'share this session', attachments = { { type = 'file', path = '/tmp/example.lua' } } },
+      { kind = 'assistant', content = 'done' },
+    }
+
+    assert_true(slash.execute('/share markdown ' .. export_path))
+
+    assert_eq(1, vim.fn.filereadable(export_path))
+    local lines = vim.fn.readfile(export_path)
+    assert_true(vim.tbl_contains(lines, 'User:'))
+    assert_true(vim.tbl_contains(lines, '  share this session'))
+    assert_true(vim.tbl_contains(lines, '  📎 /tmp/example.lua'))
+    assert_true(vim.tbl_contains(lines, 'Assistant:'))
+    assert_true(vim.tbl_contains(lines, '  done'))
+  end)
+end)
+
 describe('lsp slash command', function()
   local agent
   local slash
@@ -9181,19 +9259,54 @@ describe('chat input behavior', function()
   end)
 
   it('uses Enter to confirm popup completion before prompt submission', function()
+    local original_complete_info = vim.fn.complete_info
     local original_pumvisible = vim.fn.pumvisible
+    local original_select_popupmenu_item = vim.api.nvim_select_popupmenu_item
+    local selected_call
 
+    vim.fn.complete_info = function()
+      return {
+        mode = 'eval',
+        pum_visible = 1,
+        selected = -1,
+        items = { { word = '/share' } },
+      }
+    end
     vim.fn.pumvisible = function()
       return 1
     end
+    vim.api.nvim_select_popupmenu_item = function(idx, insert, finish, opts)
+      selected_call = {
+        idx = idx,
+        insert = insert,
+        finish = finish,
+        opts = opts,
+      }
+    end
     local confirm_keys = input._confirm_completion_or_submit()
+    vim.fn.complete_info = function()
+      return {
+        mode = '',
+        pum_visible = 0,
+        selected = -1,
+        items = {},
+      }
+    end
     vim.fn.pumvisible = function()
       return 0
     end
     local submit_keys = input._confirm_completion_or_submit()
+    vim.fn.complete_info = original_complete_info
     vim.fn.pumvisible = original_pumvisible
+    vim.api.nvim_select_popupmenu_item = original_select_popupmenu_item
 
-    assert_eq(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), confirm_keys)
+    assert_eq('', confirm_keys)
+    assert.same({
+      idx = 0,
+      insert = true,
+      finish = true,
+      opts = {},
+    }, selected_call)
     assert_eq(vim.api.nvim_replace_termcodes('<CR>', true, false, true), submit_keys)
   end)
 
@@ -9486,6 +9599,68 @@ describe('chat input behavior', function()
     local mcp_item = vim.tbl_filter(function(i) return i.word == '/mcp add' end, mcp_items)[1]
     assert_true(mcp_item ~= nil)
     assert_eq('/mcp add', mcp_item.abbr)
+  end)
+
+  it('treats completion items as a visible popup even when pumvisible falls out of sync', function()
+    ensure_dev_input_module()
+    local original_complete_info = vim.fn.complete_info
+    local original_pumvisible = vim.fn.pumvisible
+    local original_select_popupmenu_item = vim.api.nvim_select_popupmenu_item
+    local selected_call
+
+    vim.fn.complete_info = function()
+      return {
+        mode = '',
+        pum_visible = 0,
+        selected = -1,
+        items = { { word = '/share' } },
+      }
+    end
+    vim.fn.pumvisible = function()
+      return 0
+    end
+    vim.api.nvim_select_popupmenu_item = function(idx, insert, finish, opts)
+      selected_call = {
+        idx = idx,
+        insert = insert,
+        finish = finish,
+        opts = opts,
+      }
+    end
+
+    assert_true(input._select_visible_completion())
+    assert.same({
+      idx = 0,
+      insert = true,
+      finish = true,
+      opts = {},
+    }, selected_call)
+
+    vim.fn.complete_info = original_complete_info
+    vim.fn.pumvisible = original_pumvisible
+    vim.api.nvim_select_popupmenu_item = original_select_popupmenu_item
+  end)
+
+  it('registers expr completion maps for Enter and Tab in the input buffer', function()
+    ensure_dev_input_module()
+    agent.open_chat()
+    input.open_input_window()
+
+    local insert_maps = vim.api.nvim_buf_get_keymap(agent.state.input_bufnr, 'i')
+    local tab_map
+    local enter_map
+    for _, map in ipairs(insert_maps) do
+      if map.lhs == '<Tab>' then
+        tab_map = map
+      elseif map.lhs == '<CR>' then
+        enter_map = map
+      end
+    end
+
+    assert_true(tab_map ~= nil)
+    assert_true(enter_map ~= nil)
+    assert_eq(1, tab_map.expr)
+    assert_eq(1, enter_map.expr)
   end)
 
   it('removes prompt placeholder padding from continuation lines', function()

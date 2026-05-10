@@ -221,6 +221,7 @@ local state = {
   reasoning_text = '', -- raw reasoning delta text accumulated for the active turn
   reasoning_lines = {}, -- normalized reasoning preview lines (trimmed, not transcript)
   last_assistant_usage = nil, -- latest assistant.usage payload normalized for transcript/statusline display
+  last_assistant_usage_snapshot = nil, -- persistent assistant usage snapshot for statusline display
   context_tokens = nil, -- current token count in context window
   context_limit = nil, -- max token count for context window
   instruction_count = 0, -- discovered repository instructions for the active session

@@ -197,11 +197,36 @@ end
 
 function M.open_chat(opts)
   ensure_chat_window(opts)
+
+  -- If ensure_chat_window somehow didn't create the buffer (rare race), try once more.
+  if not state.chat_bufnr or not vim.api.nvim_buf_is_valid(state.chat_bufnr) then
+    pcall(ensure_chat_window, opts)
+  end
+
+  -- Debug: if chat buffer still missing, log a traceback for investigation (non-fatal)
+  if not state.chat_bufnr or not vim.api.nvim_buf_is_valid(state.chat_bufnr) then
+    local ok, f = pcall(io.open, '/tmp/copilot-open-chat-error.log', 'a')
+    if ok and f then
+      pcall(f.write, f, os.date('%Y-%m-%dT%H:%M:%S') .. ' open_chat: chat_bufnr still invalid, chat_winid=' .. tostring(state.chat_winid) .. '\n')
+      pcall(f.write, f, debug.traceback() .. '\n')
+      pcall(f.close, f)
+    end
+  end
+
   if state.config.auto_create_session and not state.session_id then
     session.with_session(function() end, {
       open_input_on_session_ready = opts == nil or opts.activate_input_on_session_ready ~= false,
     })
   end
+
+  -- Defensive: ensure chat_winid is populated before returning to synchronous callers
+  if not state.chat_winid then
+    local ok, found = pcall(chat.find_chat_window)
+    if ok and found then
+      state.chat_winid = found
+    end
+  end
+
   return state.chat_bufnr
 end
 

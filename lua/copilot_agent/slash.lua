@@ -28,7 +28,7 @@ local append_entry = render.append_entry
 local refresh_statuslines = sl.refresh_statuslines
 local request = http.request
 local split_lines = utils.split_lines
-local is_list = vim.islist or vim.tbl_islist
+local is_list = vim.islist
 
 local M = {}
 local SEARCH_LABEL_MAX_LEN = 72 -- Long search hits should stay scannable inside vim.ui.select pickers.
@@ -544,6 +544,48 @@ local function usage_command()
   if state.context_tokens and state.context_limit and state.context_limit > 0 then
     lines[#lines + 1] = string.format('  Context window: %d / %d tokens', state.context_tokens, state.context_limit)
   end
+
+  -- Include the latest assistant usage or persistent usage snapshot when available.
+  local usage = type(state.last_assistant_usage) == 'table' and state.last_assistant_usage or (type(state.last_assistant_usage_snapshot) == 'table' and state.last_assistant_usage_snapshot or nil)
+  if usage then
+    local primary = type(usage.primary_quota) == 'table' and usage.primary_quota or (type(usage.quotas) == 'table' and usage.quotas[1])
+    if primary then
+      local label = tostring(primary.display_name or primary.id or '<quota>')
+      local used = tonumber(primary.used_requests) or tonumber(primary.used) or nil
+      local total = tonumber(primary.entitlement_requests) or tonumber(primary.entitlement) or nil
+      local rem = primary.remaining_percentage
+      local rem_str = nil
+      if rem ~= nil then
+        local rem_num = tonumber(rem)
+        if rem_num ~= nil then
+          if rem_num >= 0 and rem_num <= 1 then
+            rem_num = rem_num * 100
+          end
+          rem_str = string.format('%d%%', math.floor(rem_num + 0.5))
+        end
+      end
+      local quota_line = '  Quota: ' .. label
+      -- Only show used/total when total is a positive number to avoid confusing '0/0'.
+      if total and total > 0 then
+        quota_line = quota_line .. string.format(' %d/%d', (used or 0), total)
+      elseif used and used > 0 then
+        quota_line = quota_line .. ' ' .. tostring(used)
+      end
+      if rem_str then
+        quota_line = quota_line .. ' (' .. rem_str .. ')'
+      end
+      lines[#lines + 1] = quota_line
+    end
+
+    -- Show basic last usage metrics (tokens/cost) if present.
+    if usage.input_tokens or usage.output_tokens or usage.cost then
+      local input = usage.input_tokens and tostring(usage.input_tokens) or '<unknown>'
+      local output = usage.output_tokens and tostring(usage.output_tokens) or '<unknown>'
+      local cost = usage.cost and tostring(usage.cost) or '<unknown>'
+      lines[#lines + 1] = string.format('  Last usage: model=%s cost=%s input=%s output=%s', tostring(usage.model or '<unknown>'), cost, input, output)
+    end
+  end
+
   append_entry('system', table.concat(lines, '\n'))
   return true
 end
@@ -1940,8 +1982,50 @@ end
 
 local function transcript_lines()
   local lines = {}
+  local function sanitize_export_text(text)
+    if text == nil then
+      return ''
+    end
+    if type(text) ~= 'string' then
+      text = tostring(text)
+    end
+    return text:gsub('%z', ''):gsub('\r\n?', '\n')
+  end
+  local function fallback_entry_lines(entry)
+    local kind = type(entry) == 'table' and entry.kind or 'system'
+    local label = ({
+      activity = 'Activity',
+      assistant = 'Assistant',
+      error = 'Error',
+      system = 'System',
+      user = 'User',
+    })[kind] or 'System'
+    local content = sanitize_export_text(type(entry) == 'table' and entry.content or '')
+    if kind == 'assistant' and vim.trim(content) == '' then
+      return {}
+    end
+    local entry_lines = { label .. ':' }
+    for _, line in ipairs(split_lines(content)) do
+      entry_lines[#entry_lines + 1] = '  ' .. sanitize_export_text(line)
+    end
+    if kind == 'user' and type(entry) == 'table' and type(entry.attachments) == 'table' then
+      for _, attachment in ipairs(entry.attachments) do
+        local display = sanitize_export_text(attachment.display or attachment.path or attachment.type or '')
+        entry_lines[#entry_lines + 1] = '  📎 ' .. display
+      end
+    end
+    entry_lines[#entry_lines + 1] = ''
+    return entry_lines
+  end
   for idx, entry in ipairs(state.entries) do
-    vim.list_extend(lines, render.entry_lines(entry, idx, true))
+    local ok, entry_lines = pcall(render.entry_lines, entry, idx, false)
+    if not ok or type(entry_lines) ~= 'table' then
+      log(string.format('share export falling back to raw transcript lines for entry %d: %s', idx, tostring(entry_lines)), vim.log.levels.WARN)
+      entry_lines = fallback_entry_lines(entry)
+    end
+    for _, line in ipairs(entry_lines) do
+      lines[#lines + 1] = sanitize_export_text(line)
+    end
   end
   return lines
 end
@@ -2042,6 +2126,12 @@ local function share_session(args)
   end
 
   if requested_format then
+    -- If the caller provided an explicit path, write the export synchronously and skip
+    -- prompting the user (headless environments or programmatic callers expect this).
+    if requested_path and requested_path ~= '' then
+      export_session(requested_format, requested_path)
+      return true
+    end
     prompt_path(requested_format)
     return true
   end
@@ -2056,7 +2146,9 @@ local function share_session(args)
     end,
   }, function(choice)
     if choice then
-      prompt_path(choice.id)
+      vim.schedule(function()
+        prompt_path(choice.id)
+      end)
     end
   end)
   return true

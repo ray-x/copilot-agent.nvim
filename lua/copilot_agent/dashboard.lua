@@ -398,8 +398,8 @@ local function select_model()
 end
 
 local function submit_prompt(text)
-  local prompt = vim.trim(text or '')
-  if prompt == '' then
+  local prompt_txt = vim.trim(text or '')
+  if prompt_txt == '' then
     focus_prompt()
     return
   end
@@ -410,7 +410,7 @@ local function submit_prompt(text)
       focus_prompt()
       return
     end
-    handoff_to_chat(prompt)
+    handoff_to_chat(prompt_txt)
   end)
 end
 

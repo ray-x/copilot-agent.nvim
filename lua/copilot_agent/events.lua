@@ -44,7 +44,7 @@ local append_reasoning_delta = render.append_reasoning_delta
 local clear_reasoning_preview = render.clear_reasoning_preview
 local refresh_reasoning_overlay = render.refresh_reasoning_overlay
 local reset_frozen_render = render.reset_frozen_render
-local invalidate_frozen_render_from = render.invalidate_frozen_render_from
+local invalidate_frozen_render_from = type(render.invalidate_frozen_render_from) == 'function' and render.invalidate_frozen_render_from or function() end
 local scroll_to_bottom = render.scroll_to_bottom
 
 local is_thinking_content = utils.is_thinking_content
@@ -1506,15 +1506,17 @@ function assistant_usage.normalize_quotas(quota_snapshots)
     if a.is_unlimited ~= b.is_unlimited then
       return not a.is_unlimited
     end
-    local a_remaining = a.remaining_percentage ~= nil and a.remaining_percentage or math.huge
-    local b_remaining = b.remaining_percentage ~= nil and b.remaining_percentage or math.huge
-    if a_remaining ~= b_remaining then
-      return a_remaining < b_remaining
-    end
+    -- Prefer well-known prioritized quotas (e.g. premium_interactions) before
+    -- considering remaining percentage so premium shows up when configured.
     local a_priority = assistant_usage.quota_priority[a.id] or math.huge
     local b_priority = assistant_usage.quota_priority[b.id] or math.huge
     if a_priority ~= b_priority then
       return a_priority < b_priority
+    end
+    local a_remaining = a.remaining_percentage ~= nil and a.remaining_percentage or math.huge
+    local b_remaining = b.remaining_percentage ~= nil and b.remaining_percentage or math.huge
+    if a_remaining ~= b_remaining then
+      return a_remaining < b_remaining
     end
     return tostring(a.id or '') < tostring(b.id or '')
   end)
@@ -1765,6 +1767,9 @@ function assistant_usage.capture(data)
   end
 
   state.last_assistant_usage = vim.deepcopy(usage)
+  -- Also persist a snapshot that survives render resets so the statusline can
+  -- show quota/usage even after transient UI state clears.
+  state.last_assistant_usage_snapshot = vim.deepcopy(usage)
   local summary = assistant_usage.summarize(usage)
   if not summary then
     return usage
@@ -3755,6 +3760,19 @@ local function handle_session_event(payload)
   if event_type == 'session.usage_info' then
     state.context_tokens = data.currentTokens
     state.context_limit = data.tokenLimit
+    -- If the host provides quota snapshots on this session-level event, persist
+    -- a lightweight usage snapshot so the statusline can display quota info.
+    local quota_snapshots = data.quotaSnapshots or data.quota_snapshots
+    if quota_snapshots then
+      local quotas, primary = assistant_usage.normalize_quotas(quota_snapshots)
+      if primary then
+        state.last_assistant_usage_snapshot = {
+          model = data.model or state.current_model or state.config.session.model,
+          quotas = quotas,
+          primary_quota = primary,
+        }
+      end
+    end
     refresh_statuslines()
     return
   end
@@ -3981,10 +3999,7 @@ function M.start_event_stream(session_id)
   local history_timeout_session = session_id
   vim.defer_fn(function()
     if state.history_loading and state.session_id == history_timeout_session then
-      log(
-        string.format('history_loading safety timeout fired after %dms session_id=%s', HISTORY_TIMEOUT_MS, tostring(session_id)),
-        vim.log.levels.WARN
-      )
+      log(string.format('history_loading safety timeout fired after %dms session_id=%s', HISTORY_TIMEOUT_MS, tostring(session_id)), vim.log.levels.WARN)
       state.history_loading = false
       state.history_checkpoint_ids = nil
       state.history_pending_user_entries = {}
@@ -4031,10 +4046,7 @@ function M.start_event_stream(session_id)
     end
     local drain_elapsed_ms = (os.clock() - drain_t0) * 1000
     if drain_elapsed_ms > 20 then
-      log(
-        string.format('drain_sse_batch perf elapsed_ms=%.1f chunks=%d', drain_elapsed_ms, chunk_count),
-        vim.log.levels.DEBUG
-      )
+      log(string.format('drain_sse_batch perf elapsed_ms=%.1f chunks=%d', drain_elapsed_ms, chunk_count), vim.log.levels.DEBUG)
     end
   end
 

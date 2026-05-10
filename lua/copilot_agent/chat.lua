@@ -77,7 +77,7 @@ local function help_lines()
     '  Attachments / completion',
     '    <C-a>           Open attachment picker',
     '    <M-v>           Paste image from clipboard',
-    '    <Tab>           Trigger completion',
+    '    <Tab>           Trigger or accept completion',
     '    <C-e>           Dismiss completion popup',
     '    @<path>         Attach a file or open buffer',
     '    @"path with spaces"  Attach a file whose path includes spaces',
@@ -381,12 +381,27 @@ local function open_chat_win(bufnr, opts)
   else
     local parent_win = win.resolve_split_target()
     if not parent_win then
-      error('No non-floating window available for chat split')
+      -- Fallback: open chat in a new tab when no suitable split target is found.
+      vim.cmd('tabnew')
+      vim.api.nvim_win_set_buf(0, bufnr)
+      state.chat_winid = vim.api.nvim_get_current_win()
+    else
+      local ok, winid = pcall(function()
+        return vim.api.nvim_open_win(bufnr, true, { split = 'right', win = parent_win })
+      end)
+      if ok and winid then
+        state.chat_winid = winid
+      else
+        -- Fallback: open a normal vertical split anchored at parent_win.
+        local cur = vim.api.nvim_get_current_win()
+        pcall(vim.api.nvim_set_current_win, parent_win)
+        vim.cmd('vsplit')
+        local new_win = vim.api.nvim_get_current_win()
+        pcall(vim.api.nvim_win_set_buf, new_win, bufnr)
+        state.chat_winid = new_win
+        pcall(vim.api.nvim_set_current_win, cur)
+      end
     end
-    state.chat_winid = vim.api.nvim_open_win(bufnr, true, {
-      split = 'right',
-      win = parent_win,
-    })
   end
   attach_chat_markdown(state.chat_winid)
 end

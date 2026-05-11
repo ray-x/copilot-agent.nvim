@@ -371,6 +371,16 @@ function M.resume_session(session_id, callback, opts)
     end
     state.session_id = resumed_session_id
     state.session_working_directory = (response and response.workingDirectory) or requested_wd
+
+    -- Ensure an initial checkpoint exists for the session so diffs have a baseline.
+    -- Create or initialize checkpoint repo asynchronously but don't block resume.
+    pcall(function()
+      local checkpoints = require('copilot_agent.checkpoints')
+      if checkpoints and type(checkpoints.ensure_initial_checkpoint) == 'function' then
+        pcall(checkpoints.ensure_initial_checkpoint, state.session_id, state.session_working_directory)
+      end
+    end)
+
     if not resumed_session_id then
       local message = 'Server did not return a sessionId'
       append_entry('error', message)

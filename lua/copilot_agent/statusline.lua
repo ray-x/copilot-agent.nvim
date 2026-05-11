@@ -18,7 +18,7 @@ local _statusline_medium_width = 140 -- Re-enable medium-detail statusline secti
 local _intent_statusline_max_len = 30 -- Keep the intent label short enough to coexist with model, mode, and task indicators.
 local _intent_statusline_preview_chars = 27 -- Trim slightly below the hard cap so the prefixed icon and ellipsis never crowd adjacent statusline sections.
 local _reasoning_statusline_max_len = 32 -- Keep the rolling reasoning snippet short so it does not dominate the statusline.
-local _is_list = vim.islist or vim.tbl_islist
+local is_list = vim.islist
 local _statusline_component_defaults = {
   mode = true,
   permission = true,
@@ -55,7 +55,7 @@ local function statusline_component_enabled(name)
     return _statusline_component_defaults[name]
   end
 
-  if _is_list(components) then
+  if is_list(components) then
     for _, item in ipairs(components) do
       if item == name then
         return true

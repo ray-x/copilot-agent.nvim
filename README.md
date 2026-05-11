@@ -36,11 +36,14 @@ flowchart TD
         Cmds["CopilotAgent* commands"]
     end
 
-    subgraph GoService["Go host service  :8088"]
+    subgraph GoService["Go HTTP service  :8088"]
         HTTP["HTTP router\n/sessions  /models  /healthz"]
         SSE["SSE fan-out\nsession.event  host.*"]
-        LSPServer["LSP server (stdio)\ntextDocument/codeAction\nworkspace/executeCommand"]
         Sessions["Session manager\npermissions · tools · models"]
+    end
+
+    subgraph LSPProcess["LSP-only process"]
+        LSPServer["LSP server (stdio)\ntextDocument/codeAction\nworkspace/executeCommand"]
     end
 
     subgraph SDK["GitHub Copilot SDK"]
@@ -52,14 +55,14 @@ flowchart TD
     UI -->|"curl -N SSE stream"| SSE
     Cmds -->|"curl POST/DELETE"| HTTP
     LSPClient <-->|"JSON-RPC stdio"| LSPServer
-    LSPServer -->|"POST /sessions/{id}/messages"| HTTP
+    LSPServer -->|"HTTP to existing service"| HTTP
     HTTP --> Sessions
     SSE --> Sessions
     Sessions <-->|"copilot.Session"| CopilotSDK
     CopilotSDK --> Tools
 ```
 
-The Go binary runs a **single process** that serves both the HTTP bridge (sessions, SSE, user-input, permissions) and an LSP server on stdio. Neovim starts it as an LSP client (`vim.lsp.start`), which owns the process lifetime. The Lua plugin communicates via `curl` shell-outs for all HTTP and SSE traffic.
+The HTTP bridge and the LSP helper are separate processes. The HTTP service owns session state; `vim.lsp.start()` launches an LSP-only helper that talks to the already-running HTTP service. The Lua plugin communicates via `curl` shell-outs for all HTTP and SSE traffic.
 
 ---
 
@@ -70,7 +73,7 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) calls the Copilot (or other) LLM REST APIs directly from Lua. It supports multiple providers but has no agent runtime of its own — tool execution and the agentic loop are implemented in Lua above the client.
 
 <details>
-<summary>Feature-by-feature comparison with CopilotChat.nvim</summary>
+<summary><strong>📂 Feature-by-feature comparison with CopilotChat.nvim</strong></summary>
 
 | Feature                   | **copilot-agent.nvim**                                                | CopilotChat.nvim          |
 | ------------------------- | --------------------------------------------------------------------- | ------------------------- |
@@ -103,7 +106,7 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 `copilot-agent.nvim` is narrower in scope but deeper in Copilot integration: the Go service embeds the Copilot SDK directly, so it gets SDK-native features (config discovery, custom agents, skill directories, sub-agent streaming) that no ACP bridge can expose.
 
 <details>
-<summary>Feature-by-feature comparison with ACP-based plugins</summary>
+<summary><strong>📂 Feature-by-feature comparison with ACP-based plugins</strong></summary>
 
 | Feature                       | **copilot-agent.nvim**                           | codecompanion.nvim                        | avante.nvim                            |
 | ----------------------------- | ------------------------------------------------ | ----------------------------------------- | -------------------------------------- |
@@ -178,14 +181,15 @@ For most users, this minimal setup is enough:
   "ray-x/copilot-agent.nvim",
   build = ":CopilotAgentInstall",
   config = function()
-    require("copilot_agent").setup({})
-    require("copilot_agent").start_lsp()
+    require("copilot_agent").setup({
+      lsp = { enabled = true },
+    })
   end,
 }
 ```
 
 <details>
-<summary>Full setup example with common options</summary>
+<summary><strong>📂 Full setup example with common options</strong></summary>
 
 ```lua
 {
@@ -199,6 +203,9 @@ For most users, this minimal setup is enough:
       client_name = "nvim-copilot",
       permission_mode = "approve-all",  -- "interactive" | "approve-all" | "autopilot" | "reject-all"
       auto_create_session = true,
+      lsp = {
+        enabled = true, -- start the helper LSP automatically from setup()
+      },
       session = {
         working_directory = function() return vim.fn.getcwd() end,
         model = nil,    -- nil = Copilot picks a default
@@ -273,7 +280,7 @@ For most users, this minimal setup is enough:
 </details>
 
 <details>
-<summary>Advanced service command and isolation examples</summary>
+<summary><strong>📂 Advanced service command and isolation examples</strong></summary>
 
 If you want to point at a binary in a custom location:
 
@@ -325,7 +332,7 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 Use `:CopilotAgentDashboard` or `:CopilotAgentChat` to get started.
 
 <details>
-<summary>Full command reference</summary>
+<summary><strong>📂 Full command reference</strong></summary>
 
 | Command                              | Description                                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------- |
@@ -396,7 +403,7 @@ The input buffer supports built-in slash commands handled by the plugin before t
 `/agent` completion is optimized for inline prompting: selecting an agent suggestion inserts the agent name without the `/agent` prefix, so `/agent Git Commit Agent` completion becomes `Git Commit Agent`.
 
 <details>
-<summary>Supported slash commands</summary>
+<summary><strong>📂 Supported slash commands</strong></summary>
 
 | Command                | Arguments                                                              | What it does                                                                                                                                                                                                |
 | ---------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -560,7 +567,7 @@ There are **two separate interruption points** in an agentic loop:
 
 ## LSP Code Actions
 
-The Go binary runs an LSP server on stdio. Start it with `:CopilotAgentLsp` or `require("copilot_agent").start_lsp()`.
+The Go binary runs an LSP server on stdio. `:CopilotAgentLsp` or `require("copilot_agent").start_lsp()` now starts an LSP-only process that reuses the existing HTTP service instead of spawning a fresh backend session.
 
 This helper server is separate from the project language servers used by Copilot CLI for code intelligence. Use `/lsp create` to bootstrap `.github/lsp.json` from active Neovim project LSP clients, then restart the Copilot service so config discovery reloads it.
 

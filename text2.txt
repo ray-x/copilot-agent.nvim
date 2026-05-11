@@ -1,0 +1,144 @@
+You are an expert neovim plugin developer and always use latest version and latest features of neovim. You want to refact the autocomplete of @ command and slash command from copilot-agent. feel free to fetch latest doc elesewhere.
+
+```help
+complete({startcol}, {matches})                                *complete()* *E785*
+		Set the matches for Insert mode completion.  Can only be used
+		in Insert mode.  Typically invoked from a mapping with
+		CTRL-R = (see |i_CTRL-R|), but may also be called from a
+		|<Cmd>| mapping.  It does not work after CTRL-O or with an
+		expression mapping.
+		{startcol} is the byte offset in the line where the completed
+		text start.  The text up to the cursor is the original text
+		that will be replaced by the matches.  Use col('.') for an
+		empty string.  "col('.') - 1" will replace one character by a
+		match.
+		{matches} must be a |List|.  Each |List| item is one match.
+		See |complete-items| for the kind of items that are possible.
+		"longest" in 'completeopt' is ignored.
+		Note that the after calling this function you need to avoid
+		inserting anything that would cause completion to stop.
+		The match can be selected with CTRL-N and CTRL-P as usual with
+		Insert mode completion.  The popup menu will appear if
+		specified, see |ins-completion-menu|.
+		Example: >vim
+
+		inoremap <F5> <C-R>=ListMonths()<CR>
+
+		func ListMonths()
+		  call complete(col('.'), ['January', 'February', 'March',
+			\ 'April', 'May', 'June', 'July', 'August',
+			\ 'September', 'October', 'November', 'December'])
+		  return ''
+		endfunc
+
+<		This isn't very useful, but it shows how it works.  Note that
+		an empty string is returned to avoid a zero being inserted.
+
+                Parameters: ~
+                  • {startcol} (`integer`)
+                  • {matches} (`any[]`)
+
+complete_add({expr})                                            *complete_add()*
+		Add {expr} to the list of matches.  Only to be used by the
+		function specified with the 'completefunc' option.
+		Returns 0 for failure (empty string or out of memory),
+		1 when the match was added, 2 when the match was already in
+		the list.
+		See |complete-functions| for an explanation of {expr}.  It is
+		the same as one item in the list that 'omnifunc' would return.
+
+                Parameters: ~
+                  • {expr} (`any`)
+
+                Return: ~
+                  (`0|1|2`)
+
+complete_check()                                              *complete_check()*
+		Check for a key typed while looking for completion matches.
+		This is to be used when looking for matches takes some time.
+		Returns |TRUE| when searching for matches is to be aborted,
+		zero otherwise.
+		Only to be used by the function specified with the
+		'completefunc' option.
+
+                Return: ~
+                  (`0|1`)
+
+complete_info([{what}])                                        *complete_info()*
+		Returns a |Dictionary| with information about Insert mode
+		completion.  See |ins-completion|.
+		The items are:
+		   completed	Return a dictionary containing the entries of
+				the currently selected index item.
+		   items	List of all completion candidates.  Each item
+				is a dictionary containing the entries "word",
+				"abbr", "menu", "kind", "info" and
+				"user_data".
+				See |complete-items|.
+		   matches	Same as "items", but only returns items that
+				are matching current query.  If both "matches"
+				and "items" are in "what", the returned list
+				will still be named "items", but each item
+				will have an additional "match" field.
+		   mode		Current completion mode name string.
+				See |complete_info_mode| for the values.
+		   preinserted_text
+				The actual text that is pre-inserted, see
+				|preinserted()|.
+		   pum_visible	|TRUE| if popup menu is visible.
+				See |pumvisible()|.
+		   selected	Selected item index.  First index is zero.
+				Index is -1 if no item is selected (showing
+				typed text only, or the last completion after
+				no item is selected when using the <Up> or
+				<Down> keys)
+		   preview_winid     Info floating preview window id.
+		   preview_bufnr     Info floating preview buffer id.
+
+							*complete_info_mode*
+		mode values are:
+		   ""		     Not in completion mode
+		   "keyword"	     Keyword completion |i_CTRL-X_CTRL-N|
+		   "ctrl_x"	     Just pressed CTRL-X |i_CTRL-X|
+		   "scroll"	     Scrolling with |i_CTRL-X_CTRL-E| or
+				     |i_CTRL-X_CTRL-Y|
+		   "whole_line"	     Whole lines |i_CTRL-X_CTRL-L|
+		   "files"	     File names |i_CTRL-X_CTRL-F|
+		   "tags"	     Tags |i_CTRL-X_CTRL-]|
+		   "path_defines"    Definition completion |i_CTRL-X_CTRL-D|
+		   "path_patterns"   Include completion |i_CTRL-X_CTRL-I|
+		   "dictionary"	     Dictionary |i_CTRL-X_CTRL-K|
+		   "thesaurus"	     Thesaurus |i_CTRL-X_CTRL-T|
+		   "cmdline"	     Vim Command line |i_CTRL-X_CTRL-V|
+		   "function"	     User defined completion |i_CTRL-X_CTRL-U|
+		   "omni"	     Omni completion |i_CTRL-X_CTRL-O|
+		   "spell"	     Spelling suggestions |i_CTRL-X_s|
+		   "eval"	     |complete()| completion
+		   "register"	     Words from registers |i_CTRL-X_CTRL-R|
+		   "unknown"	     Other internal modes
+
+		If the optional {what} list argument is supplied, then only
+		the items listed in {what} are returned.  Unsupported items in
+		{what} are silently ignored.
+
+		To get the position and size of the popup menu, see
+		|pum_getpos()|.  It's also available in |v:event| during the
+		|CompleteChanged| event.
+
+		Returns an empty |Dictionary| on error.
+
+		Examples: >vim
+			" Get all items
+			call complete_info()
+			" Get only 'mode'
+			call complete_info(['mode'])
+			" Get only 'mode' and 'pum_visible'
+			call complete_info(['mode', 'pum_visible'])
+<
+
+                Parameters: ~
+                  • {what} (`any[]?`)
+
+                Return: ~
+                  (`table`)
+```

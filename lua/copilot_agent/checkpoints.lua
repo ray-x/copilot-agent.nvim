@@ -529,6 +529,31 @@ function M.list_details(session_id)
     }
 end
 
+-- Ensure an initial checkpoint exists for the session. Safe no-op if repo/index already present.
+function M.ensure_initial_checkpoint(session_id, workspace)
+  workspace = workspace or checkpoint_workspace()
+  if type(session_id) ~= 'string' or session_id == '' or type(workspace) ~= 'string' or workspace == '' then
+    return nil, 'session_id and workspace are required'
+  end
+  -- If an index already exists and has checkpoints, do nothing.
+  if vim.fn.filereadable(index_path(session_id)) == 1 then
+    local index = load_index(session_id)
+    if index and type(index.checkpoints) == 'table' and #index.checkpoints > 0 then
+      return true
+    end
+  end
+  -- Create an initial checkpoint capturing current workspace state.
+  local ok, err = pcall(function()
+    M.create(session_id, 'initial checkpoint', function(create_err, checkpoint_id, commit)
+      -- ignore errors here; caller shouldn't block session resume on checkpoint creation
+    end, {})
+  end)
+  if not ok then
+    return nil, err
+  end
+  return true
+end
+
 function M.list_files(session_id)
   if type(session_id) ~= 'string' or session_id == '' then
     return nil, 'session_id is required'

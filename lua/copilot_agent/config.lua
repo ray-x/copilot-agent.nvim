@@ -124,6 +124,9 @@ local defaults = {
     -- 'auto': silently resume the most recent matching session without prompting.
     auto_resume = 'prompt',
   },
+  lsp = {
+    enabled = false,
+  },
 }
 
 local state = {

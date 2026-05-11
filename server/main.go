@@ -234,7 +234,21 @@ func main() {
 	logLevel := flag.String("log-level", "error", "Copilot CLI log level")
 	cwdFlag := flag.String("cwd", "", "default working directory for new sessions")
 	lspMode := flag.Bool("lsp", true, "run LSP server over stdio alongside the HTTP service (default: true)")
+	lspOnly := flag.Bool("lsp-only", false, "run only the LSP server over stdio and connect to an existing HTTP service")
+	serviceURL := flag.String("service-url", "", "HTTP service URL for -lsp-only mode, e.g. http://127.0.0.1:8088")
 	flag.Parse()
+
+	if *lspOnly {
+		if strings.TrimSpace(*serviceURL) == "" {
+			log.Fatal("service-url is required when -lsp-only is set")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runLSPServer(ctx, strings.TrimSpace(*serviceURL)); err != nil && err != context.Canceled {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	workingDirectory, err := resolveWorkingDirectory(*cwdFlag)
 	if err != nil {

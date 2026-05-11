@@ -195,6 +195,11 @@ function M.setup(opts)
       ensure_service_running(function() end)
     end)
   end
+  if state.config.lsp and state.config.lsp.enabled then
+    vim.schedule(function()
+      lsp.start_lsp()
+    end)
+  end
   return M
 end
 

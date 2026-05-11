@@ -13,7 +13,7 @@ local http = require('copilot_agent.http')
 local service = require('copilot_agent.service')
 
 local M = {}
-local is_list = vim.islist or vim.tbl_islist
+local islist = vim.islist
 local LSP_CONFIG_PATH = '.github/lsp.json'
 local HELPER_CLIENT_NAME = 'copilot-agent'
 local REQUIRED_PROJECT_CAPABILITIES = {
@@ -95,7 +95,7 @@ local function normalize_client_list(clients)
   if type(clients) ~= 'table' then
     return {}
   end
-  if is_list(clients) then
+  if islist(clients) then
     return clients
   end
 
@@ -556,7 +556,7 @@ function M.show_config()
   }
   for _, key in ipairs(server_keys(config.lspServers)) do
     local server = config.lspServers[key] or {}
-    local args = is_list(server.args) and server.args or {}
+    local args = islist(server.args) and server.args or {}
     lines[#lines + 1] = string.format('  - %s: %s', key, command_label(server.command, args))
     if type(server.fileExtensions) == 'table' and not vim.tbl_isempty(server.fileExtensions) then
       lines[#lines + 1] = '    fileExtensions:'
@@ -653,6 +653,14 @@ M._discover_project_clients = discover_project_clients
 local function lsp_command()
   local cmd = service.service_command()
   return vim.deepcopy(cmd)
+end
+
+local function lsp_only_command(service_url)
+  local cmd = lsp_command()
+  if type(cmd) ~= 'table' or vim.tbl_isempty(cmd) then
+    return nil
+  end
+  return vim.list_extend(cmd, { '-lsp-only', '--service-url', service_url })
 end
 
 function M.paste_clipboard_image()
@@ -787,45 +795,41 @@ function M.start_lsp(opts)
     end
   end
 
-  local cmd = lsp_command()
+  local service_url = state.config.base_url
+  service.ensure_service_live(function(err)
+    if err then
+      notify('Failed to start Copilot agent LSP: ' .. err, vim.log.levels.ERROR)
+      return
+    end
 
-  local stderr_fifo = vim.fn.tempname()
-  local wrapped_cmd = {
-    'sh',
-    '-c',
-    table.concat(vim.tbl_map(vim.fn.shellescape, cmd), ' ') .. ' 2>' .. vim.fn.shellescape(stderr_fifo),
-  }
-  vim.fn.jobstart({ 'tail', '-F', stderr_fifo }, {
-    on_stdout = function(_, data)
-      vim.schedule(function()
-        service.remember_service_output(data)
-      end)
-    end,
-  })
-  local client_id = vim.lsp.start({
-    name = 'copilot-agent',
-    cmd = wrapped_cmd,
-    cmd_cwd = service.service_cwd(),
-    root_dir = root,
-    capabilities = vim.lsp.protocol.make_client_capabilities(),
-    on_init = function(client)
-      state.lsp_client_id = client.id
-      notify('Copilot agent started (LSP id=' .. client.id .. ')', vim.log.levels.INFO)
-      service.ensure_service_running(function() end)
-    end,
-    on_exit = function(code, signal)
-      state.lsp_client_id = nil
-      pcall(os.remove, stderr_fifo)
-      if code ~= 0 then
-        notify('Copilot agent exited: code=' .. code .. ' signal=' .. tostring(signal), vim.log.levels.WARN)
-      end
-    end,
-  })
+    local wrapped_cmd = lsp_only_command(service_url)
+    if not wrapped_cmd then
+      notify('Failed to start Copilot agent LSP', vim.log.levels.ERROR)
+      return
+    end
 
-  if not client_id then
-    notify('Failed to start Copilot agent LSP', vim.log.levels.ERROR)
-  end
-  return client_id
+    local client_id = vim.lsp.start({
+      name = 'copilot-agent',
+      cmd = wrapped_cmd,
+      cmd_cwd = service.service_cwd(),
+      root_dir = root,
+      capabilities = vim.lsp.protocol.make_client_capabilities(),
+      on_init = function(client)
+        state.lsp_client_id = client.id
+        notify('Copilot agent started (LSP id=' .. client.id .. ')', vim.log.levels.INFO)
+      end,
+      on_exit = function(code, signal)
+        state.lsp_client_id = nil
+        if code ~= 0 then
+          notify('Copilot agent exited: code=' .. code .. ' signal=' .. tostring(signal), vim.log.levels.WARN)
+        end
+      end,
+    })
+
+    if not client_id then
+      notify('Failed to start Copilot agent LSP', vim.log.levels.ERROR)
+    end
+  end)
 end
 
 return M

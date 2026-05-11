@@ -1,0 +1,137 @@
+Use the Game Requirements Writer agent for this task.
+
+Create a concise but specific `docs/requirements.md` for a terminal Flappy Bird game in Go that feels like a retro pixel-art clone.
+
+Include:
+- objective and non-goals (tutorial-friendly scope; no networking, no audio files)
+- implementation stack requirement: Bubble Tea (`github.com/charmbracelet/bubbletea`) as the TUI/event-loop foundation
+- controls (`space` or `k` flap, `p` pause/resume optional, `r` restart, `q` quit)
+- game states (title/start, running, paused, game over)
+- physics expectations with concrete ranges (gravity, flap impulse, terminal frame rate target)
+- obstacle behavior and spawn cadence with difficulty ramp rules
+- collision, scoring, and best-score persistence rules (file-based persistence optional)
+- terminal rendering constraints (ASCII/Unicode blocks only, no external image/sprite assets)
+- visual direction section that describes the intended look:
+	- bright sky background
+	- layered clouds/horizon feel
+	- city/building silhouette band
+	- green ground strip
+	- chunky high-contrast pipes and a readable bird glyph
+	- retro arcade title/HUD treatment
+	- include explicit bird art spec:
+		- **BASELINE STATUS: this sprite/layout is the first good version**; keep it as the accepted baseline unless the user explicitly requests a redesign
+		- bird uses a slim horizontal sprite around 12x3 terminal cells; do not use a tall 4x3 or 5-row body
+		- **CRITICAL: bird MUST FACE AND FLY RIGHTWARD** (the direction gameplay moves); do not render bird facing up/down/left
+		- body/head cells are opaque fills: mustard yellow body, pale front face block, white eye with dark pupil, short coral/red beak on scene-colored background, compact dark attached tail wedge (with monochrome fallback)
+		- any non-opaque bird-adjacent cell must use the current scene background color, not terminal transparency; approximate layer-based background sampling is acceptable
+		- use a preview-first workflow: validate the bird shape with the local terminal preview tool before baking it into the game
+		- if future sprite experiments regress visually, revert to this first good version as the stable fallback
+		- the requirement itself must fully define the bird; do not rely on `tools/bird-preview/main.go` as the only source of shape information
+		- the preview tool is only a validator/demo of the requirement below; the requirement must be sufficient to recreate the bird without reading preview code
+		- prefer Nerd Font / Powerline-style triangle edge glyphs (the `e0be`, `e0bc` family) for smooth top/bottom body edges when available; fall back to geometric triangles if unavailable
+		- prefer Nerd Font glyph `eb70` for the beak when available; otherwise use a narrow rightward fallback glyph; beak foreground should be coral/red and background should be the sampled scene color behind that cell
+		- tail should be a compact attached brown wedge at the rear-left of the body, not detached `\\` and `/` marks and not a rectangular block stub
+		- per-cell style legend for the 12x3 bird grid:
+			- `scene`: glyph ` `, fg `nil`, bg `sceneBG(row,col,worldX)`; choose a nearby scene layer color such as sky, cloud band, skyline air, building face, or ground; never leave bg unset
+			- `B^`: glyph `▄` fg `BirdBody`, bg `scene`
+			- `B `: glyph ` `, fg `nil`, bg `BirdBody`
+			- `Bv`: glyph `▀`, fg `BirdBody`, bg `scene`
+			- `Hf^`: glyph `▙`,  fg `BirdHead`, bg `scene`
+			- `Hb^`: glyph `▟`, fg `BirdHead`, bg `scene`
+			- `H `: glyph `▄`, fg `nil`, bg `BirdHead`
+			- `Hv`: glyph `▀`, fg `BirdHead`, bg `scene`
+			- `eye`: glyph `●`, fg `BirdEyeFg`, bg `BirdEyeBg`
+			- `bk`: glyph `▶`, fg `BirdBeak`, bg `scene`
+			- `Tail-square`: glyph ` `, fg `nil`, bg `BirdTail`
+			- `Tail-tri`: glyph `▜`, fg `BirdTail`, bg `scene`
+			- `Wup-tri`: glyph `▟`, fg `BirdWing`, bg `scene`
+			- `Wup-square`: glyph ` `, fg `nil`, bg `BirdWing`
+			- `Wmid-rect`: glyph `▐` or similar rect half-block, fg `BirdWing`, bg `scene`
+			- `Wmid-square`: glyph ` `, fg `nil`, bg `BirdWing`
+			- `Wdown-tri`: upper-right triangle, fg `BirdWing`, bg `scene`
+			- `Wdown-square`: glyph ` `, fg `nil`, bg `BirdWing`
+		- explicit bird frame matrices:
+			- frame-matrix precedence rule: if any prose description conflicts with the matrices below, the matrices are authoritative and must be followed literally
+			- `WINGS UP`:
+				- row0: `[scene][scene][scene][scene][Wup-tri][Wup-square][B^][B^][Hb^][Hf^][scene][scene]`
+				- row1: `[scene][scene][scene][Wup-tri][Wup-square][Tail-square][B ][B ][H ][eye][H ][bk]`
+				- row2: `[scene][scene][scene][scene][Tail-tri][Bv][Bv][Bv][Hv][Hv][scene][scene]`
+			- `WINGS MID`:
+				- row0: `[scene][scene][scene][scene][scene][B^][B^][B^][Hb^][Hf^][scene][scene]`
+				- row1: `[scene][scene][scene][Wmid-rect][Wmid-square][Wmid-square][B ][B ][H ][eye][H ][bk]`
+				- row2: `[scene][scene][scene][scene][Tail-tri][Bv][Bv][Bv][Hv][Hv][scene][scene]`
+			- `WINGS DOWN`:
+				- row0: `[scene][scene][scene][scene][scene][B^][B^][B^][Hb^][Hf^][scene][scene]`
+				- row1: `[scene][scene][scene][Wdown-tri][Wdown-square][Tail-square][B ][B ][H ][eye][H ][bk]`
+				- row2: `[scene][scene][scene][scene][Wdown-tri][Tail-tri][Bv][Bv][Hv][Hv][scene][scene]`
+		- 3 wing poses tied to vertical velocity:
+			- WINGS UP: bird flapped, ascending; follow the matrix literally: row0 uses `Wup-tri + Wup-square`, and row1 also uses `Wup-tri + Wup-square` before `Tail-square`
+			- WINGS MID: neutral state; follow the matrix literally: row1 uses `Wmid-rect + Wmid-square + Wmid-square` before body cells
+			- WINGS DOWN: gravity pulling, descending; follow the matrix literally: row1 uses `Wdown-tri + Wdown-square`, and row2 uses `Wdown-tri` before `Tail-tri`
+		- the wing must be at least the same apparent size as the body silhouette; tiny 1-2 cell wings are not acceptable
+		- wing poses must stay angled/pointed, not square, and must NEVER change the rightward facing direction
+		- do not repeat many triangle glyphs across the full top/bottom body edge; that creates a centipede-like silhouette and is a failure
+		- soften the lower-left body corner with one subtle upper-right triangle so the body reads less square without sprouting a spike
+		- bias the palette/material choices toward the supplied reference: pale/white front face, white wing block, coral/red beak, bright green pipes with white highlight, aqua middle band, pale buildings with blue accents
+	- include explicit background composition spec:
+		- sky occupies upper scene with 2-tone blue palette or nearest terminal fallback
+		- visible cloud clusters should exist within the upper sky area above the horizon band; render them as sparse white/light-cream puff groups made from 2-5 joined blob/block shapes rather than single marks
+		- cloud/horizon band below sky, visually separated from skyline
+		- keep cloud groups sparse and uneven: about 2-5 groups visible at once, widths roughly 6-18 cols, heights roughly 2-4 rows, with slower drift than pipes
+		- skyline/buildings band: TALL buildings with LIGHT colors (white #FFFFFF, light gray #D0D0D0, dark gray #808080, cool blue accent #5A8FD8, or terminal 231/252/244/68 equivalents); buildings must NOT be dark/black silhouettes
+		- buildings should be TALL and WIDE — individual buildings 4–10 cols wide, heights varying from 6 to 18 rows, reaching up into the lower sky area for a dramatic city silhouette
+		- use vertical block fills (█ ▓ ░) or box-drawing chars for building bodies; add small □ ▪ window details in a contrasting shade
+		- building color palette: primary white/light-gray body, dark-gray or cool-blue window accents, occasional off-white highlight column for depth
+		- ground strip at bottom with a darker top edge to imply depth
+		- avoid full-width repetitive horizontal striping; use sparse patterns and local detail instead
+		- do not use evenly tiled clouds or one-glyph clouds repeated every few columns; cloud shapes should appear clustered and organic within terminal constraints
+		- skyline buildings MUST be tall enough to be visually prominent; short 1-2 row stubs are not acceptable
+		- include hard row-budget layout rules (derived from terminal height) with tolerance of +/-1 row:
+			- sky main area: 55% to 65% of playable height
+			- cloud/horizon transition band: 8% to 14%
+			- skyline/building band: 16% to 24%
+			- ground strip: 8% to 12% (minimum 2 rows)
+			- HUD/status strip: reserve 1 top row with guaranteed contrast
+			- if terminal is small, preserve relative order first (HUD -> sky -> cloud band -> skyline -> ground)
+	- include minimal color palette guidance (true-color targets + 256-color fallback)
+	- include contrast guidance so HUD text remains readable over its background (do not place dark text on dark sky)
+	- include layer motion guidance (for example: clouds drift slower than pipes; skyline drifts slightly)
+- UX polish expectations:
+	- responsive input feel
+	- stable frame pacing
+	- low flicker redraw strategy
+	- clear start/game-over prompts
+- architecture notes for a small Go codebase:
+	- Bubble Tea Model/Update/View structure is required
+	- separate pure gameplay simulation from Bubble Tea view rendering
+	- Bubble Tea tick/update loop should drive deterministic simulation steps
+	- split model/update/render/input logic
+	- deterministic update step where practical
+	- functions easy to unit test
+- acceptance checklist with testable items:
+	- gameplay loop works via keyboard only
+	- collision and score updates are correct
+	- game can be restarted repeatedly without state corruption
+	- visuals match the retro terminal style goals
+	- bird sprite appearance and animation frames match the written bird art spec
+	- scene layering clearly shows sky, cloud band, skyline, and ground in the correct order
+	- scene layer row counts stay within the declared percentage budgets (or documented small-screen fallback)
+	- no two consecutive pipes share the same spawn interval, gap size, gap vertical position, or width
+	- no screen flicker: Bubble Tea alt-screen mode is used; full frame is composed in View() as a single string
+
+Require a numeric "Gameplay Tuning" section with default values (or narrow ranges), including at minimum:
+- frame/update rate target: 30 FPS render with fixed-step update (33 ms), or equivalent deterministic timing
+- bird gravity: about +28 to +36 rows/s^2
+- flap impulse: about -9 to -13 rows/s
+- bird vertical speed clamp: roughly -14 to +14 rows/s
+- horizontal pipe speed: start around 18 cols/s, ramp to about 24 cols/s by ~60 seconds alive
+- pipe spawn interval: base starts around 1.4 s, ramps down to about 1.0 s by ~60 seconds alive; each spawn adds ±20% random jitter so pipes never arrive at uniform intervals
+- pipe gap size: preview bird sprite is 3 rows tall visually, but gameplay should still allow generous clearance; base vertical gap starts at 14 rows, tightens toward 10 rows, never below 8 rows; each pipe gets ±1–2 row random jitter so no two consecutive gaps are identical
+- pipe gap vertical position: randomised per pipe within safe playable bounds; must not repeat at the same row consecutively
+- pipe width: varies per pipe between 2 and 4 cols; pick randomly at spawn within difficulty range
+- score rule: +1 after the bird fully passes each pipe pair
+- collision tolerance: define exact bird/pipe hitbox policy (strict cell overlap or small forgiving margin) so tests can assert behavior
+
+Ask for one short "feel calibration" note that explains how to tweak the constants if gameplay is too hard/easy.
+
+Keep it practical for a small tutorial game and prefer measurable requirements over vague wording.

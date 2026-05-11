@@ -81,6 +81,10 @@ jobs:
       - name: Run integration tests
         run: |
           export PATH="${PWD}/_neovim/bin:${PATH}"
+          export XDG_CONFIG_HOME="$(mktemp -d)"
+          export XDG_DATA_HOME="$(mktemp -d)"
+          export XDG_STATE_HOME="$(mktemp -d)"
+          export XDG_CACHE_HOME="$(mktemp -d)"
           nvim --headless -u tests/minimal_init.lua \
             -c "PlenaryBustedFile tests/integration/setup_spec.lua" \
             -c qa \

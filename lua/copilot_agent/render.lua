@@ -6,6 +6,8 @@
 
 local uv = vim.uv or vim.loop
 local cfg = require('copilot_agent.config')
+local checkpoints = require('copilot_agent.checkpoints')
+local service = require('copilot_agent.service')
 local utils = require('copilot_agent.utils')
 local window = require('copilot_agent.window')
 local state = cfg.state
@@ -67,6 +69,121 @@ local function refresh_statuslines()
   if ok and type(sl.refresh_statuslines) == 'function' then
     sl.refresh_statuslines()
   end
+end
+
+local function run_git_show_lines(checkpoint_git_dir, workspace, commit, path)
+  local cmd = {
+    'git',
+    '--no-pager',
+    '--git-dir=' .. checkpoint_git_dir,
+    '--work-tree=' .. workspace,
+    'show',
+    commit .. ':' .. path,
+  }
+  local result = vim.system(cmd, { cwd = workspace, text = true }):wait()
+  if result.code ~= 0 then
+    local err = vim.trim(result.stderr or result.stdout or '')
+    return nil, err ~= '' and err or table.concat(cmd, ' ')
+  end
+  return split_lines(result.stdout or ''), nil
+end
+
+local function open_checkpoint_file_diff(session_id, workspace, from_commit, to_commit, path)
+  local checkpoint_repo_dir = checkpoints._session_dir(session_id) .. '/repo'
+  local checkpoint_git_dir = checkpoint_repo_dir .. '/.git'
+  local from_lines, from_err = run_git_show_lines(checkpoint_git_dir, workspace, from_commit, path)
+  if from_err then
+    notify('Diff unavailable: ' .. from_err, vim.log.levels.WARN)
+    return false
+  end
+  local to_lines, to_err = run_git_show_lines(checkpoint_git_dir, workspace, to_commit, path)
+  if to_err then
+    notify('Diff unavailable: ' .. to_err, vim.log.levels.WARN)
+    return false
+  end
+
+  local title = path .. ' (' .. from_commit .. ' → ' .. to_commit .. ')'
+  vim.cmd('tabnew')
+  local left_buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_name(left_buf, title .. ' [before]')
+  vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, from_lines or {})
+  vim.bo[left_buf].buftype = 'nofile'
+  vim.bo[left_buf].bufhidden = 'wipe'
+  vim.bo[left_buf].swapfile = false
+  vim.bo[left_buf].modifiable = false
+  vim.cmd('vert diffsplit')
+  local right_buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_name(right_buf, title .. ' [after]')
+  vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, to_lines or {})
+  vim.bo[right_buf].buftype = 'nofile'
+  vim.bo[right_buf].bufhidden = 'wipe'
+  vim.bo[right_buf].swapfile = false
+  vim.bo[right_buf].modifiable = false
+  vim.cmd('wincmd h')
+  vim.cmd('diffthis')
+  vim.cmd('wincmd l')
+  vim.cmd('diffthis')
+  return true
+end
+
+function M.update_last_activity_entry(mutator)
+  if type(mutator) ~= 'function' or type(state.entries) ~= 'table' then
+    return false
+  end
+  for i = #state.entries, 1, -1 do
+    local entry = state.entries[i]
+    if type(entry) == 'table' and entry.kind == 'activity' then
+      mutator(entry, i)
+      return true
+    end
+  end
+  return false
+end
+
+local function open_activity_code_change_diff(entry)
+  local code_change = type(entry) == 'table'
+      and (entry.code_change or (type(entry.activity_items) == 'table' and entry.activity_items[1] and entry.activity_items[1].diffstat and entry.activity_items[1] or nil))
+    or nil
+  if type(code_change) ~= 'table' then
+    return false
+  end
+
+  local files = type(code_change.files) == 'table' and code_change.files or code_change.diffstat
+  if type(files) ~= 'table' or #files == 0 then
+    return false
+  end
+
+  local workspace = state.session_working_directory or service.working_directory()
+  if type(workspace) ~= 'string' or workspace == '' or type(state.session_id) ~= 'string' or state.session_id == '' then
+    return false
+  end
+
+  local function open_for_path(path)
+    local from_commit = code_change.from_commit
+    local to_commit = code_change.to_commit
+    if type(path) ~= 'string' or path == '' or type(from_commit) ~= 'string' or from_commit == '' or type(to_commit) ~= 'string' or to_commit == '' then
+      return false
+    end
+    return open_checkpoint_file_diff(state.session_id, workspace, from_commit, to_commit, path)
+  end
+
+  if #files == 1 then
+    return open_for_path(files[1].path)
+  end
+
+  vim.ui.select(files, {
+    prompt = 'Select changed file to diff',
+    format_item = function(item)
+      local add = item.additions and ('+' .. tostring(item.additions)) or '+?'
+      local del = item.deletions and ('-' .. tostring(item.deletions)) or '-?'
+      return string.format('%s %s %s', item.path or '<unknown>', add, del)
+    end,
+  }, function(choice)
+    if choice then
+      open_for_path(choice.path)
+    end
+  end)
+  return true
 end
 
 local function reasoning_config()
@@ -1475,6 +1592,17 @@ local function append_markdown_inspect_block(lines, heading, value)
   end
 end
 
+local function highlight_diffstat_lines(buf)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  for row = 0, line_count - 1 do
+    local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
+    for start_col, token in line:gmatch('()([+-]%d+)') do
+      local hl = token:sub(1, 1) == '+' and 'DiffAdd' or 'DiffDelete'
+      vim.api.nvim_buf_add_highlight(buf, 0, hl, row, start_col - 1, start_col - 1 + #token)
+    end
+  end
+end
+
 local function append_markdown_field(lines, label, value)
   value = type(value) == 'string' and value or nil
   if not value or value == '' then
@@ -1573,9 +1701,38 @@ local function build_activity_details_lines(entry)
   end
 
   local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
+  if #items == 0 and type(entry) == 'table' and type(entry.code_change) == 'table' then
+    items = {
+      {
+        kind = 'code_change',
+        summary = entry.content,
+        from_commit = entry.code_change.from_commit,
+        to_commit = entry.code_change.to_commit,
+        diffstat = entry.code_change.files,
+      },
+    }
+  end
   local tool_count = 0
+  local code_change_count = 0
   local usage_count = 0
   for _, item in ipairs(items) do
+    if type(item) == 'table' and item.kind == 'code_change' then
+      code_change_count = code_change_count + 1
+      local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Code change ' .. tostring(code_change_count))
+      append_markdown_heading(lines, string.format('## Code change %d — %s', code_change_count, title))
+      append_markdown_field(lines, 'From', item.from_commit)
+      append_markdown_field(lines, 'To', item.to_commit)
+      local diffstat = type(item.diffstat) == 'table' and item.diffstat or {}
+      if #diffstat > 0 then
+        append_markdown_heading(lines, '### Files')
+        for _, changed in ipairs(diffstat) do
+          local path = sanitize_display_text(changed.path or '<unknown>')
+          local add = changed.additions and ('+' .. tostring(changed.additions)) or '+?'
+          local del = changed.deletions and ('-' .. tostring(changed.deletions)) or '-?'
+          lines[#lines + 1] = string.format('- %s %s %s', path, add, del)
+        end
+      end
+    end
     if type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output) then
       tool_count = tool_count + 1
       local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Tool ' .. tostring(tool_count))
@@ -1601,7 +1758,7 @@ local function build_activity_details_lines(entry)
     end
   end
 
-  if summary == nil and tool_count == 0 and usage_count == 0 then
+  if summary == nil and tool_count == 0 and code_change_count == 0 and usage_count == 0 then
     lines[#lines + 1] = ''
     lines[#lines + 1] = 'No activity details available.'
   end
@@ -1705,6 +1862,7 @@ local function open_activity_details_float(entry)
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = 'markdown'
   vim.bo[buf].modifiable = false
+  highlight_diffstat_lines(buf)
 
   local winid = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
@@ -2486,6 +2644,10 @@ function M.show_activity_details_under_cursor(winid)
   if not entry or entry.kind ~= 'activity' then
     notify('Move the cursor onto an Activity block first', vim.log.levels.INFO)
     return false
+  end
+
+  if open_activity_code_change_diff(entry) then
+    return true
   end
 
   open_activity_details_float(entry)

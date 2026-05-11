@@ -15,6 +15,11 @@ go run . \
   -cli-path /path/to/@github/copilot/index.js \
   -lsp=true      # default: true — LSP server on stdio
 
+# LSP-only helper that connects to an existing HTTP service
+go run . \
+  -lsp-only \
+  -service-url http://127.0.0.1:8088
+
 # Build a binary
 go build -o copilot-agent .
 ./copilot-agent          # dynamic port
@@ -33,6 +38,8 @@ go build -o copilot-agent .
 | `-cli-url`    | —             | URL of an already-running Copilot CLI server          |
 | `-log-level`  | —             | Copilot CLI log level                                 |
 | `-lsp`        | `true`        | Start LSP server on stdio                             |
+| `-lsp-only`   | `false`       | Start only the LSP server and reuse an existing HTTP service |
+| `-service-url`| —             | HTTP base URL used by `-lsp-only`                     |
 
 The service always prints `COPILOT_AGENT_ADDR=127.0.0.1:<PORT>` to stderr once the
 listener is bound. When `auto_start = true`, the plugin reads this line and

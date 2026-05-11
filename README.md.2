@@ -1,0 +1,146 @@
+# copilot-agent.nvim
+
+GitHub Copilot's agentic runtime, natively in Neovim. A lightweight Go bridge to the [official SDK](https://github.com/github/copilot-sdk) with native tool execution, four chat modes, session-aware permissions, persistent sessions, repository-local agent/skill directory discovery, and LSP code actions.
+
+## Demo Video
+
+**Prompt to Playable:** Watch the agent architect a Go-based terminal Flappy Bird, handle file I/O, and self-correct build errors autonomously.
+
+<video src="https://gist.github.com/user-attachments/assets/5091ddcb-84f8-4c1a-b8a7-ea4bef6393f4" controls width="70%"></video>
+
+## Key Capabilities
+
+| Feature                  | Technical Highlight                                                                     |
+| :----------------------- | :-------------------------------------------------------------------------------------- |
+| **Autonomous SDK Loop**  | Native file I/O, terminal execution, and web search via official Go SDK.                |
+| **State Rewind & Undo**  | Instant codebase restoration and session rewind to any previous conversation point.     |
+| **Session Continuity**   | Seamlessly resume sessions across Neovim, VS Code, and CLI with shared metadata.        |
+| **LSP-Native Actions**   | AI-driven 'Fix', 'Test', and 'Explain' via standard `vim.lsp.buf.code_action` triggers. |
+| **Autopilot Modes**      | Four levels of oversight, from manual per-step approval to fully autonomous execution.  |
+| **Project Intelligence** | Automatic discovery of `.github/agents` and `.github/skills` repository configs.        |
+| **Plugin Synergy**       | Deep integration: review changes in **Diffview**, commit with **Fugitive**, and more.   |
+| **Live Observability**   | Async statusline and streaming UI for real-time sub-agent tracking and token usage.     |
+
+---
+
+### Agent Tool Loop
+
+The agentic loop is what makes this plugin different from simple chat wrappers. The assistant doesn't just answer; it acts: reading files, fetching web pages, running commands, writing code, and iterating until the task is done.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Neovim["Neovim (Lua plugin)"]
+        UI["Chat buffer / input window"]
+        LSPClient["vim.lsp (code actions)"]
+        Cmds["CopilotAgent* commands"]
+    end
+
+    subgraph GoService["Go host service  :8088"]
+        HTTP["HTTP router\n/sessions  /models  /healthz"]
+        SSE["SSE fan-out\nsession.event  host.*"]
+        LSPServer["LSP server (stdio)\ntextDocument/codeAction\nworkspace/executeCommand"]
+        Sessions["Session manager\npermissions · tools · models"]
+    end
+
+    subgraph SDK["GitHub Copilot SDK"]
+        CopilotSDK["copilot-sdk/go\nCopilot CLI / API"]
+        Tools["Built-in tools\nread_file · write_file · terminal\nweb_search · ask_user · …"]
+    end
+
+    UI -->|"curl POST /sessions/{id}/messages"| HTTP
+    UI -->|"curl -N SSE stream"| SSE
+    Cmds -->|"curl POST/DELETE"| HTTP
+    LSPClient <-->|"JSON-RPC stdio"| LSPServer
+    LSPServer -->|"POST /sessions/{id}/messages"| HTTP
+    HTTP --> Sessions
+    SSE --> Sessions
+    Sessions <-->|"copilot.Session"| CopilotSDK
+    CopilotSDK --> Tools
+```
+
+The Go binary runs a **single process** serving both an HTTP bridge and an LSP server. Neovim manages the process lifetime via `vim.lsp.start`.
+
+---
+
+## Comparison with Alternatives
+
+### vs CopilotChat.nvim
+
+[CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) is a pure-Lua wrapper for the REST API.
+
+| Feature                 | **copilot-agent.nvim**                  | CopilotChat.nvim |
+| :---------------------- | :-------------------------------------- | :--------------- |
+| **Agent / Tool-use**    | ✅ **Full Agentic Loop (SDK-native)**   | ❌ Chat only     |
+| **Chat Modes**          | ask · plan · **agent** · autopilot      | ask only         |
+| **Config Discovery**    | ✅ SDK-native (`.github/` instructions) | ❌ Manual        |
+| **Custom Agents**       | ✅ SDK `CustomAgents` (Same as VS Code) | ❌               |
+| **Session Persistence** | ✅ Per working directory                | ❌               |
+
+### vs ACP (codecompanion.nvim / avante.nvim)
+
+`copilot-agent.nvim` is narrower but deeper. It embeds the SDK directly to expose features like sub-agent streaming and skill discovery that ACP bridges cannot reach.
+
+---
+
+## Installation
+
+### 1. Download Binary
+
+Run `:CopilotAgentInstall` to download the pre-built binary for your platform.
+
+### 2. Lazy.nvim Setup
+
+```lua
+{
+  "ray-x/copilot-agent.nvim",
+  build = ":CopilotAgentInstall",
+  config = function()
+    require("copilot_agent").setup({
+      permission_mode = "approve-all",
+      session = {
+        auto_resume = "prompt",
+        enable_config_discovery = true,
+      },
+      service = { auto_start = true },
+    })
+    require("copilot_agent").start_lsp()
+  end,
+}
+```
+
+---
+
+## Commands & UI
+
+### Essential Commands
+
+- `:CopilotAgentChat`: Open main chat UI.
+- `:CopilotAgentAsk [prompt]`: Quick prompt input.
+- `:CopilotAgentNewSession`: Fresh start, new ID.
+- `:CopilotAgentRewind [vNNN]`: Rollback codebase to a specific checkpoint.
+
+### Chat Keybindings
+
+- `<C-t>`: Cycle Modes (💬 ask → 📋 plan → 🤖 agent → 🚀 autopilot)
+- `<M-a>`: Cycle Permissions (🔐 interactive → ✅ approve-all → 🚫 reject)
+- `<C-a>`: Attach File/Folder/Selection/Image.
+- `[[` / `]]`: Jump between User turns.
+
+---
+
+## Tutorial & Examples
+
+1. 🐦 **[Terminal Flappy Bird (Go)](doc/tutorial-flappy-bird-go.md)**: Custom agents & skills in action.
+2. 📖 **[To-Do App (Flask)](doc/tutorial-flask.md)**: Full-stack orchestration.
+3. 🌤️ **[Weather Dashboard](doc/tutorial-weather-dashboard.md)**: UI design & testing.
+
+---
+
+## Development & Testing
+
+```bash
+make fmt        # Format Lua & Go
+make test       # Run unit & integration tests
+```

@@ -93,9 +93,7 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 
 ### vs ACP plugins (codecompanion.nvim, avante.nvim in ACP mode)
 
-[**ACP (Agent Client Protocol)**](https://agentclientprotocol.com) lets a Neovim plugin act as a client to any external CLI agent. it supported by Claude Code, Copilot CLI, Codex, Gemini CLI, Goose, and more. The plugin sends prompts and streams back results; the CLI agent owns the tool execution and agentic loop. Both codecompanion.nvim and avante.nvim support ACP, giving them access to the full capability of whichever CLI agent you point them at.
-
-Beyond ACP, these plugins also support direct LLM API calls (multi-provider adapters) and MCP (Model Context Protocol) tool servers, making them highly general-purpose.
+[**ACP (Agent Client Protocol)**](https://agentclientprotocol.com) lets a Neovim plugin act as a client to any external CLI agent. The plugin sends prompts and streams back results; the CLI agent owns the tool execution and agentic loop. Both codecompanion.nvim and avante.nvim support ACP.
 
 `copilot-agent.nvim` is narrower in scope but deeper in Copilot integration: the Go service embeds the Copilot SDK directly, so it gets SDK-native features (config discovery, custom agents, skill directories, sub-agent streaming) that no ACP bridge can expose.
 
@@ -110,8 +108,6 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 | Permission management         | ✅ 4 modes, 5 permissions (e.g. plan+allow_read) | ❌                                        | ❌                                     |
 | Session Persistence           | ✅ Deep session & checkpoint resume              | ❌                                        | ❌                                     |
 | LSP code actions              | ✅ (explain / fix / add tests / add docs)        | ✅ (via prompt library)                   | ❌                                     |
-
-**When to choose codecompanion / avante**: you want model flexibility, ACP access to Claude Code / Codex / Gemini CLI, or a large community ecosystem, and you're not exclusively on GitHub Copilot.
 
 **When to choose copilot-agent.nvim**: you're committed to GitHub Copilot and want the deepest possible SDK integration: native tools, permission management, session persistence, sub-agent events, and LSP code actions, without routing through an intermediate CLI.
 

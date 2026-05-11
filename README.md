@@ -69,6 +69,9 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 
 [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) calls the Copilot (or other) LLM REST APIs directly from Lua. It supports multiple providers but has no agent runtime of its own — tool execution and the agentic loop are implemented in Lua above the client.
 
+<details>
+<summary>Feature-by-feature comparison with CopilotChat.nvim</summary>
+
 | Feature                   | **copilot-agent.nvim**                                                | CopilotChat.nvim          |
 | ------------------------- | --------------------------------------------------------------------- | ------------------------- |
 | Backend                   | Official Copilot SDK (Go)                                             | Direct LLM REST API (Lua) |
@@ -85,6 +88,8 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 | Multi-provider            | ❌ (Copilot only, or Bring your own key)                              | ✅ (provider_resolver)    |
 | Dependencies              | codepilot-cli + go server                                             | Pure Lua                  |
 
+</details>
+
 **When to choose CopilotChat.nvim**: zero-binary Lua setup, just want Copilot chat with buffer context, happy with a Lua-managed tool loop.
 
 **When to choose copilot-agent.nvim**: you want the Copilot SDK owning the agent loop with native tools, permission control, and session persistence.
@@ -97,6 +102,9 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 
 `copilot-agent.nvim` is narrower in scope but deeper in Copilot integration: the Go service embeds the Copilot SDK directly, so it gets SDK-native features (config discovery, custom agents, skill directories, sub-agent streaming) that no ACP bridge can expose.
 
+<details>
+<summary>Feature-by-feature comparison with ACP-based plugins</summary>
+
 | Feature                       | **copilot-agent.nvim**                           | codecompanion.nvim                        | avante.nvim                            |
 | ----------------------------- | ------------------------------------------------ | ----------------------------------------- | -------------------------------------- |
 | Agent backend                 | Copilot SDK (Go, embedded)                       | ACP CLI agents or direct LLM adapters     | ACP CLI agents or direct LLM adapters  |
@@ -108,6 +116,8 @@ The Go binary runs a **single process** that serves both the HTTP bridge (sessio
 | Permission management         | ✅ 4 modes, 5 permissions (e.g. plan+allow_read) | ❌                                        | ❌                                     |
 | Session Persistence           | ✅ Deep session & checkpoint resume              | ❌                                        | ❌                                     |
 | LSP code actions              | ✅ (explain / fix / add tests / add docs)        | ✅ (via prompt library)                   | ❌                                     |
+
+</details>
 
 **When to choose copilot-agent.nvim**: you're committed to GitHub Copilot and want the deepest possible SDK integration: native tools, permission management, session persistence, sub-agent events, and LSP code actions, without routing through an intermediate CLI.
 
@@ -160,6 +170,22 @@ You can also download manually from the
 and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`.
 
 ### Step 2 — Plugin setup with lazy.nvim
+
+For most users, this minimal setup is enough:
+
+```lua
+{
+  "ray-x/copilot-agent.nvim",
+  build = ":CopilotAgentInstall",
+  config = function()
+    require("copilot_agent").setup({})
+    require("copilot_agent").start_lsp()
+  end,
+}
+```
+
+<details>
+<summary>Full setup example with common options</summary>
 
 ```lua
 {
@@ -244,6 +270,11 @@ and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`
 
 `file_log_batch` controls buffered file logging behavior. Set `enabled = false` to restore immediate per-line writes.
 
+</details>
+
+<details>
+<summary>Advanced service command and isolation examples</summary>
+
 If you want to point at a binary in a custom location:
 
 ```lua
@@ -257,7 +288,7 @@ service = { auto_start = true, command = { "/path/to/copilot-agent", "--addr", "
 service = { auto_start = true, command = { "/path/to/copilot-agent" }, port_range = "18000-19000" }
 ```
 
-#### Global service vs isolated instances
+**Global service vs isolated instances**
 
 By default, `auto_start = true` launches or reuses a **single detached background service** for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default.
 
@@ -279,6 +310,8 @@ require("copilot_agent").setup({
 
 Reuse the same stable port when reopening the same project later. If you open multiple isolated projects at the same time, each one needs its own port.
 
+</details>
+
 ---
 
 ## Running the Service Manually
@@ -288,6 +321,11 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 ---
 
 ## Commands
+
+Use `:CopilotAgentDashboard` or `:CopilotAgentChat` to get started.
+
+<details>
+<summary>Full command reference</summary>
 
 | Command                              | Description                                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------- |
@@ -314,6 +352,8 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 | `:CopilotAgentLsp`                   | Start (or reuse) the LSP client for code actions                                             |
 | `:CopilotAgentPasteImage`            | Paste clipboard image as attachment                                                          |
 | `:CopilotAgentRetryInput`            | Re-show the last dismissed ask_user prompt                                                   |
+
+</details>
 
 ---
 
@@ -355,22 +395,8 @@ The input buffer supports built-in slash commands handled by the plugin before t
 
 `/agent` completion is optimized for inline prompting: selecting an agent suggestion inserts the agent name without the `/agent` prefix, so `/agent Git Commit Agent` completion becomes `Git Commit Agent`.
 
-## Compose Buffer
-
-Open with `:CopilotAgentCompose` to open it as a left-side split next to chat output, or `:CopilotAgentCompose tab` to edit in a new tab.
-
-The compose buffer is a separate markdown scratch buffer for long prompts. It keeps the same `@` attachment and slash-command completion as the normal input buffer. From the prompt buffer, press `<leader>cc` or run `:CopilotAgentPromoteToCompose` to promote the current prompt into compose and continue editing there. Customize or disable the mapping with `compose.promote_keymap`.
-
-| Key / Command                   | Action                           |
-| ------------------------------- | -------------------------------- |
-| `<leader>cc` (prompt buffer)    | Move current prompt into compose |
-| `:CopilotAgentPromoteToCompose` | Move current prompt into compose |
-| `<leader>cs` / `<C-s>`          | Send compose buffer              |
-| `:w` / `:wq`                    | Send compose buffer              |
-| `:CopilotAgentSendBuffer`       | Send compose buffer              |
-| `q` / `<Esc>`                   | Close compose buffer             |
-
-Supported slash commands:
+<details>
+<summary>Supported slash commands</summary>
 
 | Command                | Arguments                                                              | What it does                                                                                                                                                                                                |
 | ---------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -408,6 +434,23 @@ Supported slash commands:
 | `/tasks`               | `[filter]`                                                             | Show background task and sub-agent activity                                                                                                                                                                 |
 | `/undo`                | —                                                                      | Restore the latest checkpoint for the current session, then queue the restore git hash/context into the next Copilot prompt                                                                                 |
 | `/usage`               | —                                                                      | Show session usage, discovery counts, and context-window stats                                                                                                                                              |
+
+</details>
+
+## Compose Buffer
+
+Open with `:CopilotAgentCompose` to open it as a left-side split next to chat output, or `:CopilotAgentCompose tab` to edit in a new tab.
+
+The compose buffer is a separate markdown scratch buffer for long prompts. It keeps the same `@` attachment and slash-command completion as the normal input buffer. From the prompt buffer, press `<leader>cc` or run `:CopilotAgentPromoteToCompose` to promote the current prompt into compose and continue editing there. Customize or disable the mapping with `compose.promote_keymap`.
+
+| Key / Command                   | Action                           |
+| ------------------------------- | -------------------------------- |
+| `<leader>cc` (prompt buffer)    | Move current prompt into compose |
+| `:CopilotAgentPromoteToCompose` | Move current prompt into compose |
+| `<leader>cs` / `<C-s>`          | Send compose buffer              |
+| `:w` / `:wq`                    | Send compose buffer              |
+| `:CopilotAgentSendBuffer`       | Send compose buffer              |
+| `q` / `<Esc>`                   | Close compose buffer             |
 
 ### Attaching Files and Images
 

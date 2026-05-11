@@ -790,6 +790,7 @@ local function set_overlay_tool_result_text(run_id, result_text)
   end
   current.result_text = result_text
   current.result_updated_ms = current.result_text and current.last_activity_ms or nil
+  refresh_reasoning_overlay(true)
 end
 
 local function touch_overlay_tool_activity(run_id)
@@ -803,6 +804,42 @@ local function touch_overlay_tool_activity(run_id)
   end
 
   current.last_activity_ms = overlay_now_ms()
+end
+
+local function begin_overlay_tool_display(tool_call_id, tool_name, detail)
+  local current = state.overlay_tool_display
+  local now = overlay_now_ms()
+  local run_id = state.active_tool_run_id
+  if type(run_id) ~= 'number' then
+    state.overlay_tool_serial = (tonumber(state.overlay_tool_serial) or 0) + 1
+    run_id = state.overlay_tool_serial
+    state.active_tool_run_id = run_id
+  end
+
+  if type(current) ~= 'table' or current.run_id ~= run_id then
+    current = {
+      run_id = run_id,
+      display_started_ms = now,
+      last_activity_ms = now,
+    }
+    state.overlay_tool_display = current
+  end
+
+  current.tool_call_id = sanitize_permission_text(tool_call_id) or current.tool_call_id
+  current.tool = sanitize_permission_text(tool_name) or current.tool
+  current.detail = sanitize_permission_text(detail) or current.detail
+  current.completed = false
+  current.post_tool_use_pending = nil
+  current.post_tool_use_hook_invocation_id = nil
+  current.result_text = nil
+  current.result_updated_ms = nil
+  current.last_activity_ms = now
+
+  state.active_tool = current.tool
+  state.active_tool_detail = current.detail
+  refresh_statuslines()
+  refresh_reasoning_overlay(true)
+  return current
 end
 
 local function extract_shell_command_text(data)
@@ -1747,7 +1784,7 @@ end
 
 local function capture_tool_execution_start(data)
   data = type(data) == 'table' and data or {}
-  local detail = extract_shell_tool_detail(data.toolName, data)
+  local detail = extract_shell_tool_detail(data.toolName, data) or state.pending_tool_detail
   local summary = summarize_tool_activity(data.toolName, data) or fallback_tool_activity_summary(data.toolName, detail)
   local tool_call_id = sanitize_permission_text(data.toolCallId)
 
@@ -1764,20 +1801,27 @@ local function capture_tool_execution_start(data)
       start_data = vim.deepcopy(data),
       progress_messages = {},
     })
-    return
+    if tool_call_id then
+      ensure_recent_activity_items()
+      state.recent_activity_tool_calls[tool_call_id] = #state.recent_activity_items
+    end
+  else
+    item.kind = 'tool'
+    item.summary = summary
+    item.tool_name = sanitize_permission_text(data.toolName)
+    item.tool_call_id = tool_call_id or item.tool_call_id
+    item.tool_detail = detail or item.tool_detail
+    item.start_data = vim.deepcopy(data)
+    item.progress_messages = item.progress_messages or {}
+    if tool_call_id then
+      ensure_recent_activity_items()
+      state.recent_activity_tool_calls[tool_call_id] = idx
+    end
   end
 
-  item.kind = 'tool'
-  item.summary = summary
-  item.tool_name = sanitize_permission_text(data.toolName)
-  item.tool_call_id = tool_call_id or item.tool_call_id
-  item.tool_detail = detail or item.tool_detail
-  item.start_data = vim.deepcopy(data)
-  item.progress_messages = item.progress_messages or {}
-  if tool_call_id then
-    ensure_recent_activity_items()
-    state.recent_activity_tool_calls[tool_call_id] = idx
-  end
+  begin_overlay_tool_display(tool_call_id, data.toolName, detail)
+  state.pending_tool_detail = nil
+  refresh_reasoning_overlay()
 end
 
 local function capture_tool_execution_partial_result(data)
@@ -3418,22 +3462,24 @@ local function handle_todo_event(event_type, data)
 
   if event_type == 'tool.execution_start' then
     local tool_call_id = sanitize_permission_text(data.toolCallId)
+    local detail = extract_shell_tool_detail(data.toolName, data) or state.pending_tool_detail
     local todo = ensure_todo_item(tool_call_id or next_todo_item_id('tool'), {
       kind = 'tool',
       parent_id = ensure_todo_root(),
-      title = summarize_tool_activity(data.toolName, data) or fallback_tool_activity_summary(data.toolName, extract_shell_tool_detail(data.toolName, data)),
+      title = summarize_tool_activity(data.toolName, data) or fallback_tool_activity_summary(data.toolName, detail),
       tool_name = sanitize_permission_text(data.toolName),
       tool_call_id = tool_call_id,
-      tool_detail = extract_shell_tool_detail(data.toolName, data),
+      tool_detail = detail,
       status = 'running',
     })
     todo.parent_id = ensure_todo_root()
     todo.kind = 'tool'
     todo.tool_name = sanitize_permission_text(data.toolName)
     todo.tool_call_id = tool_call_id or todo.tool_call_id
-    todo.tool_detail = extract_shell_tool_detail(data.toolName, data) or todo.tool_detail
+    todo.tool_detail = detail or todo.tool_detail
     todo.title = summarize_tool_activity(data.toolName, data) or todo.title
     todo.status = 'running'
+    state.pending_tool_detail = nil
     return true
   end
 

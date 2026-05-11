@@ -294,7 +294,8 @@ local function activity_overlay_lines(max_lines)
   end
   wrapped[1] = prefix .. wrapped[1]
 
-  local result_lines = wrap_activity_overlay_result_lines(normalize_activity_overlay_result_lines(overlay_tool.result_text))
+  local result_text = overlay_tool.post_tool_use_pending == true and nil or overlay_tool.result_text
+  local result_lines = wrap_activity_overlay_result_lines(normalize_activity_overlay_result_lines(result_text))
   if type(max_lines) == 'number' then
     max_lines = math.max(1, math.floor(max_lines))
     if #wrapped >= max_lines then
@@ -609,6 +610,8 @@ local function update_reasoning_overlay_now()
 
   local enabled, max_lines = reasoning_config()
   if state.history_loading then
+    state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+    state.overlay_tool_display = nil
     log(
       string.format(
         'reasoning overlay skipped enabled=%s history_loading=%s text_len=%d stored_lines=%d %s',
@@ -688,7 +691,7 @@ function M.refresh_reasoning_overlay(immediate)
     reasoning_timer:stop()
     reasoning_refresh_pending = false
     reasoning_last_refresh_ms = overlay_now_ms()
-    vim.schedule(update_reasoning_overlay_now)
+    update_reasoning_overlay_now()
     return
   end
 
@@ -2111,7 +2114,18 @@ function M.overlay_bottom_padding(task_line_count, reasoning_line_count)
 end
 
 local function current_overlay_follow_state()
-  local overlay_active = state.chat_busy == true or type(state.overlay_tool_display) == 'table'
+  local overlay_tool = state.overlay_tool_display
+  if type(overlay_tool) ~= 'table' then
+    local items = state.recent_activity_items or {}
+    for i = #items, 1, -1 do
+      local item = items[i]
+      if type(item) == 'table' and item.kind == 'tool' and tool_is_displayable_in_overlay(item.tool_name) then
+        overlay_tool = item
+        break
+      end
+    end
+  end
+  local overlay_active = state.chat_busy == true or type(overlay_tool) == 'table'
   if not overlay_active then
     return {
       task_count = 0,

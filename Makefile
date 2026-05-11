@@ -25,7 +25,7 @@ test-go:
 
 ## test-lua: run Lua integration tests with plenary
 test-lua:
-	nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedFile tests/integration/setup_spec.lua"
+	nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedFile tests/integration/setup_spec.lua" -c qa
 
 ## lint: run all linters (Lua + Go)
 lint: lint-lua lint-go

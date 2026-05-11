@@ -99,19 +99,17 @@ Beyond ACP, these plugins also support direct LLM API calls (multi-provider adap
 
 `copilot-agent.nvim` is narrower in scope but deeper in Copilot integration: the Go service embeds the Copilot SDK directly, so it gets SDK-native features (config discovery, custom agents, skill directories, sub-agent streaming) that no ACP bridge can expose.
 
-| Feature                      | **copilot-agent.nvim**                                                | codecompanion.nvim                        | avante.nvim                            |
-| ---------------------------- | --------------------------------------------------------------------- | ----------------------------------------- | -------------------------------------- |
-| Agent backend                | Copilot SDK (Go, embedded)                                            | ACP CLI agents or direct LLM adapters     | ACP CLI agents or direct LLM adapters  |
-| ACP support                  | ❌ (no plan)                                                          | ✅ (Claude Code, Codex, Copilot CLI, …)   | ✅ (Zen Mode)                          |
-| Multi-provider / BYO API key | ❌ (Copilot only)                                                     | ✅ (Anthropic, OpenAI, Gemini, Ollama, …) | ✅ (Claude, OpenAI, Gemini, Ollama, …) |
-| Tool-call execution          | SDK built-ins (file I/O, terminal, web search, ask_user …)            | Lua tools + ACP agent tools               | Rust tools + ACP agent tools           |
-| Sub-agent / streaming events | ✅ SDK-native                                                         | ❌                                        | ❌                                     |
-| Custom agents / skill dirs   | ✅                                                                    | ❌                                        | ❌                                     |
-| Permission management        | ✅ interactive / approve-reads / approve-all / autopilot / reject-all | ❌                                        | ❌                                     |
-| Session persistence          | ✅ per working directory                                              | ❌                                        | ❌                                     |
-| LSP code actions             | ✅ (explain / fix / add tests / add docs)                             | ✅ (via prompt library)                   | ❌                                     |
-| Chat modes                   | ask · plan · agent · autopilot                                        | chat · inline · workflow                  | ask · edit (Cursor-style)              |
-| GitHub Copilot subscription  | Required                                                              | Optional (one of many providers)          | Optional (one of many providers)       |
+| Feature                       | **copilot-agent.nvim**                           | codecompanion.nvim                        | avante.nvim                            |
+| ----------------------------- | ------------------------------------------------ | ----------------------------------------- | -------------------------------------- |
+| Agent backend                 | Copilot SDK (Go, embedded)                       | ACP CLI agents or direct LLM adapters     | ACP CLI agents or direct LLM adapters  |
+| ACP support                   | ❌ (no plan)                                     | ✅ (Claude Code, Codex, Copilot CLI, …)   | ✅ (Zen Mode)                          |
+| Multi-provider / BYO API key  | ❌ (Copilot only)                                | ✅ (Anthropic, OpenAI, Gemini, Ollama, …) | ✅ (Claude, OpenAI, Gemini, Ollama, …) |
+| Tool-call execution           | SDK built-ins (file, terminal, web, ask_user …)  | Lua tools + ACP agent tools               | Rust tools + ACP agent tools           |
+| Sub-agent / streaming events  | ✅ SDK-native                                    | ❌                                        | ❌                                     |
+| MCP, agents & skill discovery | ✅                                               | ❌                                        | ❌                                     |
+| Permission management         | ✅ 4 modes, 5 permissions (e.g. plan+allow_read) | ❌                                        | ❌                                     |
+| Session Persistence           | ✅ Deep session & checkpoint resume              | ❌                                        | ❌                                     |
+| LSP code actions              | ✅ (explain / fix / add tests / add docs)        | ✅ (via prompt library)                   | ❌                                     |
 
 **When to choose codecompanion / avante**: you want model flexibility, ACP access to Claude Code / Codex / Gemini CLI, or a large community ecosystem, and you're not exclusively on GitHub Copilot.
 

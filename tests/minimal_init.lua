@@ -7,6 +7,11 @@ local dev_root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h:h')
 -- Build a clean runtimepath containing only the Neovim runtime and the
 -- plugin under test.  This prevents user-installed plugins, ftplugins,
 -- and LSP configs from polluting the test environment.
+-- netrw's startup plugin does `packadd netrw`, which errors once we blank
+-- packpath for the isolated test harness.
+vim.g.loaded_netrw = 1
+vim.g.loaded_netrwPlugin = 1
+
 local nvim_runtime = vim.env.VIMRUNTIME
 vim.opt.runtimepath = { dev_root, nvim_runtime, nvim_runtime .. '/after' }
 vim.opt.packpath = {}
@@ -46,13 +51,6 @@ local function append_dependency(name)
 end
 
 append_dependency('plenary.nvim')
-
-if append_dependency('nvim-treesitter') then
-  pcall(vim.cmd, 'runtime plugin/nvim-treesitter.lua')
-  if vim.fn.exists(':TSInstallSync') == 2 then
-    pcall(vim.cmd, 'silent! TSInstallSync markdown')
-  end
-end
 
 vim.opt.swapfile = false
 vim.opt.backup = false

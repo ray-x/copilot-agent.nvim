@@ -1,0 +1,15 @@
+#!/bin/sh
+# Remove any 'Co-authored-by: ... Copilot' lines from the commit message file.
+# Usage: commit-msg <path-to-temp-commit-msg>
+MSG_FILE="$1"
+if [ -z "$MSG_FILE" ]; then
+  exit 0
+fi
+# Safely remove lines that reference Copilot as a co-author.
+# Match lines like: Co-authored-by: Copilot <...>
+grep -v -E '^Co-authored-by: .*Copilot' "$MSG_FILE" > "$MSG_FILE.tmp" || true
+# If grep failed and tmp not created, leave original message untouched.
+if [ -f "$MSG_FILE.tmp" ]; then
+  mv "$MSG_FILE.tmp" "$MSG_FILE"
+fi
+exit 0

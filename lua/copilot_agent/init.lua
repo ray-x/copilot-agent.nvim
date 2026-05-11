@@ -84,6 +84,8 @@ function M.setup(opts)
   state.dashboard_winid = nil
   state.dashboard_prompt_bufnr = nil
   state.dashboard_prompt_winid = nil
+  state._toggle_restore_input = false
+  state._toggle_restore_compose = false
   state.active_turn_assistant_index = nil
   state.live_assistant_entry_index = nil
   state.active_turn_assistant_message_id = nil

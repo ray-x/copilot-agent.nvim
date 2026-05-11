@@ -565,6 +565,8 @@ end
 
 -- Close the chat (and input) window without deleting the buffer.
 function M.close_chat_window()
+  state._toggle_restore_input = false
+  state._toggle_restore_compose = false
   if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
     vim.api.nvim_win_close(state.input_winid, true)
   end
@@ -576,16 +578,77 @@ function M.close_chat_window()
   if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
     vim.api.nvim_win_close(state.chat_winid, true)
   end
+  state.chat_winid = nil
   state._chat_was_open = false
+end
+
+local function hide_chat_windows_for_toggle()
+  state._toggle_restore_input = state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) or false
+  state._toggle_restore_compose = state.compose_winid and vim.api.nvim_win_is_valid(state.compose_winid) or false
+
+  if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then
+    vim.api.nvim_win_close(state.input_winid, true)
+  end
+  state.input_winid = nil
+
+  if state.compose_winid and vim.api.nvim_win_is_valid(state.compose_winid) then
+    vim.api.nvim_win_close(state.compose_winid, true)
+  end
+  state.compose_winid = nil
+
+  if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
+    vim.api.nvim_win_close(state.chat_winid, true)
+  end
+  state.chat_winid = nil
+  state._chat_was_open = false
+end
+
+local function reopen_hidden_chat_for_toggle()
+  local buf_name = (state.config.chat and state.config.chat.buf_name) or 'CopilotAgentChat'
+  local target_bufnr = state.chat_bufnr
+  if not (target_bufnr and vim.api.nvim_buf_is_valid(target_bufnr)) then
+    target_bufnr = find_chat_buffer_by_name(buf_name)
+  end
+  if not target_bufnr then
+    return false
+  end
+
+  state.chat_bufnr = target_bufnr
+  open_chat_win(target_bufnr)
+  refresh_chat_statusline()
+  state._chat_was_open = true
+
+  local restore_compose = state._toggle_restore_compose == true
+  local restore_input = state._toggle_restore_input == true
+  state._toggle_restore_input = false
+  state._toggle_restore_compose = false
+
+  if restore_compose or restore_input then
+    local input = require('copilot_agent.input')
+    if restore_compose then
+      input.open_compose_buffer()
+    elseif restore_input then
+      input.open_input_window()
+    end
+  end
+
+  return true
 end
 
 -- Toggle the chat window: close if visible, reopen if hidden.
 function M.toggle_chat()
   if state.chat_winid and vim.api.nvim_win_is_valid(state.chat_winid) then
-    M.close_chat_window()
-  else
-    M.ensure_chat_window()
+    hide_chat_windows_for_toggle()
+    return
   end
+
+  if reopen_hidden_chat_for_toggle() then
+    return
+  end
+
+  state._toggle_restore_input = false
+  state._toggle_restore_compose = false
+  M.ensure_chat_window()
 end
 
 -- Focus picker: list all chat buffers and jump to the selected one.

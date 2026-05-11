@@ -2419,9 +2419,19 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
     end
 
     state.creating_session = true
-    require('copilot_agent.session').resume_session(session_id, function(_, resume_err)
+    local session = require('copilot_agent.session')
+    session.resume_session(session_id, function(_, resume_err)
       if state.session_id ~= session_id then
         state.event_stream_recovery_session_id = nil
+        return
+      end
+      if resume_err and session.is_missing_session_error(resume_err) then
+        session.recover_after_service_restart(session_id, function(_, recovery_err)
+          state.event_stream_recovery_session_id = nil
+          if recovery_err then
+            append_entry('error', 'Failed to recover event stream: ' .. recovery_err)
+          end
+        end)
         return
       end
       state.event_stream_recovery_session_id = nil
@@ -2430,6 +2440,7 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
       end
     end, {
       guard_current_session_id = session_id,
+      suppress_error_ui = true,
     })
   end)
 end

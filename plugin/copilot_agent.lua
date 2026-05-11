@@ -24,7 +24,7 @@ end, {
 
 vim.api.nvim_create_user_command('CopilotAgentChatToggle', function()
   copilot_agent.toggle_chat()
-end, { desc = 'Toggle Copilot chat window (open if hidden, close if visible)' })
+end, { desc = 'Hide/show Copilot chat UI without restarting the session' })
 
 vim.api.nvim_create_user_command('CopilotAgentChatFocus', function()
   copilot_agent.focus_chat()

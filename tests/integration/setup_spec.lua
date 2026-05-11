@@ -4225,6 +4225,7 @@ describe('event stream recovery', function()
   local session
   local original_ensure_service_live
   local original_resume_session
+  local original_recover_after_service_restart
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
@@ -4246,11 +4247,13 @@ describe('event stream recovery', function()
     session = require('copilot_agent.session')
     original_ensure_service_live = service.ensure_service_live
     original_resume_session = session.resume_session
+    original_recover_after_service_restart = session.recover_after_service_restart
   end)
 
   after_each(function()
     service.ensure_service_live = original_ensure_service_live
     session.resume_session = original_resume_session
+    session.recover_after_service_restart = original_recover_after_service_restart
   end)
 
   it('reconnects the active session after a recoverable stream disconnect', function()
@@ -4272,6 +4275,37 @@ describe('event stream recovery', function()
 
     assert_eq(1, ensured)
     assert_eq('session-123', resumed_session_id)
+    assert_eq('system', agent.state.entries[#agent.state.entries].kind)
+    assert_eq('Event stream disconnected. Reconnecting...', agent.state.entries[#agent.state.entries].content)
+    assert_eq(nil, agent.state.event_stream_recovery_session_id)
+  end)
+
+  it('reattaches to the project when the restarted service no longer has the old session', function()
+    local ensured = 0
+    local resumed_session_id
+    local recovered_session_id
+
+    service.ensure_service_live = function(callback)
+      ensured = ensured + 1
+      callback(nil)
+    end
+    session.resume_session = function(session_id, callback, opts)
+      resumed_session_id = session_id
+      assert_true(opts.suppress_error_ui)
+      callback(nil, 'resume session: failed to resume session: JSON-RPC Error -32603: Request session.resume failed with message: Session not found: ' .. session_id)
+    end
+    session.recover_after_service_restart = function(session_id, callback)
+      recovered_session_id = session_id
+      if callback then
+        callback(session_id, nil)
+      end
+    end
+
+    events._handle_event_stream_exit('session-123', 18, 'curl: (18) transfer closed with outstanding read data remaining')
+
+    assert_eq(1, ensured)
+    assert_eq('session-123', resumed_session_id)
+    assert_eq('session-123', recovered_session_id)
     assert_eq('system', agent.state.entries[#agent.state.entries].kind)
     assert_eq('Event stream disconnected. Reconnecting...', agent.state.entries[#agent.state.entries].content)
     assert_eq(nil, agent.state.event_stream_recovery_session_id)
@@ -6201,6 +6235,53 @@ describe('session resume guards', function()
 
     assert_false(prompted)
     assert_eq('stale-live-session', resumed_session_id)
+    assert_eq(nil, callback_error)
+  end)
+
+  it('recovers by recreating the missing session under the same session id', function()
+    local requests = {}
+    local callback_session_id
+    local callback_error
+    local started_session_id
+    local cwd = require('copilot_agent.service').working_directory()
+
+    agent.state.session_id = 'stale-session'
+    agent.state.session_name = 'Stale session'
+    agent.state.session_working_directory = cwd
+    agent._ensure_chat_window = function() end
+    events.start_event_stream = function(session_id)
+      started_session_id = session_id
+    end
+
+    http.request = function(method, path, body, callback)
+      requests[#requests + 1] = {
+        method = method,
+        path = path,
+        body = body,
+      }
+      assert_eq('POST', method)
+      assert_eq('/sessions', path)
+      assert_eq('stale-session', body.sessionId)
+      assert_eq(nil, body.resume)
+      callback({
+        sessionId = 'stale-session',
+        summary = 'Stale session',
+        workingDirectory = cwd,
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.session'] = nil
+    session = require('copilot_agent.session')
+    session.recover_after_service_restart('stale-session', function(session_id, err)
+      callback_session_id = session_id
+      callback_error = err
+    end)
+
+    assert_eq(1, #requests)
+    assert_eq('POST', requests[1].method)
+    assert_eq('stale-session', started_session_id)
+    assert_eq('stale-session', agent.state.session_id)
+    assert_eq('stale-session', callback_session_id)
     assert_eq(nil, callback_error)
   end)
 
@@ -10000,6 +10081,46 @@ describe('chat input behavior', function()
     end
   end)
 
+  it('hides and re-shows chat without replaying the transcript buffer', function()
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+    local sentinel = 'toggle should preserve existing buffer lines'
+
+    vim.bo[bufnr].modifiable = true
+    vim.bo[bufnr].readonly = false
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { sentinel })
+    vim.bo[bufnr].readonly = true
+    vim.bo[bufnr].modifiable = false
+    agent.state.entries = {}
+
+    agent.toggle_chat()
+    assert_eq(nil, agent.state.chat_winid)
+
+    agent.toggle_chat()
+
+    assert_true(agent.state.chat_winid and vim.api.nvim_win_is_valid(agent.state.chat_winid))
+    assert_eq(bufnr, agent.state.chat_bufnr)
+    assert_eq(sentinel, (vim.api.nvim_buf_get_lines(bufnr, 0, 1, false) or {})[1])
+  end)
+
+  it('restores the prompt input window when chat UI is toggled back on', function()
+    agent.open_chat()
+    input.open_input_window()
+
+    local input_bufnr = agent.state.input_bufnr
+    local prefix = input._input_prompt_prefix(input_bufnr)
+    vim.api.nvim_buf_set_lines(input_bufnr, 0, -1, false, { prefix .. 'draft after toggle' })
+
+    agent.toggle_chat()
+    assert_eq(nil, agent.state.input_winid)
+
+    agent.toggle_chat()
+
+    assert_true(agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid))
+    assert_eq(input_bufnr, agent.state.input_bufnr)
+    assert_eq(prefix .. 'draft after toggle', (vim.api.nvim_buf_get_lines(input_bufnr, 0, 1, false) or {})[1])
+  end)
+
   it('reanchors the input window below the active chat window', function()
     agent.open_chat()
     input.open_input_window()
@@ -10220,17 +10341,23 @@ describe('chat input behavior', function()
     end
 
     local model_items = completion_items('/model ')
-    local model_item = vim.tbl_filter(function(i) return i.word == '/model test-model' end, model_items)[1]
+    local model_item = vim.tbl_filter(function(i)
+      return i.word == '/model test-model'
+    end, model_items)[1]
     assert_true(model_item ~= nil)
     assert_eq('/model test-model', model_item.abbr)
 
     local lsp_items = completion_items('/lsp ')
-    local lsp_item = vim.tbl_filter(function(i) return i.word == '/lsp create' end, lsp_items)[1]
+    local lsp_item = vim.tbl_filter(function(i)
+      return i.word == '/lsp create'
+    end, lsp_items)[1]
     assert_true(lsp_item ~= nil)
     assert_eq('/lsp create', lsp_item.abbr)
 
     local mcp_items = completion_items('/mcp ')
-    local mcp_item = vim.tbl_filter(function(i) return i.word == '/mcp add' end, mcp_items)[1]
+    local mcp_item = vim.tbl_filter(function(i)
+      return i.word == '/mcp add'
+    end, mcp_items)[1]
     assert_true(mcp_item ~= nil)
     assert_eq('/mcp add', mcp_item.abbr)
   end)

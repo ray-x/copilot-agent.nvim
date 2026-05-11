@@ -189,6 +189,13 @@ local function latest_matching_session(sessions, target_cwd)
   return matching[1]
 end
 
+local function is_missing_session_error(err)
+  if type(err) ~= 'string' then
+    return false
+  end
+  return err:lower():find('session not found', 1, true) ~= nil
+end
+
 -- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
 function M.discard_pending_attachments()
   for _, a in ipairs(state.pending_attachments) do
@@ -335,8 +342,10 @@ function M.resume_session(session_id, callback, opts)
   }, function(response, err)
     state.creating_session = false
     if err then
-      notify('Failed to resume session: ' .. err, vim.log.levels.ERROR)
-      append_entry('error', 'Failed to resume session: ' .. err)
+      if opts.suppress_error_ui ~= true then
+        notify('Failed to resume session: ' .. err, vim.log.levels.ERROR)
+        append_entry('error', 'Failed to resume session: ' .. err)
+      end
       on_session_ready(nil, err)
       if callback then
         callback(nil, err)
@@ -483,6 +492,21 @@ function M.attach_latest_project_session_or_create(callback)
       create_session(callback)
     end)
   end)
+end
+
+function M.is_missing_session_error(err)
+  return is_missing_session_error(err)
+end
+
+function M.recover_after_service_restart(unavailable_session_id, callback)
+  callback = callback or function() end
+  log(string.format('recover_after_service_restart unavailable=%s cwd=%s', format_session_id(unavailable_session_id), tostring(working_directory())), vim.log.levels.WARN)
+
+  reset_for_session_switch()
+  append_entry('system', 'Previous session is unavailable after service restart. Recreating it...')
+  create_session(callback, {
+    session_id = unavailable_session_id,
+  })
 end
 
 function M.pick_or_create_session(callback)
@@ -664,6 +688,7 @@ create_session = function(callback, opts)
     vim.log.levels.DEBUG
   )
   request('POST', '/sessions', {
+    sessionId = opts.session_id,
     clientName = state.config.client_name,
     permissionMode = state.permission_mode or state.config.permission_mode,
     workingDirectory = requested_wd,

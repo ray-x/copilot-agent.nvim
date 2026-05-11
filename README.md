@@ -351,7 +351,7 @@ See [server/README.md](server/README.md#running-the-service-manually) for manual
 | `:CopilotAgentInstall`           | Download pre-built binary for the current platform         |
 | `:CopilotAgentDashboard`         | Open the Copilot Agent startup dashboard                   |
 | `:CopilotAgentChat [fullscreen]` | Open the chat buffer; `fullscreen` opens in a new tab      |
-| `:CopilotAgentChatToggle`        | Toggle chat window (open if hidden, close if visible)      |
+| `:CopilotAgentChatToggle`        | Hide/show chat + input UI windows without reconnect/replay |
 | `:CopilotAgentChatFocus`         | Focus or switch to an open chat buffer                     |
 | `:CopilotAgentAsk [prompt]`      | Send a prompt; no argument opens the input buffer          |
 | `:CopilotAgentCompose [tab]`     | Open the compose scratch buffer; `tab` opens it in a new tab |

@@ -83,5 +83,6 @@ jobs:
           export PATH="${PWD}/_neovim/bin:${PATH}"
           nvim --headless -u tests/minimal_init.lua \
             -c "PlenaryBustedFile tests/integration/setup_spec.lua" \
+            -c qa \
             2>&1
           echo "Exit code: $?"

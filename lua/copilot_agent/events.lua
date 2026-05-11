@@ -3946,7 +3946,7 @@ local function handle_session_event(payload)
             notify('Checkpoint unavailable: ' .. checkpoint_err, vim.log.levels.WARN)
           end
           if not checkpoint_err and pending_turn and pending_turn.session_id == state.session_id then
-            summarize_checkpoint_code_change(state.session_id)
+            checkpoint_diff.summarize_checkpoint_code_change(state.session_id)
           end
           refresh_statuslines()
           render_chat()

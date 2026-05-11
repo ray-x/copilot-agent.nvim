@@ -186,4 +186,44 @@ function M.is_connection_error(err)
   return false
 end
 
+
+-- Utility helpers moved from events.lua
+function M.append_unique(items, value)
+  if type(value) ~= 'string' or value == '' then
+    return
+  end
+  for _, existing in ipairs(items) do
+    if existing == value then
+      return
+    end
+  end
+  items[#items + 1] = value
+end
+
+function M.append_unique_activity_output(parts, text)
+  text = M.split_lines(text) and table.concat(M.split_lines(text), "\n") or text
+  if type(text) ~= 'string' or text == '' then
+    return
+  end
+  for _, existing in ipairs(parts) do
+    if existing == text then
+      return
+    end
+  end
+  parts[#parts + 1] = text
+end
+
+function M.summarize_file_group(verb, items)
+  if #items == 0 then
+    return nil
+  end
+  if #items == 1 then
+    return verb .. ' ' .. items[1]
+  end
+  if #items <= 3 then
+    return verb .. ' ' .. table.concat(items, ', ')
+  end
+  return verb .. ' ' .. tostring(#items) .. ' files'
+end
+
 return M

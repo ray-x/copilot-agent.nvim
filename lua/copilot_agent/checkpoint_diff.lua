@@ -210,4 +210,132 @@ function M.review_diff()
   end)
 end
 
+
+-- Checkpoint diff helpers moved from events.lua
+local render = require('copilot_agent.render')
+local logger = require('copilot_agent.log')
+local log = logger.log
+
+local function update_last_activity_with_code_change(from_commit, to_commit, diff_items)
+  local summary
+  if #diff_items > 0 then
+    local first = diff_items[1]
+    if #diff_items == 1 and type(first.path) == 'string' then
+      local add = first.additions and ('+' .. tostring(first.additions)) or '+?'
+      local del = first.deletions and ('-' .. tostring(first.deletions)) or '-?'
+      summary = string.format('Edited %s %s %s', first.path, add, del)
+    else
+      summary = string.format('Edited %d files', #diff_items)
+    end
+  end
+  if not summary then
+    return
+  end
+  local updated = render.update_last_activity_entry(function(entry)
+    entry.kind = 'activity'
+    entry.content = summary
+    entry.code_change = {
+      from_commit = from_commit,
+      to_commit = to_commit,
+      files = diff_items,
+    }
+    entry.activity_items = {
+      {
+        kind = 'code_change',
+        summary = summary,
+        from_commit = from_commit,
+        to_commit = to_commit,
+        diffstat = diff_items,
+      },
+    }
+  end)
+  if updated then
+    render.render_chat()
+  end
+end
+
+function M.collect_checkpoint_diff_items(text)
+  local diff_items = {}
+  for line in vim.trim(text or ''):gmatch('[^\r\n]+') do
+    local added, deleted, path = line:match('^(.-)\t(.-)\t(.+)$')
+    if added and deleted and path then
+      local function normalize_num(value)
+        value = vim.trim(value or '')
+        if value == '-' then
+          return nil
+        end
+        return tonumber(value)
+      end
+      diff_items[#diff_items + 1] = {
+        path = path,
+        additions = normalize_num(added),
+        deletions = normalize_num(deleted),
+      }
+    end
+  end
+  return diff_items
+end
+
+function M.run_checkpoint_numstat(session_id, workspace, from_commit, to_commit)
+  local checkpoint_git_dir = require('copilot_agent.checkpoints')._session_dir(session_id) .. '/repo/.git'
+  local cmd = {
+    'git',
+    '--no-pager',
+    '--git-dir=' .. checkpoint_git_dir,
+    '--work-tree=' .. workspace,
+    'diff',
+    '--numstat',
+    from_commit,
+    to_commit,
+    '--',
+    '.',
+  }
+  log(string.format('checkpoint numstat cwd=%s cmd=%s', workspace, table.concat(cmd, ' ')), vim.log.levels.DEBUG)
+  vim.system(cmd, { cwd = workspace, text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 then
+        local message = vim.trim(result.stderr or result.stdout or '')
+        log('checkpoint diffstat unavailable: ' .. tostring(message ~= '' and message or table.concat(cmd, ' ')), vim.log.levels.DEBUG)
+        return
+      end
+      update_last_activity_with_code_change(from_commit, to_commit, M.collect_checkpoint_diff_items(result.stdout))
+    end)
+  end)
+end
+
+function M.summarize_checkpoint_code_change(session_id)
+  local workspace = require('copilot_agent.config').state.session_working_directory or require('copilot_agent.service').working_directory()
+  if type(session_id) ~= 'string' or session_id == '' or type(workspace) ~= 'string' or workspace == '' then
+    return
+  end
+  local checkpoint_items = require('copilot_agent.checkpoints').list(session_id)
+  local current = checkpoint_items[#checkpoint_items]
+  if not current or type(current.commit) ~= 'string' or current.commit == '' then
+    return
+  end
+  local previous = checkpoint_items[#checkpoint_items - 1]
+  local checkpoint_git_dir = require('copilot_agent.checkpoints')._session_dir(session_id) .. '/repo/.git'
+  if previous and type(previous.commit) == 'string' and previous.commit ~= '' then
+    M.run_checkpoint_numstat(session_id, workspace, previous.commit, current.commit)
+    return
+  end
+  local parent_cmd = {
+    'git',
+    '--no-pager',
+    '--git-dir=' .. checkpoint_git_dir,
+    '--work-tree=' .. workspace,
+    'show',
+    '-s',
+    '--format=%P',
+    current.commit,
+  }
+  vim.system(parent_cmd, { cwd = workspace, text = true }, function(parent_result)
+    vim.schedule(function()
+      local parent_output = vim.trim(parent_result.stdout or '')
+      local parent_commit = parent_output:match('^(%S+)') or '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+      M.run_checkpoint_numstat(session_id, workspace, parent_commit, current.commit)
+    end)
+  end)
+end
+
 return M

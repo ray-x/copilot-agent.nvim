@@ -186,7 +186,6 @@ function M.is_connection_error(err)
   return false
 end
 
-
 -- Utility helpers moved from events.lua
 function M.append_unique(items, value)
   if type(value) ~= 'string' or value == '' then
@@ -201,7 +200,7 @@ function M.append_unique(items, value)
 end
 
 function M.append_unique_activity_output(parts, text)
-  text = M.split_lines(text) and table.concat(M.split_lines(text), "\n") or text
+  text = M.split_lines(text) and table.concat(M.split_lines(text), '\n') or text
   if type(text) ~= 'string' or text == '' then
     return
   end
@@ -224,6 +223,61 @@ function M.summarize_file_group(verb, items)
     return verb .. ' ' .. table.concat(items, ', ')
   end
   return verb .. ' ' .. tostring(#items) .. ' files'
+end
+
+function M.first_non_empty(...)
+  for i = 1, select('#', ...) do
+    local v = select(i, ...)
+    if type(v) == 'string' and v ~= '' then
+      return v
+    end
+  end
+  return nil
+end
+
+function M.truncate_session_log_content(text, max_len)
+  if type(text) ~= 'string' then
+    return text or ''
+  end
+  max_len = tonumber(max_len) or 0
+  if max_len < 1 or #text <= max_len then
+    return text
+  end
+  return text:sub(1, max_len - 1) .. '…'
+end
+
+function M.preview_log_text(text, max_len, min_chars, default_max)
+  if type(text) ~= 'string' then
+    return '<non-string>'
+  end
+  min_chars = tonumber(min_chars) or 16
+  default_max = tonumber(default_max) or math.max(min_chars, 32)
+  max_len = math.max(min_chars, math.floor(tonumber(max_len) or default_max))
+  if #text > max_len then
+    text = text:sub(1, max_len - 1) .. '…'
+  end
+  return text:gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
+end
+
+function M.decode_json_silently(raw)
+  if raw == nil or raw == '' then
+    return nil
+  end
+
+  local decoder
+  if vim.json and type(vim.json.decode) == 'function' then
+    decoder = vim.json.decode
+  elseif type(vim.fn.json_decode) == 'function' then
+    decoder = vim.fn.json_decode
+  else
+    return nil, 'no JSON decoder available in this Neovim version'
+  end
+
+  local ok, decoded = pcall(decoder, raw)
+  if ok then
+    return decoded
+  end
+  return nil, decoded
 end
 
 return M

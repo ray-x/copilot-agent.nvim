@@ -2,11 +2,6 @@
 -- Use of this source code is governed by an Apache 2.0
 -- license that can be found in the LICENSE file.
 
-local cfg = require('copilot_agent.config')
-local notify = cfg.notify
-local checkpoints = require('copilot_agent.checkpoints')
-local window = require('copilot_agent.window')
-
 local M = {}
 
 local function checkpoint_diff_workspace()
@@ -210,7 +205,6 @@ function M.review_diff()
   end)
 end
 
-
 -- Checkpoint diff helpers moved from events.lua
 local render = require('copilot_agent.render')
 local logger = require('copilot_agent.log')
@@ -277,11 +271,10 @@ function M.collect_checkpoint_diff_items(text)
 end
 
 function M.run_checkpoint_numstat(session_id, workspace, from_commit, to_commit)
-  local checkpoint_git_dir = require('copilot_agent.checkpoints')._session_dir(session_id) .. '/repo/.git'
   local cmd = {
     'git',
     '--no-pager',
-    '--git-dir=' .. checkpoint_git_dir,
+    '--git-dir=' .. checkpoint_git_dir(session_id),
     '--work-tree=' .. workspace,
     'diff',
     '--numstat',
@@ -314,7 +307,6 @@ function M.summarize_checkpoint_code_change(session_id)
     return
   end
   local previous = checkpoint_items[#checkpoint_items - 1]
-  local checkpoint_git_dir = require('copilot_agent.checkpoints')._session_dir(session_id) .. '/repo/.git'
   if previous and type(previous.commit) == 'string' and previous.commit ~= '' then
     M.run_checkpoint_numstat(session_id, workspace, previous.commit, current.commit)
     return
@@ -322,7 +314,7 @@ function M.summarize_checkpoint_code_change(session_id)
   local parent_cmd = {
     'git',
     '--no-pager',
-    '--git-dir=' .. checkpoint_git_dir,
+    '--git-dir=' .. checkpoint_git_dir(session_id),
     '--work-tree=' .. workspace,
     'show',
     '-s',

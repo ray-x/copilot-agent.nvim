@@ -6,6 +6,7 @@ local source_path = debug.getinfo(1, 'S').source
 local module_path = type(source_path) == 'string' and vim.fn.fnamemodify(source_path:gsub('^@', ''), ':p') or nil
 local plugin_root = module_path and vim.fn.fnamemodify(module_path, ':h:h:h') or nil
 local utils = require('copilot_agent.utils')
+-- local cfg = require('copilot_agent.config')
 
 local M = {}
 local MIN_SERIALIZED_LOG_LENGTH = 32 -- Even very small log previews should leave enough room for a useful snippet plus an ellipsis.
@@ -69,16 +70,8 @@ local function resolve_file_log_batch_config()
 
   return {
     enabled = file_log_batch.enabled ~= false,
-    flush_interval_ms = normalize_integer(
-      file_log_batch.flush_interval_ms,
-      DEFAULT_FILE_LOG_BATCH_FLUSH_INTERVAL_MS,
-      MIN_FILE_LOG_BATCH_FLUSH_INTERVAL_MS
-    ),
-    max_entries = normalize_integer(
-      file_log_batch.max_entries,
-      DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES,
-      MIN_FILE_LOG_BATCH_MAX_ENTRIES
-    ),
+    flush_interval_ms = normalize_integer(file_log_batch.flush_interval_ms, DEFAULT_FILE_LOG_BATCH_FLUSH_INTERVAL_MS, MIN_FILE_LOG_BATCH_FLUSH_INTERVAL_MS),
+    max_entries = normalize_integer(file_log_batch.max_entries, DEFAULT_FILE_LOG_BATCH_MAX_ENTRIES, MIN_FILE_LOG_BATCH_MAX_ENTRIES),
   }
 end
 
@@ -107,12 +100,7 @@ local function drain_log_queue()
   local grouped_paths = {}
 
   for _, entry in ipairs(queue) do
-    if
-      type(entry) == 'table'
-      and type(entry.path) == 'string'
-      and entry.path ~= ''
-      and type(entry.line) == 'string'
-    then
+    if type(entry) == 'table' and type(entry.path) == 'string' and entry.path ~= '' and type(entry.line) == 'string' then
       if not grouped_lines[entry.path] then
         grouped_lines[entry.path] = {}
         grouped_paths[#grouped_paths + 1] = entry.path
@@ -163,19 +151,21 @@ end
 
 function M.serialize_log_value(value, opts)
   opts = opts or {}
-  local max_len =
-    math.max(MIN_SERIALIZED_LOG_LENGTH, math.floor(tonumber(opts.max_len) or DEFAULT_SERIALIZED_LOG_LENGTH))
-  local inspect_depth =
-    math.max(MIN_SERIALIZED_LOG_DEPTH, math.floor(tonumber(opts.depth) or DEFAULT_SERIALIZED_LOG_DEPTH))
+  local configured_max = (current_config() and current_config().log_content_length) or DEFAULT_SERIALIZED_LOG_LENGTH
+  local max_len = math.max(MIN_SERIALIZED_LOG_LENGTH, math.floor(tonumber(opts.max_len) or configured_max))
+  local inspect_depth = math.max(MIN_SERIALIZED_LOG_DEPTH, math.floor(tonumber(opts.depth) or DEFAULT_SERIALIZED_LOG_DEPTH))
   local text
 
   if type(value) == 'string' then
     text = value
   else
-    local ok, inspected = pcall(vim.inspect, value, {
+    -- Sanitize structured payloads (redact/trim fields like content/encryptedContent)
+    local ok_sanitize, sanitized = pcall(function() return M.sanitize_log_value(value) end)
+    local to_inspect = ok_sanitize and sanitized or value
+    local ok, inspected = pcall(vim.inspect, to_inspect, {
       depth = inspect_depth,
     })
-    text = ok and inspected or tostring(value)
+    text = ok and inspected or tostring(to_inspect)
   end
 
   text = tostring(text):gsub('\r\n?', '\n'):gsub('\n', '\\n'):gsub('\t', '\\t')
@@ -248,6 +238,53 @@ function M.notify(message, level)
     return
   end
   vim.notify('[copilot-agent] ' .. message, level or vim.log.levels.INFO)
+end
+
+local function truncate_log(text)
+  local REASONING_ID_MAX_CHARS = 32 -- Reasoning IDs are only diagnostic breadcrumbs, so a short fixed-width prefix is enough in logs.
+  if type(text) ~= 'string' then
+    return text
+  end
+  if #text > REASONING_ID_MAX_CHARS then
+    return text:sub(1, REASONING_ID_MAX_CHARS)
+  end
+  return text
+end
+
+M.sanitize_log_value = function(value, seen)
+  if type(value) ~= 'table' then
+    return value
+  end
+
+  -- local log_content_length = cfg.log_content_length
+  seen = seen or {}
+  if seen[value] then
+    return '<cycle>'
+  end
+  seen[value] = true
+
+  local sanitized = {}
+  if vim.islist(value) then
+    for idx, item in ipairs(value) do
+      sanitized[idx] = M.sanitize_log_value(item, seen)
+    end
+  else
+    for key, item in pairs(value) do
+      local key_name = type(key) == 'string' and key:lower() or nil
+      if key_name ~= 'encryptedcontent' then
+        if key_name == 'content' and type(item) == 'string' then
+          sanitized[key] = utils.truncate_session_log_content(item, (current_config() and current_config().log_content_length) or 0)
+        elseif (key_name == 'reasoningid' or key_name == 'reasoning_id') and type(item) == 'string' then
+          sanitized[key] = truncate_log(item)
+        else
+          sanitized[key] = M.sanitize_log_value(item, seen)
+        end
+      end
+    end
+  end
+
+  seen[value] = nil
+  return sanitized
 end
 
 return M

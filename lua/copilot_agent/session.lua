@@ -375,7 +375,6 @@ function M.resume_session(session_id, callback, opts)
     -- Ensure an initial checkpoint exists for the session so diffs have a baseline.
     -- Create or initialize checkpoint repo asynchronously but don't block resume.
     pcall(function()
-      local checkpoints = require('copilot_agent.checkpoints')
       if checkpoints and type(checkpoints.ensure_initial_checkpoint) == 'function' then
         pcall(checkpoints.ensure_initial_checkpoint, state.session_id, state.session_working_directory)
       end

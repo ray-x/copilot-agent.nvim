@@ -1562,7 +1562,7 @@ end
 
 local function setup_completion_keymaps(bufnr)
   vim.bo[bufnr].omnifunc = ''
-  vim.api.nvim_buf_set_option(bufnr, 'completefunc', "v:lua.require'copilot_agent'.input_completefunc")
+  vim.bo[bufnr].completefunc = "v:lua.require'copilot_agent'.input_completefunc"
   publish_input_completefunc()
 
   local runtime = completion_runtime[bufnr] or {}
@@ -2121,6 +2121,10 @@ local function create_input_buffer()
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].bufhidden = 'hide'
+  -- Disable ftplugin execution and treesitter for this transient plugin-owned
+  -- markdown buffer to avoid upstream ftplugin/treesitter races in headless tests.
+  vim.b[bufnr].did_ftplugin = true
+  vim.b[bufnr].copilot_agent_treesitter_disabled = true
   vim.bo[bufnr].filetype = 'markdown'
   -- Keep copilot.lua enabled for the dedicated chat input buffer.
   vim.b[bufnr].copilot_enabled = true
@@ -2469,6 +2473,10 @@ local function create_compose_buffer()
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].bufhidden = 'hide'
+  -- Disable ftplugin execution and treesitter for this transient plugin-owned
+  -- markdown buffer to avoid upstream ftplugin/treesitter races in headless tests.
+  vim.b[bufnr].did_ftplugin = true
+  vim.b[bufnr].copilot_agent_treesitter_disabled = true
   vim.bo[bufnr].filetype = 'markdown'
   vim.b[bufnr].copilot_enabled = true
 

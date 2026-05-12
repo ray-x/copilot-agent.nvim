@@ -544,7 +544,7 @@ function M.ensure_initial_checkpoint(session_id, workspace)
   end
   -- Create an initial checkpoint capturing current workspace state.
   local ok, err = pcall(function()
-    M.create(session_id, 'initial checkpoint', function(create_err, checkpoint_id, commit)
+    M.create(session_id, 'initial checkpoint', function(_create_err, _checkpoint_id, _commit)
       -- ignore errors here; caller shouldn't block session resume on checkpoint creation
     end, {})
   end)

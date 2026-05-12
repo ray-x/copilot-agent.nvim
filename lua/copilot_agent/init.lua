@@ -4,6 +4,22 @@
 
 local M = {}
 
+-- Wrap vim.treesitter.start with a safe pcall wrapper to avoid E5113 runtime
+-- errors in headless or limited runtimes where internal npcalls may be nil.
+if type(vim) == 'table' and type(vim.treesitter) == 'table' and type(vim.treesitter.start) == 'function' then
+  local _orig_treesitter_start = vim.treesitter.start
+  vim.treesitter.start = function(...)
+    local ok, err = pcall(_orig_treesitter_start, ...)
+    if not ok then
+      local ok_log, logger = pcall(require, 'copilot_agent.log')
+      if ok_log and type(logger.log) == 'function' then
+        logger.log('vim.treesitter.start suppressed error: ' .. tostring(err), vim.log.levels.DEBUG)
+      end
+      return nil
+    end
+  end
+end
+
 -- ── Module requires ───────────────────────────────────────────────────────────
 local cfg = require('copilot_agent.config')
 local defaults = cfg.defaults
@@ -204,21 +220,13 @@ function M.setup(opts)
 end
 
 function M.open_chat(opts)
+  -- Default to collapsed activity summaries whenever chat is (re)opened.
+  state.activity_entries_visible = false
   ensure_chat_window(opts)
 
   -- If ensure_chat_window somehow didn't create the buffer (rare race), try once more.
   if not state.chat_bufnr or not vim.api.nvim_buf_is_valid(state.chat_bufnr) then
     pcall(ensure_chat_window, opts)
-  end
-
-  -- Debug: if chat buffer still missing, log a traceback for investigation (non-fatal)
-  if not state.chat_bufnr or not vim.api.nvim_buf_is_valid(state.chat_bufnr) then
-    local ok, f = pcall(io.open, '/tmp/copilot-open-chat-error.log', 'a')
-    if ok and f then
-      pcall(f.write, f, os.date('%Y-%m-%dT%H:%M:%S') .. ' open_chat: chat_bufnr still invalid, chat_winid=' .. tostring(state.chat_winid) .. '\n')
-      pcall(f.write, f, debug.traceback() .. '\n')
-      pcall(f.close, f)
-    end
   end
 
   if state.config.auto_create_session and not state.session_id then

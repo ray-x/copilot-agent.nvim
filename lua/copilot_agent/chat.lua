@@ -30,6 +30,9 @@ local refresh_reasoning_overlay = render.refresh_reasoning_overlay
 
 local M = {}
 
+-- Forward declaration so early callers can reference ensure_chat_keymaps
+local ensure_chat_keymaps
+
 local function attach_chat_markdown(winid)
   win.disable_folds(winid)
   win.set_window_syntax(winid, 'markdown')
@@ -107,6 +110,8 @@ local function help_lines()
     '  Press any key to close',
   }
 end
+
+-- ensure_chat_keymaps is defined later (avoids duplicate definitions)
 
 function M.find_chat_window()
   if not (state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr)) then
@@ -429,12 +434,16 @@ function M.ensure_chat_window(opts)
     if chat_winid then
       state.chat_winid = chat_winid
       attach_chat_markdown(chat_winid)
+      ensure_chat_keymaps(state.chat_bufnr)
       vim.api.nvim_set_current_win(chat_winid)
       state._chat_was_open = true
       return state.chat_bufnr
     end
     -- Buffer exists but window was closed — reopen it.
     open_chat_win(state.chat_bufnr, opts)
+    ensure_chat_keymaps(state.chat_bufnr)
+    -- Ensure activity entries are hidden by default when reopening the chat buffer
+    state.activity_entries_visible = false
     reset_frozen_render()
     render_chat()
     refresh_chat_statusline()
@@ -451,11 +460,15 @@ function M.ensure_chat_window(opts)
     local chat_winid = M.find_chat_window()
     if chat_winid then
       attach_chat_markdown(chat_winid)
+      ensure_chat_keymaps(state.chat_bufnr)
       vim.api.nvim_set_current_win(chat_winid)
       state._chat_was_open = true
       return state.chat_bufnr
     end
     open_chat_win(existing_bufnr, opts)
+    ensure_chat_keymaps(state.chat_bufnr)
+    -- Ensure activity entries are hidden by default when creating the chat window
+    state.activity_entries_visible = false
     reset_frozen_render()
     render_chat()
     refresh_chat_statusline()
@@ -481,44 +494,81 @@ function M.ensure_chat_window(opts)
   open_chat_win(bufnr, opts)
   refresh_chat_statusline()
 
-  -- Tell render-markdown.nvim (and similar) to enable on this buffer.
-  -- It defaults to skipping nofile buffers, so we explicitly enable it.
-  -- Skipped when chat.render_markdown = false.
-  if state.config.chat and state.config.chat.render_markdown ~= false then
-    vim.schedule(function()
-      if not vim.api.nvim_buf_is_valid(bufnr) then
-        return
-      end
-      if vim.b[bufnr].copilot_agent_treesitter_disabled then
-        return
-      end
-      local ok, rm = pcall(require, 'render-markdown')
-      if ok and rm.enable then
-        pcall(rm.enable, { buf = bufnr })
-      end
-    end)
+  local function _maybe_enable_render_markdown(b)
+    if state.config.chat and state.config.chat.render_markdown ~= false then
+      vim.schedule(function()
+        if not vim.api.nvim_buf_is_valid(b) then
+          return
+        end
+        if vim.b[b].copilot_agent_treesitter_disabled then
+          return
+        end
+        local ok, rm = pcall(require, 'render-markdown')
+        if ok and rm.enable then
+          pcall(rm.enable, { buf = b })
+        end
+      end)
+    end
   end
 
-  vim.keymap.set('n', 'q', function()
-    M.close_chat_window()
-  end, { buffer = bufnr, silent = true, desc = 'Close Copilot chat window' })
+  ensure_chat_keymaps = function(b)
+    if not vim.api.nvim_buf_is_valid(b) then
+      return
+    end
+    vim.keymap.set('n', 'q', function()
+      M.close_chat_window()
+    end, { buffer = b, silent = true, desc = 'Close Copilot chat window' })
 
-  vim.keymap.set('n', '<C-c>', function()
-    require('copilot_agent').cancel()
-  end, { buffer = bufnr, silent = true, desc = 'Cancel the current Copilot turn' })
+    vim.keymap.set('n', '<C-c>', function()
+      require('copilot_agent').cancel()
+    end, { buffer = b, silent = true, desc = 'Cancel the current Copilot turn' })
 
-  vim.keymap.set('n', 'R', function()
-    reset_frozen_render()
-    render_chat()
-  end, { buffer = bufnr, silent = true })
+    vim.keymap.set('n', 'R', function()
+      reset_frozen_render()
+      render_chat()
+    end, { buffer = b, silent = true })
 
-  vim.keymap.set('n', 'zA', function()
-    render.toggle_activity_entries()
-  end, { buffer = bufnr, silent = true, desc = 'Toggle Activity transcript details' })
+    vim.keymap.set('n', 'zA', function()
+      render.toggle_activity_entries()
+    end, { buffer = b, silent = true, desc = 'Toggle Activity transcript details' })
 
-  vim.keymap.set('n', 'gA', function()
-    render.show_activity_details_under_cursor()
-  end, { buffer = bufnr, silent = true, desc = 'Open Activity details float' })
+    vim.keymap.set('n', 'gA', function()
+      render.show_activity_details_under_cursor()
+    end, { buffer = b, silent = true, desc = 'Show activity details under cursor' })
+
+    vim.keymap.set('n', 'gT', function()
+      require('copilot_agent.todo').show_todo_float()
+    end, { buffer = b, silent = true, desc = 'Show TODO float' })
+
+    vim.keymap.set('n', '[[', function()
+      render.jump_to_prev_conversation()
+    end, { buffer = b, silent = true, desc = 'Jump to previous conversation' })
+
+    vim.keymap.set('n', ']]', function()
+      render.jump_to_next_conversation()
+    end, { buffer = b, silent = true, desc = 'Jump to next conversation' })
+
+    vim.keymap.set('n', '[a', function()
+      render.jump_to_prev_assistant_or_activity()
+    end, { buffer = b, silent = true, desc = 'Jump to previous Assistant/Activity' })
+
+    vim.keymap.set('n', ']a', function()
+      render.jump_to_next_assistant_or_activity()
+    end, { buffer = b, silent = true, desc = 'Jump to next Assistant/Activity' })
+
+    vim.keymap.set('n', 'g?', function()
+      render.show_help()
+    end, { buffer = b, silent = true, desc = 'Show help' })
+  end
+
+  _maybe_enable_render_markdown(bufnr)
+  ensure_chat_keymaps(bufnr)
+  -- Ensure activity entries are hidden by default when a fresh chat buffer is created
+  state.activity_entries_visible = false
+
+  -- Ensure the chat window is rendered with expected syntax and conceals
+  -- after keymaps and render hooks are in place.
+  attach_chat_markdown(state.chat_winid)
 
   vim.keymap.set('n', 'gT', function()
     render.open_todo_float()

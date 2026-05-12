@@ -3090,6 +3090,7 @@ function M.clear_transcript()
   state.assistant_merge_group_serial = 0
   state.stream_line_start = nil
   state.entry_row_index = {}
+  state.activity_entries_visible = false
   state.pending_checkpoint_turn = nil
   state.active_tool = nil
   state.active_tool_run_id = nil

@@ -65,6 +65,18 @@ if vim.treesitter then
     vim.treesitter._orig_start = vim.treesitter.start
     vim.treesitter.start = function() end
   end
+
+  -- Provide a safe npcalls shim when the runtime's API is missing it.
+  if not vim.treesitter.npcall then
+    vim.treesitter.npcall = function(fn, ...)
+      local args = { ... }
+      local results = table.pack(pcall(function() return fn(table.unpack(args)) end))
+      if results[1] then
+        return table.unpack(results, 2, results.n)
+      end
+      return nil
+    end
+  end
 end
 
 -- reset module cache so re-require always uses the dev copy.

@@ -27,6 +27,8 @@ local follow_active_conversation = render.follow_active_conversation
 local append_entry = render.append_entry
 local schedule_render = render.schedule_render
 local refresh_reasoning_overlay = render.refresh_reasoning_overlay
+local refresh_activity_hover_preview = render.refresh_activity_hover_preview
+local close_activity_hover_preview = render.close_activity_hover_preview
 
 local M = {}
 
@@ -46,7 +48,8 @@ local function help_lines()
     string.rep('─', 58),
     '',
     '  Send / Open input',
-    '    <CR> / i / a    Open input buffer (output pane)',
+    '    <CR> on Activity open details; otherwise open input buffer',
+    '    i / a           Open input buffer (output pane)',
     '    <C-s>           Send message / open input',
     '    :CopilotAgentCompose     Open compose split left of chat',
     '    :CopilotAgentCompose tab Open compose scratch buffer in a new tab',
@@ -97,7 +100,8 @@ local function help_lines()
     '    q               Close chat window',
     '    <C-c>           Cancel current turn',
     '    zA              Toggle Activity details',
-    '    gA              Open Activity details float',
+    '    <CR>            Open the editable diff split on Activity lines',
+    '    Hover preview   Shows a read-only diff on CursorHold/CursorHoldI',
     '    gT              Open TODO float',
     '    [[ / ]]         Jump to prev/next conversation',
     '    [a / ]a         Jump to prev/next Assistant/Activity',
@@ -130,9 +134,11 @@ local function ensure_chat_keymaps(bufnr)
     render.toggle_activity_entries()
   end, { buffer = bufnr, silent = true, desc = 'Toggle Activity transcript details' })
 
-  vim.keymap.set('n', 'gA', function()
-    render.show_activity_details_under_cursor()
-  end, { buffer = bufnr, silent = true, desc = 'Show activity details under cursor' })
+  vim.keymap.set('n', '<CR>', function()
+    if not render.show_activity_details_under_cursor() then
+      require('copilot_agent').ask()
+    end
+  end, { buffer = bufnr, silent = true, nowait = true, desc = 'Open activity details or prompt' })
 
   vim.keymap.set('n', 'gT', function()
     require('copilot_agent.todo').show_todo_float()
@@ -157,6 +163,28 @@ local function ensure_chat_keymaps(bufnr)
   vim.keymap.set('n', 'g?', function()
     render.show_help()
   end, { buffer = bufnr, silent = true, desc = 'Show help' })
+end
+
+local function ensure_chat_hover_autocmds(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  local group = vim.api.nvim_create_augroup('CopilotAgentChatHover' .. bufnr, { clear = true })
+  vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      refresh_activity_hover_preview(state.chat_winid or bufnr)
+    end,
+  })
+  vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI', 'BufLeave', 'WinLeave' }, {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      close_activity_hover_preview()
+    end,
+  })
 end
 
 function M.find_chat_window()
@@ -481,6 +509,7 @@ function M.ensure_chat_window(opts)
       state.chat_winid = chat_winid
       attach_chat_markdown(chat_winid)
       ensure_chat_keymaps(state.chat_bufnr)
+      ensure_chat_hover_autocmds(state.chat_bufnr)
       vim.api.nvim_set_current_win(chat_winid)
       state._chat_was_open = true
       return state.chat_bufnr
@@ -488,6 +517,7 @@ function M.ensure_chat_window(opts)
     -- Buffer exists but window was closed — reopen it.
     open_chat_win(state.chat_bufnr, opts)
     ensure_chat_keymaps(state.chat_bufnr)
+    ensure_chat_hover_autocmds(state.chat_bufnr)
     -- Ensure activity entries are hidden by default when reopening the chat buffer
     state.activity_entries_visible = false
     reset_frozen_render()
@@ -507,12 +537,14 @@ function M.ensure_chat_window(opts)
     if chat_winid then
       attach_chat_markdown(chat_winid)
       ensure_chat_keymaps(state.chat_bufnr)
+      ensure_chat_hover_autocmds(state.chat_bufnr)
       vim.api.nvim_set_current_win(chat_winid)
       state._chat_was_open = true
       return state.chat_bufnr
     end
     open_chat_win(existing_bufnr, opts)
     ensure_chat_keymaps(state.chat_bufnr)
+    ensure_chat_hover_autocmds(state.chat_bufnr)
     -- Ensure activity entries are hidden by default when creating the chat window
     state.activity_entries_visible = false
     reset_frozen_render()
@@ -559,6 +591,7 @@ function M.ensure_chat_window(opts)
 
   _maybe_enable_render_markdown(bufnr)
   ensure_chat_keymaps(bufnr)
+  ensure_chat_hover_autocmds(bufnr)
   -- Ensure activity entries are hidden by default when a fresh chat buffer is created
   state.activity_entries_visible = false
 
@@ -586,7 +619,7 @@ function M.ensure_chat_window(opts)
     render.jump_assistant_activity(1)
   end, { buffer = bufnr, silent = true, desc = 'Jump to next Assistant/Activity' })
 
-  for _, lhs in ipairs({ 'i', 'I', 'a', 'A', 'o', 'O', '<CR>' }) do
+  for _, lhs in ipairs({ 'i', 'I', 'a', 'A', 'o', 'O' }) do
     vim.keymap.set('n', lhs, function()
       require('copilot_agent').ask()
     end, {

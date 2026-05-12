@@ -73,6 +73,16 @@ local defaults = {
     -- true  = prompt 'Open diff / Skip' after each file update (default)
     -- false = just notify and auto-reload changed open buffers
     diff_review = true,
+    -- Activity viewer for activity blocks in the chat float.
+    -- 'hover' opens a concise read-only summary preview on cursor idle (default).
+    -- File-change blocks show file summaries in hover and open an editable diff on <CR>.
+    -- Hover previews auto-close after this many milliseconds (0 = disabled).
+    activity_hover_timeout_ms = 2500,
+    -- 'raw' keeps the patch-text float.
+    activity_view = 'hover',
+    -- File-diff backend for activity_view = 'diff'.
+    -- Supported values: 'native', 'diffview', 'fugitive', or a custom Vim command name.
+    activity_diff_tool = 'native',
     -- External diff command for the permission "Show diff" viewer.
     -- Set to a list like { 'delta' }, { 'diff-so-fancy' }, or { 'delta', '--side-by-side' }.
     -- Command output is captured and rendered into the float to avoid terminal
@@ -212,6 +222,9 @@ local state = {
   active_tool_run_id = nil, -- overlay queue id for the currently executing shell tool
   active_tool_detail = nil, -- detailed command/description for the active tool overlay
   pending_tool_detail = nil, -- latest tool detail seen before execution starts
+  activity_hover_winid = nil, -- active read-only hover preview window for file changes
+  activity_hover_entry_idx = nil, -- activity entry index currently shown in hover preview
+  activity_hover_timer = nil, -- auto-close timer for the active hover preview
   overlay_tool_display = nil, -- currently displayed shell activity item in the chat overlay
   overlay_tool_queue = {}, -- queued shell activity items waiting for minimum display time
   overlay_tool_run_id = 0, -- incrementing id assigned to shell activity items

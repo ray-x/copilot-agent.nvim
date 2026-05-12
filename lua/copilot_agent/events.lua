@@ -16,6 +16,7 @@ local render = require('copilot_agent.render')
 local checkpoints = require('copilot_agent.checkpoints')
 local checkpoint_diff = require('copilot_agent.checkpoint_diff')
 local window = require('copilot_agent.window')
+local apply_patch = require('copilot_agent.apply_patch')
 local log_content_length = cfg.log_content_length
 
 local state = cfg.state
@@ -907,9 +908,44 @@ local function normalize_activity_path(path)
   return normalized
 end
 
+local function normalize_apply_patch_changes(changes)
+  local normalized = {}
+  if type(changes) ~= 'table' then
+    return normalized
+  end
+  for _, change in ipairs(changes) do
+    if type(change) == 'table' then
+      local path = change.path
+      if type(path) == 'string' then
+        path = normalize_activity_path(path) or path
+      end
+      normalized[#normalized + 1] = {
+        verb = change.verb,
+        path = path,
+        additions = change.additions,
+        deletions = change.deletions,
+      }
+    end
+  end
+  return normalized
+end
+
 local append_unique = utils.append_unique
 local summarize_file_group = utils.summarize_file_group
 -- Summarization delegated to activity_output module
+
+local function is_file_change_activity_item(item)
+  if type(item) ~= 'table' then
+    return false
+  end
+  if item.kind == 'code_change' then
+    return true
+  end
+  if type(item.code_change) == 'table' and type(item.code_change.files) == 'table' and #item.code_change.files > 0 then
+    return true
+  end
+  return sanitize_permission_text(item.tool_name) == 'apply_patch'
+end
 
 local function remember_recent_activity_line(text)
   text = sanitize_permission_text(text)
@@ -991,6 +1027,7 @@ local activity_output = require('copilot_agent.activity_output')({
   normalize_activity_path = normalize_activity_path,
   summarize_file_group = summarize_file_group,
   append_unique = append_unique,
+  apply_patch = apply_patch,
   working_directory = working_directory,
   state = state,
   first_non_empty = first_non_empty,
@@ -1124,6 +1161,16 @@ local function capture_tool_execution_start(data)
     item.start_data = item.start_data or data
     local summary = summarize_tool_activity(tool_name, item.start_data) or fallback_tool_activity_summary(tool_name, detail)
     item.summary = item.summary or summary
+    if sanitize_permission_text(tool_name) == 'apply_patch' then
+      local patch_source = item.start_input or item.start_data or data
+      local changes = normalize_apply_patch_changes(apply_patch.extract_patch_changes(patch_source))
+      if type(changes) == 'table' and #changes > 0 then
+        item.code_change = item.code_change or {}
+        item.code_change.source = item.code_change.source or 'apply_patch'
+        item.code_change.files = item.code_change.files or changes
+        item.code_change.apply_patch_text = item.code_change.apply_patch_text or apply_patch.extract_patch_text(patch_source)
+      end
+    end
     remember_recent_activity_line(summary)
   end
   begin_overlay_tool_display(tool_call_id, tool_name, detail)
@@ -1291,6 +1338,16 @@ local function capture_post_tool_use_end(data)
     end
     local summary = summarize_tool_activity(tool_name, summary_data) or fallback_tool_activity_summary(tool_name, detail)
     if type(item) == 'table' then
+      if sanitize_permission_text(tool_name) == 'apply_patch' then
+        local patch_source = item.start_input or item.start_data or summary_data or data
+        local changes = normalize_apply_patch_changes(apply_patch.extract_patch_changes(patch_source))
+        if type(changes) == 'table' and #changes > 0 then
+          item.code_change = item.code_change or {}
+          item.code_change.source = item.code_change.source or 'apply_patch'
+          item.code_change.files = item.code_change.files or changes
+          item.code_change.apply_patch_text = item.code_change.apply_patch_text or apply_patch.extract_patch_text(patch_source)
+        end
+      end
       log_debug_trace('capture_post_tool_use_end item.output_text=', function()
         return item.output_text
       end, { max_len = 1200 })
@@ -1377,9 +1434,9 @@ end
 local function flush_recent_activity_summary()
   local lines = state.recent_activity_lines or {}
   local items = state.recent_activity_items or {}
-  local preserved_items = items
-
-  if #lines == 0 and #items > 0 then
+  if #items > 0 then
+    local file_lines, file_items = {}, {}
+    local other_lines, other_items = {}, {}
     for _, item in ipairs(items) do
       local summary = nil
       if type(item) == 'table' then
@@ -1392,23 +1449,79 @@ local function flush_recent_activity_summary()
           item.summary = summary
         end
       end
-      remember_recent_activity_line(summary)
+      local target_lines, target_items = other_lines, other_items
+      if is_file_change_activity_item(item) then
+        target_lines, target_items = file_lines, file_items
+      end
+      if type(summary) == 'string' and summary ~= '' then
+        target_lines[#target_lines + 1] = summary
+      end
+      target_items[#target_items + 1] = item
     end
-    lines = state.recent_activity_lines or {}
-  end
 
-  if #lines > 0 then
-    if state.history_loading ~= true then
-      preserved_items = vim.deepcopy(items)
-      for _, item in ipairs(preserved_items) do
-        if type(item) == 'table' then
-          item.start_data = nil
-          item.complete_data = nil
+    local function collect_group_code_change(group_items)
+      local files = {}
+      local apply_patch_text
+      for _, item in ipairs(group_items or {}) do
+        if type(item) == 'table' and type(item.code_change) == 'table' and type(item.code_change.files) == 'table' then
+          for _, file in ipairs(item.code_change.files) do
+            if type(file) == 'table' and type(file.path) == 'string' and file.path ~= '' then
+              local seen = false
+              for _, existing in ipairs(files) do
+                if type(existing) == 'table' and existing.path == file.path then
+                  seen = true
+                  break
+                end
+              end
+              if not seen then
+                files[#files + 1] = vim.deepcopy(file)
+              end
+            end
+          end
+          if not apply_patch_text and type(item.code_change.apply_patch_text) == 'string' and item.code_change.apply_patch_text ~= '' then
+            apply_patch_text = item.code_change.apply_patch_text
+          end
         end
       end
+      if #files == 0 then
+        return nil
+      end
+      return {
+        source = 'apply_patch',
+        files = files,
+        apply_patch_text = apply_patch_text,
+      }
     end
+
+    local function append_group(group_lines, group_items, is_file_group)
+      if #group_lines == 0 then
+        return
+      end
+      local preserved_items = group_items
+      local code_change = is_file_group and collect_group_code_change(preserved_items) or nil
+      if state.history_loading ~= true then
+        preserved_items = vim.deepcopy(group_items)
+        for _, item in ipairs(preserved_items) do
+          if type(item) == 'table' then
+            item.start_data = nil
+            item.complete_data = nil
+          end
+        end
+      end
+      local entry_data = {
+        activity_items = preserved_items,
+      }
+      if code_change then
+        entry_data.code_change = code_change
+      end
+      append_entry('activity', table.concat(group_lines, '\n'), nil, entry_data)
+    end
+
+    append_group(file_lines, file_items, true)
+    append_group(other_lines, other_items, false)
+  elseif #lines > 0 then
     append_entry('activity', table.concat(lines, '\n'), nil, {
-      activity_items = preserved_items,
+      activity_items = items,
     })
   end
 

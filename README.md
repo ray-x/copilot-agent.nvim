@@ -233,6 +233,8 @@ For most users, this minimal setup is enough:
         protect_markdown_buffer = true,  -- upstream Neovim Treesitter workaround for the prompt buffer; set false to disable
         diff_cmd = { 'delta' },          -- external diff viewer; false = builtin float
         diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; clean buffers auto-reload, conflicting modified buffers prompt before reload
+        activity_view = 'hover',         -- 'hover' (default) opens a read-only preview on cursor idle; 'diff' opens editable file diffs on <CR>; 'raw' keeps the patch-text viewer
+        activity_diff_tool = 'native',   -- 'native', 'diffview', 'fugitive', or a custom Vim command name
       },
       prompt = {
         style = "cold",                  -- "cold" (default) = red-violet/violet/blue, "warm" = red/yellow/green
@@ -390,7 +392,8 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-n>` / `<M-n>`                 | Next prompt from history                                                                                |
 | `<C-c>` (output)                  | Cancel current turn                                                                                     |
 | `zA` (output)                     | Toggle collapsed `Activity:` transcript blocks                                                          |
-| `gA` (output)                     | Open a floating Activity details viewer for the block under the cursor                                  |
+| `<CR>` (output)                   | On Activity lines, open the editable diff split; otherwise open input                                 |
+| `CursorHold` / `CursorHoldI`      | On Activity lines, show the concise read-only hover preview (auto-closes after 2.5s by default)         |
 | `[[` / `]]` (output)              | Jump to previous/next conversation (`User:` block)                                                      |
 | `[a` / `]a` (output)              | Jump to previous/next `Assistant:` or `Activity:` block                                                 |
 | `gT` (normal)                     | Open TODO float for the current turn                                                                    |

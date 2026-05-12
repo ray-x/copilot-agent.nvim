@@ -219,7 +219,7 @@ local function update_last_activity_with_code_change(from_commit, to_commit, dif
       local del = first.deletions and ('-' .. tostring(first.deletions)) or '-?'
       summary = string.format('Edited %s %s %s', first.path, add, del)
     else
-      summary = string.format('Edited %d files', #diff_items)
+      summary = string.format('Edited %d file changes', #diff_items)
     end
   end
   if not summary then

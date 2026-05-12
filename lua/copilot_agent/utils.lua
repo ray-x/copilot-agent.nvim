@@ -66,6 +66,16 @@ function M.tilde_home_path(text)
   return text
 end
 
+function M.normalize_display_text(text)
+  if type(text) == 'string' then
+    return text
+  end
+  if text == nil or text == false then
+    return ''
+  end
+  return tostring(text)
+end
+
 function M.truncate_session_summary(summary, max_len)
   if type(summary) ~= 'string' or summary == '' then
     return ''

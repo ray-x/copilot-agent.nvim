@@ -45,6 +45,20 @@ local ensure_service_running = service.ensure_service_running
 local append_entry = render.append_entry
 local ensure_chat_window = chat.ensure_chat_window
 
+local function set_activity_diff_highlights()
+  if vim.fn.hlexists('GitSignsAdd') == 1 then
+    vim.api.nvim_set_hl(0, 'CopilotAgentActivityDiffAdd', { link = 'GitSignsAdd', default = true })
+  else
+    vim.api.nvim_set_hl(0, 'CopilotAgentActivityDiffAdd', { fg = '#22c55e', default = true })
+  end
+
+  if vim.fn.hlexists('GitSignsDelete') == 1 then
+    vim.api.nvim_set_hl(0, 'CopilotAgentActivityDiffDelete', { link = 'GitSignsDelete', default = true })
+  else
+    vim.api.nvim_set_hl(0, 'CopilotAgentActivityDiffDelete', { fg = '#ef4444', default = true })
+  end
+end
+
 -- ── Internal bridges for cross-module access ──────────────────────────────────
 M._append_entry = append_entry
 M._ensure_chat_window = ensure_chat_window
@@ -116,6 +130,7 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, 'CopilotAgentRule', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentCheckpoint', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentActivity', { link = 'DiagnosticVirtualTextInfo', default = true })
+  set_activity_diff_highlights()
   vim.api.nvim_set_hl(0, 'CopilotAgentReasoning', { link = 'DiagnosticVirtualTextInfo', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentOverlayStrong', { link = 'Title', default = true })
   vim.api.nvim_set_hl(0, 'CopilotAgentOverlayEmphasis', { link = 'Comment', default = true })
@@ -131,6 +146,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd('ColorScheme', {
     group = ui_group,
     callback = function()
+      set_activity_diff_highlights()
       prompt.configure_highlights()
     end,
   })

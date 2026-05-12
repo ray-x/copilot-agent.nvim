@@ -146,6 +146,7 @@ optional — defaults are shown below: >lua
       split                   = "botright vnew",
       title                   = "Copilot Chat",
       system_notify_timeout   = 3000,   -- ms, 0 = never auto-clear
+      activity_hover_timeout_ms = 2500, -- ms, 0 = keep hover open until cursor moves
       render_markdown         = false,  -- true = enable render-markdown.nvim
       file_picker             = "auto", -- see |copilot-agent-picker|
     },
@@ -262,7 +263,8 @@ Normal and insert mode (unless noted):
   <C-p> / <M-p>       Previous prompt from history
   <C-n> / <M-n>       Next prompt from history
   zA (normal)         Toggle collapsed Activity transcript blocks
-  gA (normal)         Open Activity details float for the block under the cursor
+  <CR> (normal)       On Activity lines, open the editable diff split; otherwise open input
+    CursorHold/CursorHoldI  On Activity lines, show a tooltip-like hover preview (auto-closes after 2.5s)
   gT (normal)         Open TODO float for the current turn
   g? (normal)         Show help with keybindings and session commands
 
@@ -384,7 +386,11 @@ the agent's changes. Disable with: >lua
   chat = { diff_review = false }
 <
 
-==============================================================================
+The Activity details float can also open file-change diffs directly with `gA`.
+Set `chat.activity_view = "diff"` to use the file-diff viewer or `"raw"` to
+keep the patch-text popup.
+
+============================================================================== 
 8. MODELS                                         *copilot-agent-models*
 
 Switch model with |:CopilotAgentModel| or <M-m> in the input buffer.
@@ -629,6 +635,22 @@ chat.diff_review ~
   When true, offer a vimdiff review after the agent modifies a git-tracked
   file. Set false to just notify and auto-reload the buffer.
 
+chat.activity_view ~
+  Type: string  ("diff" | "hover" | "raw")
+  Default: `"hover"`
+  Controls how activity blocks behave. `"hover"` opens a concise read-only
+  summary preview on cursor idle (default). File-change blocks list every file
+  summary in hover and still open an editable file diff view when you press
+  `<CR>`. `"raw"` keeps the patch-text popup used today.
+
+chat.activity_diff_tool ~
+  Type: string
+  Default: `"native"`
+  Diff backend for `chat.activity_view = "diff"`. `"native"` uses an editable
+  Vim diff split, `"diffview"` opens Diffview when available, and `"fugitive"`
+  falls back to Fugitive's `:Git diff` view. Other values are tried as Vim
+  commands with the selected file path appended.
+
 chat.diff_cmd ~
   Type: string[] | false
   Default: `{ "delta" }`
@@ -841,6 +863,7 @@ v0.5.0 ~
   • `:CopilotAgentChat fullscreen` command argument
   • `:CopilotAgentCancel` / `<C-c>` to abort current turn
   • `chat.diff_review` config for post-change vimdiff review
+  • `chat.activity_view` / `chat.activity_diff_tool` for activity file diffs
   • Fixed duplicate user messages in active conversation
   • Fixed nested session picker (deferred second `vim.ui.select`)
 

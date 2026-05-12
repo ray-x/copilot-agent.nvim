@@ -9065,7 +9065,7 @@ describe('chat input behavior', function()
     local normal_maps = vim.api.nvim_buf_get_keymap(chat_bufnr, 'n')
     local has_viewer = false
     for _, map in ipairs(normal_maps) do
-      if map.lhs == 'gA' then
+      if map.lhs == '<CR>' then
         has_viewer = true
         break
       end
@@ -9100,7 +9100,7 @@ describe('chat input behavior', function()
     assert_true(joined:find('second line', 1, true) ~= nil)
   end)
 
-  it('summarizes apply_patch activity by changed file instead of raw patch text', function()
+  it('opens a direct diff for file-change activity instead of the activity float', function()
     local events = require('copilot_agent.events')
     local render = require('copilot_agent.render')
     local service = require('copilot_agent.service')
@@ -9116,13 +9116,7 @@ describe('chat input behavior', function()
       type = 'assistant.turn_start',
       data = {},
     })
-    events.handle_session_event({
-      type = 'assistant.message',
-      data = {
-        messageId = 'assistant-first',
-        content = 'Applying the update now.',
-      },
-    })
+    events.handle_session_event({ type = 'assistant.message', data = { messageId = 'assistant-first', content = 'Applying the update now.' } })
     events.handle_session_event({
       type = 'tool.execution_start',
       data = {
@@ -9130,6 +9124,211 @@ describe('chat input behavior', function()
         input = table.concat({
           '*** Begin Patch',
           '*** Update File: ' .. foreign_absolute_path,
+          '@@',
+          '-old line',
+          '+new line',
+          '*** Update File: ' .. foreign_absolute_path:gsub('events.lua', 'chat.lua'),
+          '@@',
+          '-old line 2',
+          '+new line 2',
+          '*** End Patch',
+        }, '\n'),
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+    local activity_idx
+    for idx, entry in ipairs(agent.state.entries) do
+      if type(entry) == 'table' and entry.kind == 'activity' and type(entry.content) == 'string' and entry.content:find('Updated', 1, true) then
+        activity_idx = idx
+        break
+      end
+    end
+    assert_not_nil(activity_idx)
+    local activity_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == activity_idx then
+        activity_row = row
+        break
+      end
+    end
+    assert_not_nil(activity_row)
+
+    local collapsed_lines = vim.api.nvim_buf_get_lines(bufnr, activity_row, activity_row + 1, false)
+    local collapsed_line = collapsed_lines[1] or ''
+    assert_true(collapsed_line:find('Activity: Updated', 1, true) ~= nil)
+    assert_true(collapsed_line:find('+1', 1, true) ~= nil)
+    assert_true(collapsed_line:find('-1', 1, true) ~= nil)
+    assert_true(collapsed_line:find('(1 more file update hidden)', 1, true) ~= nil)
+    assert_true(collapsed_line:find('…', 1, true) ~= nil or collapsed_line:find('events.lua', 1, true) ~= nil)
+
+    local original_cmd = vim.cmd
+    local original_open_win = vim.api.nvim_open_win
+    local commands = {}
+    local viewer_buf
+    vim.cmd = function(cmd)
+      commands[#commands + 1] = cmd
+      return original_cmd(cmd)
+    end
+    vim.api.nvim_open_win = function(buf, enter, config)
+      local winid = original_open_win(buf, enter, config)
+      if buf ~= agent.state.chat_bufnr then
+        viewer_buf = buf
+      end
+      return winid
+    end
+
+    vim.api.nvim_win_set_cursor(agent.state.chat_winid, { activity_row + 1, 0 })
+    local opened = render.show_activity_details_under_cursor(agent.state.chat_winid)
+    vim.cmd = original_cmd
+    vim.api.nvim_open_win = original_open_win
+
+    assert_true(opened)
+    assert_eq(nil, viewer_buf)
+    local diff_bufs = {}
+    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+      local buf = vim.api.nvim_win_get_buf(winid)
+      local name = vim.api.nvim_buf_get_name(buf)
+      if name:find('lua/copilot_agent/events.lua', 1, true) then
+        diff_bufs[#diff_bufs + 1] = buf
+      end
+    end
+    assert_true(#diff_bufs >= 2)
+    assert_true(vim.bo[diff_bufs[1]].modifiable or vim.bo[diff_bufs[2]].modifiable)
+    local joined_cmds = table.concat(commands, '\n')
+    assert_true(
+      joined_cmds:find('tabnew', 1, true) ~= nil
+        or joined_cmds:find('vsplit', 1, true) ~= nil
+        or joined_cmds:find('DiffviewOpen', 1, true) ~= nil
+        or joined_cmds:find('Git diff', 1, true) ~= nil
+        or joined_cmds:find('CodeDiff file', 1, true) ~= nil
+    )
+  end)
+
+  it('opens a concise hover summary for multi-file activity changes', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.state.config.chat.activity_view = 'hover'
+    agent.state.config.chat.activity_hover_timeout_ms = 100
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'apply_patch',
+        input = table.concat({
+          '*** Begin Patch',
+          '*** Update File: lua/copilot_agent/activity_diff.lua',
+          '@@',
+          '-old line',
+          '+new line',
+          '*** Update File: lua/copilot_agent/chat.lua',
+          '@@',
+          '-old line 2',
+          '+new line 2',
+          '*** End Patch',
+        }, '\n'),
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+    local activity_idx
+    for idx, entry in ipairs(agent.state.entries) do
+      if type(entry) == 'table' and entry.kind == 'activity' and type(entry.content) == 'string' and entry.content:find('Updated', 1, true) then
+        activity_idx = idx
+        break
+      end
+    end
+    assert_not_nil(activity_idx)
+    local activity_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == activity_idx then
+        activity_row = row
+        break
+      end
+    end
+    assert_not_nil(activity_row)
+
+    local original_open_win = vim.api.nvim_open_win
+    local preview_buf
+    local preview_title
+    local preview_config
+    local preview_winid
+    vim.api.nvim_open_win = function(buf, enter, config)
+      local winid = original_open_win(buf, enter, config)
+      if buf ~= bufnr then
+        preview_buf = buf
+        preview_title = config.title
+        preview_config = vim.deepcopy(config)
+        preview_winid = winid
+      end
+      return winid
+    end
+
+    vim.api.nvim_win_set_cursor(agent.state.chat_winid, { activity_row + 1, 0 })
+    vim.api.nvim_exec_autocmds('CursorHold', { buffer = bufnr })
+    vim.api.nvim_open_win = original_open_win
+
+    assert_not_nil(preview_buf)
+    assert_eq(' Activity preview ', preview_title)
+    assert_not_nil(preview_config)
+    assert_eq('cursor', preview_config.relative)
+    assert_eq(1, preview_config.row)
+    assert_eq(0, preview_config.col)
+    assert_true(preview_config.width > 0)
+    assert_true(preview_config.height > 0)
+    assert_true(preview_config.width <= math.floor(vim.api.nvim_win_get_width(agent.state.chat_winid) * 0.7))
+    assert_true(preview_config.height <= math.floor(vim.api.nvim_win_get_height(agent.state.chat_winid) * 0.5))
+    assert_eq(agent.state.chat_winid, vim.api.nvim_get_current_win())
+    assert_eq('markdown', vim.bo[preview_buf].filetype)
+    assert_eq(false, vim.bo[preview_buf].modifiable)
+    assert_eq(true, vim.bo[preview_buf].readonly)
+    local lines = vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false)
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('## Files', 1, true) ~= nil)
+    assert_true(joined:find('Updated lua/copilot_agent/activity_diff.lua +1 -1', 1, true) ~= nil)
+    assert_true(joined:find('Updated lua/copilot_agent/chat.lua +1 -1', 1, true) ~= nil)
+    assert_true(joined:find('## Turn summary', 1, true) == nil)
+    assert_true(joined:find('@@', 1, true) == nil)
+    vim.wait(180)
+    assert_true(preview_winid == nil or not vim.api.nvim_win_is_valid(preview_winid))
+  end)
+
+  it('opens a hover diff preview for single-file activity changes', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.state.config.chat.activity_view = 'hover'
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'apply_patch',
+        input = table.concat({
+          '*** Begin Patch',
+          '*** Update File: lua/copilot_agent/activity_diff.lua',
           '@@',
           '-old line',
           '+new line',
@@ -9143,13 +9342,144 @@ describe('chat input behavior', function()
     })
 
     vim.wait(250)
-    assert_true(render.toggle_activity_entries())
+    local activity_idx
+    for idx, entry in ipairs(agent.state.entries) do
+      if type(entry) == 'table' and entry.kind == 'activity' and type(entry.content) == 'string' and entry.content:find('Updated', 1, true) then
+        activity_idx = idx
+        break
+      end
+    end
+    assert_not_nil(activity_idx)
+    local activity_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == activity_idx then
+        activity_row = row
+        break
+      end
+    end
+    assert_not_nil(activity_row)
 
-    local joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
-    assert_true(joined:find('Updated lua/copilot_agent/events.lua', 1, true) ~= nil)
-    assert_true(joined:find('*** Begin Patch', 1, true) == nil)
-    assert_true(joined:find('-old line', 1, true) == nil)
-    assert_true(joined:find('+new line', 1, true) == nil)
+    local original_open_win = vim.api.nvim_open_win
+    local preview_buf
+    local preview_title
+    local preview_config
+    vim.api.nvim_open_win = function(buf, enter, config)
+      local winid = original_open_win(buf, enter, config)
+      if buf ~= bufnr then
+        preview_buf = buf
+        preview_title = config.title
+        preview_config = vim.deepcopy(config)
+      end
+      return winid
+    end
+
+    vim.api.nvim_win_set_cursor(agent.state.chat_winid, { activity_row + 1, 0 })
+    vim.api.nvim_exec_autocmds('CursorHold', { buffer = bufnr })
+    vim.api.nvim_open_win = original_open_win
+
+    assert_not_nil(preview_buf)
+    assert_eq(' Activity preview ', preview_title)
+    assert_not_nil(preview_config)
+    assert_eq('cursor', preview_config.relative)
+    assert_eq(1, preview_config.row)
+    assert_eq(0, preview_config.col)
+    assert_true(preview_config.width > 0)
+    assert_true(preview_config.height > 0)
+    assert_true(preview_config.width <= math.floor(vim.api.nvim_win_get_width(agent.state.chat_winid) * 0.7))
+    assert_true(preview_config.height <= math.floor(vim.api.nvim_win_get_height(agent.state.chat_winid) * 0.5))
+    assert_eq(agent.state.chat_winid, vim.api.nvim_get_current_win())
+    assert_eq('diff', vim.bo[preview_buf].filetype)
+    assert_eq(false, vim.bo[preview_buf].modifiable)
+    assert_eq(true, vim.bo[preview_buf].readonly)
+    local lines = vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false)
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('--- lua/copilot_agent/activity_diff.lua (HEAD)', 1, true) ~= nil)
+    assert_true(joined:find('+++ lua/copilot_agent/activity_diff.lua (current)', 1, true) ~= nil)
+    assert_true(joined:find('lua/copilot_agent/activity_diff.lua', 1, true) ~= nil)
+  end)
+
+  it('opens a hover activity summary for tool activity', function()
+    local events = require('copilot_agent.events')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.state.config.chat.activity_view = 'hover'
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'bash',
+        toolCallId = 'tool-789',
+        command = 'git',
+        arguments = { 'diff', '--stat' },
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_progress',
+      data = {
+        toolCallId = 'tool-789',
+        progressMessage = 'Collecting diff output',
+      },
+    })
+    events.handle_session_event({
+      type = 'tool.execution_complete',
+      data = {
+        success = true,
+        toolCallId = 'tool-789',
+        result = {
+          detailedContent = 'full diff output\nsecond line',
+        },
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+
+    local activity_idx = #agent.state.entries
+    local activity_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == activity_idx then
+        activity_row = row
+        break
+      end
+    end
+    assert_not_nil(activity_row)
+
+    local original_open_win = vim.api.nvim_open_win
+    local preview_buf
+    local preview_title
+    vim.api.nvim_open_win = function(buf, enter, config)
+      local winid = original_open_win(buf, enter, config)
+      if buf ~= bufnr then
+        preview_buf = buf
+        preview_title = config.title
+      end
+      return winid
+    end
+
+    vim.api.nvim_win_set_cursor(agent.state.chat_winid, { activity_row + 1, 0 })
+    vim.api.nvim_exec_autocmds('CursorHold', { buffer = bufnr })
+    vim.api.nvim_open_win = original_open_win
+
+    assert_not_nil(preview_buf)
+    assert_eq(' Activity preview ', preview_title)
+    assert_eq('markdown', vim.bo[preview_buf].filetype)
+    local lines = vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false)
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('## Activities', 1, true) ~= nil)
+    assert_true(joined:find('Ran bash — git diff --stat', 1, true) ~= nil)
+    assert_true(joined:find('## Turn summary', 1, true) == nil)
+    assert_true(joined:find('Collecting diff output', 1, true) == nil)
+    assert_true(joined:find('full diff output', 1, true) == nil)
   end)
 
   it('summarizes multiline shell scripts instead of showing the full script body', function()

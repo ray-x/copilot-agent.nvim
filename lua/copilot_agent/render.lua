@@ -7,6 +7,8 @@
 local uv = vim.uv or vim.loop
 local cfg = require('copilot_agent.config')
 local checkpoints = require('copilot_agent.checkpoints')
+local apply_patch = require('copilot_agent.apply_patch')
+local activity_diff = require('copilot_agent.activity_diff')
 local service = require('copilot_agent.service')
 local utils = require('copilot_agent.utils')
 local window = require('copilot_agent.window')
@@ -24,6 +26,7 @@ local DEFAULT_REASONING_MAX_LINES = 5 -- Show a short rolling reasoning preview 
 local MAX_REASONING_PREVIEW_LINES = 20 -- Cap reasoning preview growth so the overlay cannot take over the entire window.
 local LOG_PREVIEW_MIN_CHARS = 16 -- Preserve enough context for truncated log previews to stay informative.
 local ACTIVITY_PREVIEW_MAX_WIDTH = 32 -- Keep activity snippets compact enough for statusline and overlay summaries.
+local FILE_ACTIVITY_PREVIEW_MAX_WIDTH = 240 -- File-change activities deserve a wider summary so the path and diff counts stay readable.
 local USAGE_ACTIVITY_PREVIEW_MAX_WIDTH = 64 -- Usage summaries need more room so cost/tokens/quota stay visible in collapsed activity lines.
 local REPORT_INTENT_ACTIVITY_PREVIEW_MAX_WIDTH = 64 -- Keep report_intent summaries readable when they are the highest-priority visible activity.
 local OVERLAY_WRAP_MIN_WIDTH = 20 -- Prevent pathological wrapping in very narrow windows.
@@ -62,7 +65,9 @@ local OVERLAY_BOTTOM_GUTTER_MIN_LINES = 5 -- Keep at least a few transcript line
 local OVERLAY_TAIL_SPACER_LINES = 3 -- Leave spacer rows so bottom-anchored virtual lines do not sit flush with content.
 
 local split_lines = utils.split_lines
-local sanitize_display_text = utils.tilde_home_path
+local sanitize_display_text = function(text)
+  return utils.tilde_home_path(utils.normalize_display_text(text))
+end
 
 local function refresh_statuslines()
   local ok, sl = pcall(require, 'copilot_agent.statusline')
@@ -140,16 +145,41 @@ function M.update_last_activity_entry(mutator)
   return false
 end
 
+local function entry_code_change(entry)
+  if type(entry) ~= 'table' then
+    return nil
+  end
+  if type(entry.code_change) == 'table' then
+    return entry.code_change
+  end
+  if type(entry.activity_items) == 'table' then
+    for _, item in ipairs(entry.activity_items) do
+      if type(item) == 'table' and type(item.code_change) == 'table' and type(item.code_change.files) == 'table' and #item.code_change.files > 0 then
+        return item.code_change
+      end
+      if type(item) == 'table' and vim.trim(tostring(item.tool_name or '')) == 'apply_patch' then
+        local patch_text = item.start_input or item.start_data or item.complete_data or item.data or item
+        local changes = apply_patch.extract_patch_changes(patch_text)
+        if type(changes) == 'table' and #changes > 0 then
+          return { source = 'apply_patch', files = changes, apply_patch_text = apply_patch.extract_patch_text(patch_text) }
+        end
+      end
+    end
+  end
+  return nil
+end
+
 local function open_activity_code_change_diff(entry)
-  local code_change = type(entry) == 'table'
-      and (entry.code_change or (type(entry.activity_items) == 'table' and entry.activity_items[1] and entry.activity_items[1].diffstat and entry.activity_items[1] or nil))
-    or nil
+  local code_change = entry_code_change(entry)
   if type(code_change) ~= 'table' then
     return false
   end
 
   local files = type(code_change.files) == 'table' and code_change.files or code_change.diffstat
   if type(files) ~= 'table' or #files == 0 then
+    return false
+  end
+  if type(code_change.from_commit) ~= 'string' or code_change.from_commit == '' or type(code_change.to_commit) ~= 'string' or code_change.to_commit == '' then
     return false
   end
 
@@ -184,6 +214,330 @@ local function open_activity_code_change_diff(entry)
     end
   end)
   return true
+end
+
+local function open_patch_diff_float(patch_text)
+  local lines = vim.split(patch_text or '', '\n', { plain = true })
+  local width = math.min(math.max(60, math.floor(vim.o.columns * 0.85)), 140)
+  local height = math.min(math.max(#lines + 2, 12), math.floor(vim.o.lines * 0.85))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'diff'
+  vim.bo[buf].modifiable = false
+
+  local winid = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = height,
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = 'minimal',
+    border = 'rounded',
+    title = ' Proposed changes ',
+    title_pos = 'center',
+  })
+  window.protect_markdown_buffer(buf, winid)
+  window.set_window_syntax(winid, 'diff')
+  vim.wo[winid].wrap = false
+  vim.wo[winid].linebreak = false
+
+  local function close()
+    if vim.api.nvim_win_is_valid(winid) then
+      vim.api.nvim_win_close(winid, true)
+    end
+  end
+
+  vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc><Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set({ 'n', 'i' }, '<C-c>', close, { buffer = buf, nowait = true })
+end
+
+local function activity_view_mode()
+  local chat_cfg = (state.config or {}).chat or {}
+  local view_mode = chat_cfg.activity_view
+  if view_mode == 'hover' then
+    return 'hover'
+  end
+  if view_mode == 'raw' then
+    return 'raw'
+  end
+  return 'diff'
+end
+
+local function activity_diff_tool()
+  local chat_cfg = (state.config or {}).chat or {}
+  local tool = chat_cfg.activity_diff_tool
+  if type(tool) == 'string' and vim.trim(tool) ~= '' then
+    return vim.trim(tool)
+  end
+  return 'native'
+end
+
+local function entry_patch_text(entry)
+  local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
+  for _, item in ipairs(items) do
+    if type(item) == 'table' and vim.trim(tostring(item.tool_name or '')) == 'apply_patch' then
+      if type(item.code_change) == 'table' and type(item.code_change.apply_patch_text) == 'string' and item.code_change.apply_patch_text ~= '' then
+        return item.code_change.apply_patch_text
+      end
+      local patch_source = item.start_input or item.start_data or item.complete_data or item.data or item
+      local patch_text = apply_patch.extract_patch_text(patch_source)
+      if type(patch_text) == 'string' and patch_text ~= '' then
+        return patch_text
+      end
+    end
+  end
+  if type(entry) == 'table' and type(entry.code_change) == 'table' and type(entry.code_change.apply_patch_text) == 'string' then
+    local patch_text = entry.code_change.apply_patch_text
+    if patch_text ~= '' then
+      return patch_text
+    end
+  end
+  return nil
+end
+
+local function entry_file_changes(entry)
+  local code_change = entry_code_change(entry)
+  if type(code_change) == 'table' and type(code_change.files) == 'table' and #code_change.files > 0 then
+    return code_change.files
+  end
+  if type(entry) == 'table' and type(entry.activity_items) == 'table' then
+    for _, item in ipairs(entry.activity_items) do
+      if type(item) == 'table' and vim.trim(tostring(item.tool_name or '')) == 'apply_patch' then
+        if type(item.code_change) == 'table' and type(item.code_change.files) == 'table' and #item.code_change.files > 0 then
+          return item.code_change.files
+        end
+        local patch_source = item.start_input or item.start_data or item.complete_data or item.data or item
+        local changes = apply_patch.extract_patch_changes(patch_source)
+        if type(changes) == 'table' and #changes > 0 then
+          return changes
+        end
+      end
+    end
+  end
+  local patch_text = entry_patch_text(entry)
+  if type(patch_text) ~= 'string' or patch_text == '' then
+    return {}
+  end
+  return apply_patch.extract_patch_changes(patch_text)
+end
+
+local function open_activity_apply_patch_diff(entry)
+  local patch_text = entry_patch_text(entry)
+  if type(patch_text) ~= 'string' or patch_text == '' then
+    return false
+  end
+  open_patch_diff_float(patch_text)
+  return true
+end
+
+local function open_activity_file_change_diff(entry)
+  local changes = entry_file_changes(entry)
+  if type(changes) ~= 'table' or #changes == 0 then
+    return false
+  end
+
+  if activity_view_mode() == 'raw' then
+    if open_activity_apply_patch_diff(entry) then
+      return true
+    end
+  end
+
+  local ok, err = activity_diff.open_changes(changes, activity_diff_tool())
+  if ok then
+    return true
+  end
+  if type(err) == 'string' and err ~= '' then
+    notify('Diff unavailable: ' .. err, vim.log.levels.WARN)
+  end
+  return false
+end
+
+local function close_activity_hover_preview()
+  if activity_diff.close_preview then
+    activity_diff.close_preview()
+  end
+end
+
+local build_activity_details_lines
+local build_activity_hover_lines
+local highlight_diffstat_lines
+
+local function clamp_float(value, min_value, max_value)
+  if value < min_value then
+    return min_value
+  end
+  if value > max_value then
+    return max_value
+  end
+  return value
+end
+
+local function schedule_activity_hover_close(timeout_ms)
+  local delay = tonumber(timeout_ms) or tonumber((state.config or {}).chat and state.config.chat.activity_hover_timeout_ms) or 2500
+  if delay <= 0 or not uv then
+    return
+  end
+  local timer = state.activity_hover_timer
+  if timer then
+    pcall(timer.stop, timer)
+    pcall(timer.close, timer)
+  end
+  timer = uv.new_timer()
+  if not timer then
+    state.activity_hover_timer = nil
+    return
+  end
+  state.activity_hover_timer = timer
+  timer:start(delay, 0, function()
+    vim.schedule(function()
+      if state.activity_hover_timer == timer then
+        close_activity_hover_preview()
+      else
+        pcall(timer.stop, timer)
+        pcall(timer.close, timer)
+      end
+    end)
+  end)
+end
+
+local function hover_float_geometry(anchor_winid, lines)
+  local anchor_width = vim.api.nvim_win_get_width(anchor_winid)
+  local max_width = math.max(24, math.floor(anchor_width * 0.7))
+  local anchor_height = vim.api.nvim_win_get_height(anchor_winid)
+  local max_height = math.max(6, math.floor(anchor_height * 0.5))
+  local content_width = 0
+  for _, line in ipairs(lines) do
+    content_width = math.max(content_width, vim.fn.strdisplaywidth(line))
+  end
+  local width = clamp_float(math.max(content_width + 4, 24), 24, max_width)
+  local height = clamp_float(math.max(#lines + 2, 5), 5, max_height)
+  return width, height, 1, 0
+end
+
+local function open_activity_hover_float(entry, entry_idx, anchor_winid)
+  close_activity_hover_preview()
+  local lines = build_activity_hover_lines(entry)
+  if type(lines) ~= 'table' then
+    return false
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].readonly = true
+  highlight_diffstat_lines(buf)
+
+  local win_config = {
+    relative = 'cursor',
+    row = 1,
+    col = 0,
+    style = 'minimal',
+    border = 'rounded',
+    title = ' Activity preview ',
+    title_pos = 'center',
+  }
+  if anchor_winid and vim.api.nvim_win_is_valid(anchor_winid) then
+    local width, height, row, col = hover_float_geometry(anchor_winid, lines)
+    win_config.width = width
+    win_config.height = height
+    win_config.row = row
+    win_config.col = col
+  else
+    local width = math.min(math.max(60, math.floor(vim.o.columns * 0.85)), 140)
+    local height = math.min(math.max(#lines + 2, 12), math.floor(vim.o.lines * 0.85))
+    win_config.width = width
+    win_config.height = height
+    win_config.relative = 'cursor'
+    win_config.row = 1
+    win_config.col = 0
+  end
+
+  local winid = vim.api.nvim_open_win(buf, false, win_config)
+  state.activity_hover_winid = winid
+  state.activity_hover_entry_idx = entry_idx
+  window.protect_markdown_buffer(buf, winid)
+  window.set_window_syntax(winid, 'markdown')
+  vim.wo[winid].wrap = true
+  vim.wo[winid].linebreak = false
+
+  local function close()
+    close_activity_hover_preview()
+  end
+
+  vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', '<Esc><Esc>', close, { buffer = buf, nowait = true })
+  vim.keymap.set({ 'n', 'i' }, '<C-c>', close, { buffer = buf, nowait = true })
+  schedule_activity_hover_close()
+  return true
+end
+
+local function hover_entry_at_cursor(winid)
+  winid = winid or state.chat_winid
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return nil, nil, nil
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(winid)
+  local row = (cursor and cursor[1] or 1) - 1
+  local entry_idx
+  do
+    local candidate_row
+    for start_row, idx in pairs(state.entry_row_index or {}) do
+      if type(start_row) == 'number' and type(idx) == 'number' and start_row <= row then
+        if candidate_row == nil or start_row > candidate_row then
+          candidate_row = start_row
+          entry_idx = idx
+        end
+      end
+    end
+  end
+
+  local entry = entry_idx and state.entries[entry_idx] or nil
+  if not entry or entry.kind ~= 'activity' then
+    return nil, nil, nil
+  end
+
+  return entry, entry_idx, entry_file_changes(entry)
+end
+
+local function open_activity_hover_preview_under_cursor(winid)
+  if activity_view_mode() ~= 'hover' then
+    close_activity_hover_preview()
+    return false
+  end
+
+  local entry, entry_idx, file_changes = hover_entry_at_cursor(winid)
+  if not entry then
+    close_activity_hover_preview()
+    return false
+  end
+
+  if type(file_changes) == 'table' and #file_changes == 1 then
+    close_activity_hover_preview()
+    return activity_diff.open_preview_change(file_changes[1], { anchor_winid = winid })
+  end
+
+  if type(file_changes) == 'table' and #file_changes > 1 then
+    if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) and state.activity_hover_entry_idx == entry_idx then
+      return true
+    end
+    return open_activity_hover_float(entry, entry_idx, winid)
+  end
+
+  if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) and state.activity_hover_entry_idx == entry_idx then
+    return true
+  end
+
+  return open_activity_hover_float(entry, entry_idx, winid)
 end
 
 local function reasoning_config()
@@ -1481,6 +1835,13 @@ local function activity_preview_priority(line)
   return 2
 end
 
+local function is_file_change_activity_line(line)
+  if type(line) ~= 'string' or line == '' then
+    return false
+  end
+  return line:match('^Activity:%s+(Updated|Added|Deleted|Moved)%s+') ~= nil or line:match('^(Updated|Added|Deleted|Moved)%s+') ~= nil
+end
+
 local function collapsed_activity_line(entry)
   local content = type(entry) == 'table' and entry.content or entry
   local lines = normalize_content_lines(split_lines(sanitize_display_text(content)))
@@ -1501,32 +1862,73 @@ local function collapsed_activity_line(entry)
   end
 
   local item_count = 0
+  local hidden_count = nil
+  local code_change_files
   if type(entry) == 'table' then
-    local items = type(entry.activity_items) == 'table' and entry.activity_items or nil
-    if items then
-      item_count = #items
+    local code_change = entry_code_change(entry)
+    if code_change and type(code_change.files) == 'table' and #code_change.files > 0 then
+      code_change_files = code_change.files
+      hidden_count = math.max(#code_change.files - 1, 0)
+    else
+      local items = type(entry.activity_items) == 'table' and entry.activity_items or nil
+      if items then
+        item_count = #items
+      end
     end
   end
-  if item_count > 0 then
+  if hidden_count == nil and item_count > 0 then
     count = item_count
+  elseif hidden_count ~= nil then
+    count = 1
   end
 
   if count <= 0 then
     return 'Activity: hidden'
   end
-  local count_summary = count == 1 and '1 item hidden' or tostring(count) .. ' items hidden'
+  if code_change_files and #code_change_files > 0 then
+    preview_source = apply_patch.format_change(code_change_files[1]) or preview_source
+  end
+  local count_summary
+  if hidden_count ~= nil then
+    if hidden_count > 0 then
+      count_summary = hidden_count == 1 and '1 more file update hidden' or tostring(hidden_count) .. ' more file updates hidden'
+    end
+  else
+    count_summary = count == 1 and '1 item hidden' or tostring(count) .. ' items hidden'
+  end
   local source = preview_source or fallback_line
   local preview_max_width = ACTIVITY_PREVIEW_MAX_WIDTH
   if source and source:match('^Usage:%s+') then
     preview_max_width = USAGE_ACTIVITY_PREVIEW_MAX_WIDTH
   elseif is_report_intent_activity_line(source) then
     preview_max_width = REPORT_INTENT_ACTIVITY_PREVIEW_MAX_WIDTH
+  elseif source and source:match('^(Updated|Added|Deleted|Moved)%s+') then
+    preview_max_width = FILE_ACTIVITY_PREVIEW_MAX_WIDTH
+  end
+  if code_change_files and #code_change_files > 0 then
+    preview_max_width = FILE_ACTIVITY_PREVIEW_MAX_WIDTH
   end
   local preview = truncate_display_text(activity_preview_text(source), preview_max_width)
   if preview == '' then
-    return 'Activity: ' .. count_summary
+    if count_summary and count_summary ~= '' then
+      return 'Activity: ' .. count_summary
+    end
+    return 'Activity: hidden'
   end
-  return string.format('Activity: %s (%s)', preview, count_summary)
+  if count_summary and count_summary ~= '' then
+    return string.format('Activity: %s (%s)', preview, count_summary)
+  end
+  return 'Activity: ' .. preview
+end
+
+local function highlight_activity_diff_tokens(bufnr, row, line)
+  if not is_file_change_activity_line(line) then
+    return
+  end
+  for start_col, token in line:gmatch('()([+-]%d+)') do
+    local hl = token:sub(1, 1) == '+' and 'CopilotAgentActivityDiffAdd' or 'CopilotAgentActivityDiffDelete'
+    vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, hl, row, start_col - 1, start_col - 1 + #token)
+  end
 end
 
 local function entry_index_at_row(row)
@@ -1592,7 +1994,7 @@ local function append_markdown_inspect_block(lines, heading, value)
   end
 end
 
-local function highlight_diffstat_lines(buf)
+highlight_diffstat_lines = function(buf)
   local line_count = vim.api.nvim_buf_line_count(buf)
   for row = 0, line_count - 1 do
     local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
@@ -1690,7 +2092,7 @@ local function append_usage_details(lines, item, usage_idx)
   return true
 end
 
-local function build_activity_details_lines(entry)
+build_activity_details_lines = function(entry)
   local lines = { '# Activity details' }
   local summary = normalize_activity_detail_text(entry and entry.content or '')
   if summary then
@@ -1719,7 +2121,10 @@ local function build_activity_details_lines(entry)
     if type(item) == 'table' and item.kind == 'code_change' then
       code_change_count = code_change_count + 1
       local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Code change ' .. tostring(code_change_count))
-      append_markdown_heading(lines, string.format('## Code change %d — %s', code_change_count, title))
+      local heading = (type(item.from_commit) == 'string' and item.from_commit ~= '' and type(item.to_commit) == 'string' and item.to_commit ~= '')
+          and string.format('## Code change %d — %s', code_change_count, title)
+        or string.format('## File change %d — %s', code_change_count, title)
+      append_markdown_heading(lines, heading)
       append_markdown_field(lines, 'From', item.from_commit)
       append_markdown_field(lines, 'To', item.to_commit)
       local diffstat = type(item.diffstat) == 'table' and item.diffstat or {}
@@ -1763,6 +2168,69 @@ local function build_activity_details_lines(entry)
     lines[#lines + 1] = 'No activity details available.'
   end
   return lines
+end
+
+build_activity_hover_lines = function(entry)
+  local lines = { '# Activity preview' }
+
+  local file_changes = entry_file_changes(entry)
+  if type(file_changes) == 'table' and #file_changes > 0 then
+    if #file_changes == 1 then
+      return nil
+    end
+    append_markdown_heading(lines, '## Files')
+    for _, changed in ipairs(file_changes) do
+      local rendered = apply_patch.format_change(changed)
+      if type(rendered) ~= 'string' or rendered == '' then
+        rendered = sanitize_display_text(changed and changed.path or '<unknown>')
+      end
+      lines[#lines + 1] = '- ' .. rendered
+    end
+    return lines
+  end
+
+  local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
+  local summaries = {}
+  for _, item in ipairs(items) do
+    if type(item) == 'table' then
+      local text = type(item.summary) == 'string' and item.summary or ''
+      if text == '' then
+        if item.kind == 'tool' then
+          text = sanitize_display_text(item.tool_name or 'Tool')
+        elseif item.kind == 'usage' then
+          text = sanitize_display_text(item.summary or 'Usage')
+        elseif item.kind == 'subagent' then
+          text = sanitize_display_text(item.summary or 'Subagent')
+        elseif item.kind == 'report_intent' then
+          text = sanitize_display_text(item.summary or 'Used report_intent')
+        elseif item.kind == 'code_change' then
+          text = sanitize_display_text(item.summary or 'File change')
+        end
+      end
+      if text ~= '' then
+        summaries[#summaries + 1] = sanitize_display_text(text)
+      end
+    end
+  end
+
+  if #summaries > 0 then
+    append_markdown_heading(lines, '## Activities')
+    for _, text in ipairs(summaries) do
+      lines[#lines + 1] = '- ' .. text
+    end
+    return lines
+  end
+
+  local summary = normalize_activity_detail_text(entry and entry.content or '')
+  if summary then
+    append_markdown_heading(lines, '## Turn summary')
+    for _, line in ipairs(split_lines(summary)) do
+      lines[#lines + 1] = '- ' .. line
+    end
+    return lines
+  end
+
+  return nil
 end
 
 local function build_todo_lines()
@@ -1886,10 +2354,17 @@ local function open_activity_details_float(entry)
     end
   end
 
+  local function open_code_change_diff()
+    if open_activity_code_change_diff(entry) or open_activity_file_change_diff(entry) then
+      close()
+    end
+  end
+
   vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true })
   vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
   vim.keymap.set('n', '<Esc><Esc>', close, { buffer = buf, nowait = true })
   vim.keymap.set({ 'n', 'i' }, '<C-c>', close, { buffer = buf, nowait = true })
+  vim.keymap.set('n', 'gA', open_code_change_diff, { buffer = buf, nowait = true, desc = 'Open code change diff' })
 end
 
 function M.open_todo_float()
@@ -2619,6 +3094,7 @@ highlight_lines = function(bufnr, from_row, to_row)
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
     elseif line:match('^Activity:') or line == 'System:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentActivity', row, 0, -1)
+      highlight_activity_diff_tokens(bufnr, row, line)
     elseif line:match('^%s*Done%.$') then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentDone', row, 0, -1)
     end
@@ -2646,12 +3122,32 @@ function M.show_activity_details_under_cursor(winid)
     return false
   end
 
-  if open_activity_code_change_diff(entry) then
+  local file_changes = entry_file_changes(entry)
+  if activity_view_mode() == 'hover' then
+    close_activity_hover_preview()
+  end
+  if activity_view_mode() ~= 'raw' and type(file_changes) == 'table' and #file_changes > 0 then
+    local ok, opened = pcall(open_activity_file_change_diff, entry)
+    if ok and opened then
+      return true
+    end
+  end
+
+  local ok, opened = pcall(open_activity_code_change_diff, entry)
+  if ok and opened then
     return true
   end
 
-  open_activity_details_float(entry)
+  pcall(open_activity_details_float, entry)
   return true
+end
+
+function M.refresh_activity_hover_preview(winid)
+  return open_activity_hover_preview_under_cursor(winid)
+end
+
+function M.close_activity_hover_preview()
+  close_activity_hover_preview()
 end
 
 -- ── Full render ───────────────────────────────────────────────────────────────
@@ -2949,6 +3445,9 @@ function M.append_entry(kind, content, attachments, opts)
   end
   if kind == 'activity' and type(opts.activity_items) == 'table' and #opts.activity_items > 0 then
     entry.activity_items = vim.deepcopy(opts.activity_items)
+  end
+  if kind == 'activity' and type(opts.code_change) == 'table' and type(opts.code_change.files) == 'table' and #opts.code_change.files > 0 then
+    entry.code_change = vim.deepcopy(opts.code_change)
   end
 
   if kind == 'user' then

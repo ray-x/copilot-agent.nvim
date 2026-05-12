@@ -210,7 +210,7 @@ local render = require('copilot_agent.render')
 local logger = require('copilot_agent.log')
 local log = logger.log
 
-local function update_last_activity_with_code_change(from_commit, to_commit, diff_items)
+local function update_last_activity_with_code_change(from_commit, to_commit, diff_items, from_checkpoint_id, to_checkpoint_id)
   local summary
   if #diff_items > 0 then
     local first = diff_items[1]
@@ -231,6 +231,8 @@ local function update_last_activity_with_code_change(from_commit, to_commit, dif
     entry.code_change = {
       from_commit = from_commit,
       to_commit = to_commit,
+      from_checkpoint_id = from_checkpoint_id,
+      to_checkpoint_id = to_checkpoint_id,
       files = diff_items,
     }
     entry.activity_items = {
@@ -239,6 +241,8 @@ local function update_last_activity_with_code_change(from_commit, to_commit, dif
         summary = summary,
         from_commit = from_commit,
         to_commit = to_commit,
+        from_checkpoint_id = from_checkpoint_id,
+        to_checkpoint_id = to_checkpoint_id,
         diffstat = diff_items,
       },
     }
@@ -270,7 +274,7 @@ function M.collect_checkpoint_diff_items(text)
   return diff_items
 end
 
-function M.run_checkpoint_numstat(session_id, workspace, from_commit, to_commit)
+function M.run_checkpoint_numstat(session_id, workspace, from_commit, to_commit, from_checkpoint_id, to_checkpoint_id)
   local cmd = {
     'git',
     '--no-pager',
@@ -291,7 +295,7 @@ function M.run_checkpoint_numstat(session_id, workspace, from_commit, to_commit)
         log('checkpoint diffstat unavailable: ' .. tostring(message ~= '' and message or table.concat(cmd, ' ')), vim.log.levels.DEBUG)
         return
       end
-      update_last_activity_with_code_change(from_commit, to_commit, M.collect_checkpoint_diff_items(result.stdout))
+      update_last_activity_with_code_change(from_commit, to_commit, M.collect_checkpoint_diff_items(result.stdout), from_checkpoint_id, to_checkpoint_id)
     end)
   end)
 end
@@ -308,7 +312,7 @@ function M.summarize_checkpoint_code_change(session_id)
   end
   local previous = checkpoint_items[#checkpoint_items - 1]
   if previous and type(previous.commit) == 'string' and previous.commit ~= '' then
-    M.run_checkpoint_numstat(session_id, workspace, previous.commit, current.commit)
+    M.run_checkpoint_numstat(session_id, workspace, previous.commit, current.commit, previous.id, current.id)
     return
   end
   local parent_cmd = {
@@ -325,7 +329,7 @@ function M.summarize_checkpoint_code_change(session_id)
     vim.schedule(function()
       local parent_output = vim.trim(parent_result.stdout or '')
       local parent_commit = parent_output:match('^(%S+)') or '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
-      M.run_checkpoint_numstat(session_id, workspace, parent_commit, current.commit)
+      M.run_checkpoint_numstat(session_id, workspace, parent_commit, current.commit, nil, current.id)
     end)
   end)
 end

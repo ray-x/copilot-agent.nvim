@@ -214,6 +214,160 @@ function M.extract_patch_changes(value)
   return dedupe_latest_changes(parse_patch_changes(patch_text))
 end
 
+-- Search nested tables/fields for a unified git diff string (e.g. lines starting with 'diff --git ')
+local function strip_common_indent(s)
+  local lines = {}
+  local min_indent = nil
+  for line in s:gmatch('[^\r\n]*') do
+    if line ~= '' then
+      local indent = line:match('^(%s*)') or ''
+      local n = #indent
+      if min_indent == nil or n < min_indent then
+        min_indent = n
+      end
+    end
+    lines[#lines + 1] = line
+  end
+  if not min_indent or min_indent == 0 then
+    return s
+  end
+  local out = {}
+  for _, line in ipairs(lines) do
+    if #line >= min_indent then
+      out[#out + 1] = line:sub(min_indent + 1)
+    else
+      out[#out + 1] = ''
+    end
+  end
+  return table.concat(out, '\n')
+end
+
+local function extract_codefence_content(s)
+  local start_pos = s:find('```', 1, true)
+  if not start_pos then
+    return nil
+  end
+  local end_pos = s:find('```', start_pos + 3, true)
+  if not end_pos then
+    return nil
+  end
+  return s:sub(start_pos + 3, end_pos - 1)
+end
+
+local function extract_unified_diff_text(value, visited)
+  if type(value) == 'string' then
+    local s = value
+    -- If fenced code block, extract inner content
+    local fenced = extract_codefence_content(s)
+    if fenced then
+      s = fenced
+    end
+    -- Strip common 4-space indent or blockquote markers
+    if s:match('\n%s+diff --git') or s:match('\n%s+@@') or s:match('^%s+diff --git') then
+      s = strip_common_indent(s)
+    end
+    -- Remove common leading '> ' quoting
+    s = s:gsub('\n> ', '\n')
+    -- Now check for indicators
+    if s:find('diff --git ', 1, true) or s:find('\n@@', 1, true) or s:find('^@@', 1) then
+      return s
+    end
+    return nil
+  end
+  if type(value) ~= 'table' then
+    return nil
+  end
+  visited = visited or {}
+  if visited[value] then
+    return nil
+  end
+  visited[value] = true
+  local keys = {
+    'output_text',
+    'output',
+    'complete_data',
+    'data',
+    'start_input',
+    'start_data',
+    'result',
+    'toolResult',
+    'text',
+    'patch',
+    'diff',
+  }
+  for _, key in ipairs(keys) do
+    local found = extract_unified_diff_text(value[key], visited)
+    if found then
+      visited[value] = nil
+      return found
+    end
+  end
+  for _, nested in pairs(value) do
+    local found = extract_unified_diff_text(nested, visited)
+    if found then
+      visited[value] = nil
+      return found
+    end
+  end
+  visited[value] = nil
+  return nil
+end
+
+local function parse_unified_patch_changes(patch_text)
+  if type(patch_text) ~= 'string' or patch_text == '' then
+    return {}
+  end
+  local changes = {}
+  local change
+  local in_hunk = false
+
+  for line in patch_text:gmatch('[^\r\n]+') do
+    -- detect git diff header (be permissive; some tools embed paths without 'a/'/'b/' prefixes)
+    if line:find('diff --git') then
+      local function strip_path(p)
+        if not p then
+          return p
+        end
+        p = p:gsub('^%s*', '')
+        p = p:gsub('^[ab]%p*', '')
+        p = p:gsub('^~/', '')
+        return p
+      end
+
+      local a_path = line:match('a/(%S+)') or line:match('diff --git%s+(%S+)')
+      local b_path = line:match('b/(%S+)') or line:match('diff --git%s+%S+%s+(%S+)')
+      a_path = strip_path(a_path)
+      b_path = strip_path(b_path)
+      finish_change(changes, change)
+      change = { verb = 'update', path = b_path or a_path, additions = 0, deletions = 0 }
+      in_hunk = false
+    elseif line:match('^%-%-%-%s*[ab]?%p*/') or line:match('^%+%+%+%s*[ab]?%p*/') then
+      -- ignore file markers (--- a/path or --- /path)
+      in_hunk = in_hunk
+    elseif line:match('^@@') then
+      in_hunk = true
+    elseif change and in_hunk then
+      local first = line:sub(1, 1)
+      if first == '+' and line:sub(1, 3) ~= '+++' then
+        change.additions = (tonumber(change.additions) or 0) + 1
+      elseif first == '-' and line:sub(1, 3) ~= '---' then
+        change.deletions = (tonumber(change.deletions) or 0) + 1
+      end
+    end
+  end
+  finish_change(changes, change)
+  return changes
+end
+
+function M.extract_unified_patch_changes(value)
+  local text = extract_unified_diff_text(value)
+  return dedupe_latest_changes(parse_unified_patch_changes(text))
+end
+
+function M.extract_unified_patch_text(value)
+  return extract_unified_diff_text(value)
+end
+
 function M.format_change(change)
   return format_change(change)
 end

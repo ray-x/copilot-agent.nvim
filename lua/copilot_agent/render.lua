@@ -280,14 +280,26 @@ end
 local function entry_patch_text(entry)
   local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
   for _, item in ipairs(items) do
-    if type(item) == 'table' and vim.trim(tostring(item.tool_name or '')) == 'apply_patch' then
-      if type(item.code_change) == 'table' and type(item.code_change.apply_patch_text) == 'string' and item.code_change.apply_patch_text ~= '' then
-        return item.code_change.apply_patch_text
-      end
-      local patch_source = item.start_input or item.start_data or item.complete_data or item.data or item
-      local patch_text = apply_patch.extract_patch_text(patch_source)
-      if type(patch_text) == 'string' and patch_text ~= '' then
-        return patch_text
+    if type(item) == 'table' then
+      local tool_name = vim.trim(tostring(item.tool_name or '')):lower()
+      if tool_name == 'apply_patch' or tool_name == 'edit' then
+        if type(item.code_change) == 'table' and type(item.code_change.apply_patch_text) == 'string' and item.code_change.apply_patch_text ~= '' then
+          return item.code_change.apply_patch_text
+        end
+        local sources = { item.complete_data, item.start_input, item.start_data, item.data, item.output_text, item.output, item.partial_output, item }
+        for _, src in ipairs(sources) do
+          local patch_text = apply_patch.extract_patch_text(src)
+          if type(patch_text) == 'string' and patch_text ~= '' then
+            return patch_text
+          end
+        end
+        -- Fallback: unified git diff text (diff --git)
+        for _, src in ipairs(sources) do
+          local unified_text = apply_patch.extract_unified_patch_text(src)
+          if type(unified_text) == 'string' and unified_text ~= '' then
+            return unified_text
+          end
+        end
       end
     end
   end
@@ -307,14 +319,27 @@ local function entry_file_changes(entry)
   end
   if type(entry) == 'table' and type(entry.activity_items) == 'table' then
     for _, item in ipairs(entry.activity_items) do
-      if type(item) == 'table' and vim.trim(tostring(item.tool_name or '')) == 'apply_patch' then
-        if type(item.code_change) == 'table' and type(item.code_change.files) == 'table' and #item.code_change.files > 0 then
-          return item.code_change.files
-        end
-        local patch_source = item.start_input or item.start_data or item.complete_data or item.data or item
-        local changes = apply_patch.extract_patch_changes(patch_source)
-        if type(changes) == 'table' and #changes > 0 then
-          return changes
+      if type(item) == 'table' then
+        local tool_name = vim.trim(tostring(item.tool_name or '')):lower()
+        if tool_name == 'apply_patch' or tool_name == 'edit' then
+          if type(item.code_change) == 'table' and type(item.code_change.files) == 'table' and #item.code_change.files > 0 then
+            return item.code_change.files
+          end
+          -- Consider a variety of fields that may carry patch text: start_input, data, or tool output.
+          local sources = { item.complete_data, item.start_input, item.start_data, item.data, item.output_text, item.output, item.partial_output, item }
+          for _, src in ipairs(sources) do
+            local changes = apply_patch.extract_patch_changes(src)
+            if type(changes) == 'table' and #changes > 0 then
+              return changes
+            end
+          end
+          -- Fallback: detect unified git diffs (diff --git) which some tools (edit) emit.
+          for _, src in ipairs(sources) do
+            local unified_changes = apply_patch.extract_unified_patch_changes(src)
+            if type(unified_changes) == 'table' and #unified_changes > 0 then
+              return unified_changes
+            end
+          end
         end
       end
     end
@@ -335,7 +360,7 @@ local function open_activity_apply_patch_diff(entry)
   return true
 end
 
-local function open_activity_file_change_diff(entry)
+local function open_activity_file_change_diff(entry, entry_idx)
   local changes = entry_file_changes(entry)
   if type(changes) ~= 'table' or #changes == 0 then
     return false
@@ -347,7 +372,11 @@ local function open_activity_file_change_diff(entry)
     end
   end
 
-  local ok, err = activity_diff.open_changes(changes, activity_diff_tool())
+  local ok, err = activity_diff.open_changes(changes, {
+    tool_name = activity_diff_tool(),
+    entry_index = entry_idx,
+    code_change = entry_code_change(entry),
+  })
   if ok then
     return true
   end
@@ -460,7 +489,8 @@ local function open_activity_hover_float(entry, entry_idx, anchor_winid)
     win_config.col = 0
   end
 
-  local winid = vim.api.nvim_open_win(buf, false, win_config)
+  local enter = state.activity_hover_opened_by_key == true
+  local winid = vim.api.nvim_open_win(buf, enter, win_config)
   state.activity_hover_winid = winid
   state.activity_hover_entry_idx = entry_idx
   window.protect_markdown_buffer(buf, winid)
@@ -521,9 +551,15 @@ local function open_activity_hover_preview_under_cursor(winid)
     return false
   end
 
-  if type(file_changes) == 'table' and #file_changes == 1 then
+  local patch_text = entry_patch_text(entry)
+  -- If we can extract a full patch/unified-diff text, prefer showing it directly in the hover.
+  if type(patch_text) == 'string' and patch_text ~= '' then
     close_activity_hover_preview()
-    return activity_diff.open_preview_change(file_changes[1], { anchor_winid = winid })
+    return activity_diff.open_preview_patch_text(patch_text, {
+      anchor_winid = winid,
+      entry_index = entry_idx,
+      code_change = entry_code_change(entry),
+    })
   end
 
   if type(file_changes) == 'table' and #file_changes > 1 then
@@ -3127,7 +3163,7 @@ function M.show_activity_details_under_cursor(winid)
     close_activity_hover_preview()
   end
   if activity_view_mode() ~= 'raw' and type(file_changes) == 'table' and #file_changes > 0 then
-    local ok, opened = pcall(open_activity_file_change_diff, entry)
+    local ok, opened = pcall(open_activity_file_change_diff, entry, entry_idx)
     if ok and opened then
       return true
     end

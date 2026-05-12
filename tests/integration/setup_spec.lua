@@ -9291,12 +9291,13 @@ describe('chat input behavior', function()
     )
   end)
 
-  it('opens a concise hover summary for multi-file activity changes', function()
+  it('opens an apply_patch hover preview for multi-file activity changes', function()
     local events = require('copilot_agent.events')
     agent.state.session_id = 'session-123'
     agent.state.entries = {}
     agent.state.entry_row_index = {}
     agent.state.config.chat.activity_view = 'hover'
+    agent.state.config.chat.activity_hover_cursor_hold = true
     agent.state.config.chat.activity_hover_timeout_ms = 100
     agent.open_chat()
     local bufnr = agent.state.chat_bufnr
@@ -9377,16 +9378,15 @@ describe('chat input behavior', function()
     assert_true(preview_config.width <= math.floor(vim.api.nvim_win_get_width(agent.state.chat_winid) * 0.7))
     assert_true(preview_config.height <= math.floor(vim.api.nvim_win_get_height(agent.state.chat_winid) * 0.5))
     assert_eq(agent.state.chat_winid, vim.api.nvim_get_current_win())
-    assert_eq('markdown', vim.bo[preview_buf].filetype)
+    assert_eq('diff', vim.bo[preview_buf].filetype)
     assert_eq(false, vim.bo[preview_buf].modifiable)
     assert_eq(true, vim.bo[preview_buf].readonly)
     local lines = vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false)
     local joined = table.concat(lines, '\n')
-    assert_true(joined:find('## Files', 1, true) ~= nil)
-    assert_true(joined:find('Updated lua/copilot_agent/activity_diff.lua +1 -1', 1, true) ~= nil)
-    assert_true(joined:find('Updated lua/copilot_agent/chat.lua +1 -1', 1, true) ~= nil)
-    assert_true(joined:find('## Turn summary', 1, true) == nil)
-    assert_true(joined:find('@@', 1, true) == nil)
+    assert_true(joined:find('*** Begin Patch', 1, true) ~= nil)
+    assert_true(joined:find('*** Update File: lua/copilot_agent/activity_diff.lua', 1, true) ~= nil)
+    assert_true(joined:find('*** Update File: lua/copilot_agent/chat.lua', 1, true) ~= nil)
+    assert_true(joined:find('@@', 1, true) ~= nil)
     vim.wait(180)
     assert_true(preview_winid == nil or not vim.api.nvim_win_is_valid(preview_winid))
   end)
@@ -9397,6 +9397,7 @@ describe('chat input behavior', function()
     agent.state.entries = {}
     agent.state.entry_row_index = {}
     agent.state.config.chat.activity_view = 'hover'
+    agent.state.config.chat.activity_hover_cursor_hold = true
     agent.open_chat()
     local bufnr = agent.state.chat_bufnr
 
@@ -9473,7 +9474,11 @@ describe('chat input behavior', function()
     assert_eq('diff', vim.bo[preview_buf].filetype)
     assert_eq(false, vim.bo[preview_buf].modifiable)
     assert_eq(true, vim.bo[preview_buf].readonly)
-    assert_true(vim.api.nvim_buf_line_count(preview_buf) > 0)
+    local lines = vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false)
+    local joined = table.concat(lines, '\n')
+    assert_true(joined:find('*** Begin Patch', 1, true) ~= nil)
+    assert_true(joined:find('*** Update File: lua/copilot_agent/activity_diff.lua', 1, true) ~= nil)
+    assert_true(joined:find('@@', 1, true) ~= nil)
   end)
 
   it('opens a hover activity summary for tool activity', function()
@@ -9482,6 +9487,7 @@ describe('chat input behavior', function()
     agent.state.entries = {}
     agent.state.entry_row_index = {}
     agent.state.config.chat.activity_view = 'hover'
+    agent.state.config.chat.activity_hover_cursor_hold = true
     agent.open_chat()
     local bufnr = agent.state.chat_bufnr
 

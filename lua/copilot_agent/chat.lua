@@ -101,7 +101,7 @@ local function help_lines()
     '    <C-c>           Cancel current turn',
     '    zA              Toggle Activity details',
     '    <CR>            Open the editable diff split on Activity lines',
-    '    Hover preview   Shows a read-only diff on CursorHold/CursorHoldI',
+    "    Hover preview   Toggleable read-only diff: press the configured activity hover key (default 'K') to show/hide. Set activity_hover_cursor_hold=true to use CursorHold instead.",
     '    gT              Open TODO float',
     '    [[ / ]]         Jump to prev/next conversation',
     '    [a / ]a         Jump to prev/next Assistant/Activity',
@@ -171,17 +171,53 @@ local function ensure_chat_hover_autocmds(bufnr)
   end
 
   local group = vim.api.nvim_create_augroup('CopilotAgentChatHover' .. bufnr, { clear = true })
-  vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
-    group = group,
-    buffer = bufnr,
-    callback = function()
-      refresh_activity_hover_preview(state.chat_winid or bufnr)
-    end,
-  })
+
+  local chat_cfg = state.config and state.config.chat or {}
+  local use_cursor_hold = chat_cfg.activity_hover_cursor_hold
+  local hover_key = chat_cfg.activity_hover_key or ''
+
+  if use_cursor_hold then
+    vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
+      group = group,
+      buffer = bufnr,
+      callback = function()
+        -- Mark this invocation as CursorHold-driven so key toggles don't close it.
+        state.activity_hover_opened_by_key = false
+        refresh_activity_hover_preview(state.chat_winid or bufnr)
+      end,
+    })
+  else
+    -- If a hover key is configured, map it to toggle the hover preview.
+    if hover_key and hover_key ~= '' then
+      vim.keymap.set('n', hover_key, function()
+        local winid = state.chat_winid or bufnr
+        if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) then
+          -- Only close if this hover was opened by a keypress (toggle semantics).
+          if state.activity_hover_opened_by_key then
+            close_activity_hover_preview()
+          end
+        else
+          -- Mark that the hover was explicitly requested by key so repeated
+          -- presses will toggle it closed.
+          state.activity_hover_opened_by_key = true
+          refresh_activity_hover_preview(winid)
+        end
+      end, { buffer = bufnr, silent = true, desc = 'Toggle activity hover preview' })
+    end
+  end
+
+  -- Always close hover when the cursor moves or the buffer/window is left.
   vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI', 'BufLeave', 'WinLeave' }, {
     group = group,
     buffer = bufnr,
     callback = function()
+      -- Allow focusing the activity hover float without closing it. Only close
+      -- when the current window is not the hover window (or the hover no longer
+      -- exists).
+      local curwin = vim.api.nvim_get_current_win()
+      if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) and curwin == state.activity_hover_winid then
+        return
+      end
       close_activity_hover_preview()
     end,
   })

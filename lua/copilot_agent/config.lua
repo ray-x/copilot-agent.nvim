@@ -78,6 +78,12 @@ local defaults = {
     -- File-change blocks show file summaries in hover and open an editable diff on <CR>.
     -- Hover previews auto-close after this many milliseconds (0 = disabled).
     activity_hover_timeout_ms = 2500,
+    -- Key to toggle activity hover preview when cursor_hold is false. Set to
+    -- empty string to disable key-based hover.
+    activity_hover_key = 'K',
+    -- When true, use CursorHold/CursorHoldI autocmds to trigger hover previews
+    -- and ignore the hover key. Default: false (prefer explicit key press).
+    activity_hover_cursor_hold = false,
     -- 'raw' keeps the patch-text float.
     activity_view = 'hover',
     -- File-diff backend for activity_view = 'diff'.

@@ -238,6 +238,10 @@ For most users, this minimal setup is enough:
         diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; clean buffers auto-reload, conflicting modified buffers prompt before reload
         activity_view = 'hover',         -- 'hover' (default) opens a read-only preview on cursor idle; 'diff' opens editable file diffs on <CR>; 'raw' keeps the patch-text viewer
         activity_diff_tool = 'native',   -- 'native', 'diffview', 'fugitive', or a custom Vim command name
+        -- Hover & preview controls:
+        -- activity_hover_key: string (default: 'K') - key to toggle the read-only hover preview when activity_view='hover'.
+        -- activity_hover_cursor_hold: boolean (default: false) - when true, show hover on CursorHold/CursorHoldI instead of the hover key.
+        -- activity_hover_timeout_ms: number (default: 2500) - auto-close timeout for hover preview in milliseconds (<=0 disables auto-close).
       },
       prompt = {
         style = "cold",                  -- "cold" (default) = red-violet/violet/blue, "warm" = red/yellow/green
@@ -397,7 +401,7 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-n>` / `<M-n>`                 | Next prompt from history                                                                                |
 | `<C-c>` (output)                  | Cancel current turn                                                                                     |
 | `zA` (output)                     | Toggle collapsed `Activity:` transcript blocks                                                          |
-| `<CR>` (output)                   | On Activity lines, open the editable diff split; otherwise open input                                 |
+| `<CR>` (output)                   | On Activity lines, open the editable diff split; otherwise open input                                   |
 | `CursorHold` / `CursorHoldI`      | On Activity lines, show the concise read-only hover preview (auto-closes after 2.5s by default)         |
 | `[[` / `]]` (output)              | Jump to previous/next conversation (`User:` block)                                                      |
 | `[a` / `]a` (output)              | Jump to previous/next `Assistant:` or `Activity:` block                                                 |

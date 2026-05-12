@@ -791,24 +791,26 @@ function M.start_lsp(opts)
   local root = opts.root_dir or service.working_directory()
   for _, client in ipairs(vim.lsp.get_clients({ name = 'copilot-agent' })) do
     if client.config.root_dir == root then
+      state.lsp_client_id = client.id
       return client.id
     end
   end
 
-  local service_url = state.config.base_url
   service.ensure_service_live(function(err)
     if err then
       notify('Failed to start Copilot agent LSP: ' .. err, vim.log.levels.ERROR)
       return
     end
 
+    local service_url = state.config.base_url
     local wrapped_cmd = lsp_only_command(service_url)
     if not wrapped_cmd then
       notify('Failed to start Copilot agent LSP', vim.log.levels.ERROR)
       return
     end
 
-    local client_id = vim.lsp.start({
+    local started_client_id
+    started_client_id = vim.lsp.start({
       name = 'copilot-agent',
       cmd = wrapped_cmd,
       cmd_cwd = service.service_cwd(),
@@ -819,17 +821,28 @@ function M.start_lsp(opts)
         notify('Copilot agent started (LSP id=' .. client.id .. ')', vim.log.levels.INFO)
       end,
       on_exit = function(code, signal)
-        state.lsp_client_id = nil
+        if state.lsp_client_id == started_client_id then
+          state.lsp_client_id = nil
+        end
         if code ~= 0 then
           notify('Copilot agent exited: code=' .. code .. ' signal=' .. tostring(signal), vim.log.levels.WARN)
         end
       end,
     })
 
-    if not client_id then
+    if not started_client_id then
       notify('Failed to start Copilot agent LSP', vim.log.levels.ERROR)
+      return
+    end
+    -- Persist the client id immediately so follow-up requests can use it even
+    -- before on_init runs.
+    state.lsp_client_id = started_client_id
+    if type(opts.on_started) == 'function' then
+      opts.on_started(started_client_id)
     end
   end)
+
+  return state.lsp_client_id
 end
 
 return M

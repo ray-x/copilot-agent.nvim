@@ -200,7 +200,9 @@ function M.append_unique(items, value)
 end
 
 function M.append_unique_activity_output(parts, text)
-  text = M.split_lines(text) and table.concat(M.split_lines(text), '\n') or text
+  if type(text) == 'string' then
+    text = text:gsub('\r\n?', '\n')
+  end
   if type(text) ~= 'string' or text == '' then
     return
   end

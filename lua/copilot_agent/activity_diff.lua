@@ -88,7 +88,7 @@ local function float_geometry(winid, lines, opts)
     content_width = math.max(content_width, vim.fn.strdisplaywidth(line))
   end
   local width = clamp(math.max(content_width + 4, 24), 24, max_width)
-  local height = clamp(math.max(#lines + 2, 5), 5, max_height)
+  local height = clamp(math.max(#lines + 1, 2), 2, max_height)
   return {
     width = width,
     height = height,
@@ -211,7 +211,7 @@ local function open_preview_float(title, diff_text, opts)
     config.relative = 'cursor'
   else
     local width = math.min(math.max(80, math.floor(vim.o.columns * 0.9)), 160)
-    local height = math.min(math.max(#lines + 2, 12), math.floor(vim.o.lines * 0.85))
+    local height = math.min(math.max(#lines + 1, 2), math.floor(vim.o.lines * 0.85))
     config = {
       relative = 'cursor',
       width = width,

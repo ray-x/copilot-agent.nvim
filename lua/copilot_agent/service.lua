@@ -200,6 +200,14 @@ local function load_service_addr()
   return read_first_line(addr_state_file())
 end
 
+function M.forget_service_addr()
+  pcall(uv.fs_unlink, addr_state_file())
+  state.service_addr_known = false
+  if state.base_url_managed ~= false then
+    state.config.base_url = defaults.base_url
+  end
+end
+
 local function refresh_service_addr_from_state()
   if state.base_url_managed == false then
     return false
@@ -285,7 +293,7 @@ function M.last_service_output()
   return state.service_output[#state.service_output]
 end
 
-local function check_service_health(callback)
+function M.check_service_health(callback)
   refresh_service_addr_from_state()
   local http = require('copilot_agent.http')
   http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
@@ -298,7 +306,7 @@ function M.ensure_service_live(callback)
     return
   end
 
-  check_service_health(function(healthy, err, status)
+  M.check_service_health(function(healthy, err, status)
     if healthy then
       callback(nil)
       return
@@ -353,7 +361,7 @@ function M.ensure_service_running(callback)
   end
 
   local function poll_service_health(attempts_left)
-    check_service_health(function(healthy)
+    M.check_service_health(function(healthy)
       if healthy then
         finish(nil)
         return
@@ -374,7 +382,7 @@ function M.ensure_service_running(callback)
   end
 
   local function start_service_with_lock()
-    check_service_health(function(healthy)
+    M.check_service_health(function(healthy)
       if healthy then
         finish(nil)
         return
@@ -451,7 +459,7 @@ function M.ensure_service_running(callback)
   end
 
   local function wait_for_service_start()
-    check_service_health(function(healthy)
+    M.check_service_health(function(healthy)
       if healthy then
         finish(nil)
         return
@@ -483,7 +491,7 @@ function M.ensure_service_running(callback)
 
   refresh_service_addr_from_state()
 
-  check_service_health(function(healthy)
+  M.check_service_health(function(healthy)
     if healthy then
       finish(nil)
       return

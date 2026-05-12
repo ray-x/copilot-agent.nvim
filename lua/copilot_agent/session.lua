@@ -196,6 +196,25 @@ local function is_missing_session_error(err)
   return err:lower():find('session not found', 1, true) ~= nil
 end
 
+local function is_corrupted_session_error(err)
+  if type(err) ~= 'string' then
+    return false
+  end
+  local lowered = err:lower()
+  return lowered:find('session file is corrupted', 1, true) ~= nil or lowered:find('session is corrupted', 1, true) ~= nil or lowered:find('corrupted session', 1, true) ~= nil
+end
+
+local function is_stale_service_error(err)
+  if type(err) ~= 'string' then
+    return false
+  end
+  local lowered = err:lower()
+  return lowered:find('cli process exited', 1, true) ~= nil
+    or lowered:find('process exited unexpectedly', 1, true) ~= nil
+    or lowered:find('client not connected', 1, true) ~= nil
+    or lowered:find('client stopped', 1, true) ~= nil
+end
+
 -- Delete any temp files (clipboard PNGs) still waiting in pending_attachments.
 function M.discard_pending_attachments()
   for _, a in ipairs(state.pending_attachments) do
@@ -341,7 +360,31 @@ function M.resume_session(session_id, callback, opts)
     agent = state.config.session.agent,
   }, function(response, err)
     state.creating_session = false
+    if opts.guard_current_session_id and state.session_id ~= nil and state.session_id ~= opts.guard_current_session_id then
+      local message = 'resume cancelled: active session changed'
+      log(
+        string.format(
+          'resume_session ignored stale response id=%s current=%s expected=%s',
+          format_session_id(response and response.sessionId or session_id),
+          format_session_id(state.session_id),
+          format_session_id(opts.guard_current_session_id)
+        ),
+        vim.log.levels.DEBUG
+      )
+      if callback then
+        callback(nil, message)
+      end
+      return
+    end
     if err then
+      if is_corrupted_session_error(err) and opts.corrupt_recovery_attempted ~= true then
+        M.recover_after_corrupted_session(session_id, function(new_session_id, recovery_err)
+          if callback then
+            callback(new_session_id, recovery_err)
+          end
+        end)
+        return
+      end
       if opts.suppress_error_ui ~= true then
         notify('Failed to resume session: ' .. err, vim.log.levels.ERROR)
         append_entry('error', 'Failed to resume session: ' .. err)
@@ -353,22 +396,6 @@ function M.resume_session(session_id, callback, opts)
       return
     end
     local resumed_session_id = response and response.sessionId or nil
-    if opts.guard_current_session_id and state.session_id ~= nil and state.session_id ~= opts.guard_current_session_id then
-      local message = 'resume cancelled: active session changed'
-      log(
-        string.format(
-          'resume_session ignored stale response id=%s current=%s expected=%s',
-          format_session_id(resumed_session_id),
-          format_session_id(state.session_id),
-          format_session_id(opts.guard_current_session_id)
-        ),
-        vim.log.levels.DEBUG
-      )
-      if callback then
-        callback(nil, message)
-      end
-      return
-    end
     state.session_id = resumed_session_id
     state.session_working_directory = (response and response.workingDirectory) or requested_wd
 
@@ -507,6 +534,10 @@ function M.is_missing_session_error(err)
   return is_missing_session_error(err)
 end
 
+function M.is_corrupted_session_error(err)
+  return is_corrupted_session_error(err)
+end
+
 function M.recover_after_service_restart(unavailable_session_id, callback)
   callback = callback or function() end
   log(string.format('recover_after_service_restart unavailable=%s cwd=%s', format_session_id(unavailable_session_id), tostring(working_directory())), vim.log.levels.WARN)
@@ -516,6 +547,21 @@ function M.recover_after_service_restart(unavailable_session_id, callback)
   create_session(callback, {
     session_id = unavailable_session_id,
   })
+end
+
+function M.recover_after_corrupted_session(corrupted_session_id, callback)
+  callback = callback or function() end
+  log(string.format('recover_after_corrupted_session id=%s cwd=%s', format_session_id(corrupted_session_id), tostring(working_directory())), vim.log.levels.WARN)
+
+  reset_for_session_switch()
+  append_entry('system', 'Saved session ' .. format_session_id(corrupted_session_id) .. ' is corrupted. Creating a new session...')
+  delete_session_request(corrupted_session_id, true, function(delete_err)
+    if delete_err then
+      append_entry('system', 'Could not delete corrupted saved session ' .. format_session_id(corrupted_session_id) .. ': ' .. delete_err .. '. Creating a new session anyway.')
+      log('recover_after_corrupted_session delete failed for ' .. format_session_id(corrupted_session_id) .. ': ' .. tostring(delete_err), vim.log.levels.WARN)
+    end
+    create_session(callback)
+  end)
 end
 
 function M.pick_or_create_session(callback)
@@ -708,6 +754,22 @@ create_session = function(callback, opts)
   }, function(response, err)
     state.creating_session = false
     if err then
+      if is_stale_service_error(err) and opts.service_restart_attempted ~= true then
+        append_entry('system', 'Copilot service lost its embedded CLI; reconnecting to the shared service and retrying.')
+        service.ensure_service_live(function(start_err)
+          if start_err then
+            local message = 'Failed to reconnect service: ' .. start_err
+            notify(message, vim.log.levels.ERROR)
+            append_entry('error', message)
+            on_session_ready(nil, start_err)
+            return
+          end
+          state.creating_session = true
+          local retry_opts = vim.tbl_extend('force', {}, opts, { service_restart_attempted = true })
+          create_session(callback, retry_opts)
+        end)
+        return
+      end
       local um = unavailable_model_from_error(err)
       local hint = stale_service_hint(um)
       if hint then

@@ -415,7 +415,7 @@ local function hover_float_geometry(anchor_winid, lines)
     content_width = math.max(content_width, vim.fn.strdisplaywidth(line))
   end
   local width = clamp_float(math.max(content_width + 4, 24), 24, max_width)
-  local height = clamp_float(math.max(#lines + 2, 5), 5, max_height)
+  local height = clamp_float(math.max(#lines + 1, 2), 2, max_height)
   return width, height, 1, 0
 end
 
@@ -452,7 +452,7 @@ local function open_activity_hover_float(entry, entry_idx, anchor_winid)
     win_config.col = col
   else
     local width = math.min(math.max(60, math.floor(vim.o.columns * 0.85)), 140)
-    local height = math.min(math.max(#lines + 2, 12), math.floor(vim.o.lines * 0.85))
+    local height = math.min(math.max(#lines + 1, 2), math.floor(vim.o.lines * 0.85))
     win_config.width = width
     win_config.height = height
     win_config.relative = 'cursor'
@@ -2171,7 +2171,7 @@ build_activity_details_lines = function(entry)
 end
 
 build_activity_hover_lines = function(entry)
-  local lines = { '# Activity preview' }
+  local lines = {}
 
   local file_changes = entry_file_changes(entry)
   if type(file_changes) == 'table' and #file_changes > 0 then

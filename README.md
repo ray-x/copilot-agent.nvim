@@ -91,6 +91,8 @@ The HTTP bridge and the LSP helper are separate processes. The HTTP service owns
 | Multi-provider            | ❌ (Copilot only, or Bring your own key)                              | ✅ (provider_resolver)    |
 | Dependencies              | codepilot-cli + go server                                             | Pure Lua                  |
 
+The model picker shows each model's billing multiplier when the SDK provides one.
+
 </details>
 
 **When to choose CopilotChat.nvim**: zero-binary Lua setup, just want Copilot chat with buffer context, happy with a Lua-managed tool loop.
@@ -197,7 +199,8 @@ For most users, this minimal setup is enough:
   build = ":CopilotAgentInstall",
   config = function()
     require("copilot_agent").setup({
-      -- When auto_start=true the plugin launches the Go service and reads its
+      -- When auto_start=true the plugin connects to the shared Go service if
+      -- one already exists, otherwise it starts exactly one and reads its
       -- port from stderr automatically. No manual base_url needed.
       base_url = "http://127.0.0.1:8088",  -- only for externally-started services
       client_name = "nvim-copilot",
@@ -299,7 +302,9 @@ service = { auto_start = true, command = { "/path/to/copilot-agent" }, port_rang
 
 **Global service vs isolated instances**
 
-By default, `auto_start = true` launches or reuses a **single detached background service** for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default.
+By default, `auto_start = true` connects to the shared service if it is already running, otherwise it starts a single detached background service for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default.
+
+The helper LSP reuses that same shared service; it does not spawn a separate Copilot backend.
 
 If you want **per-project isolation**, pin a project-specific address and disable detaching:
 

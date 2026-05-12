@@ -218,16 +218,21 @@ function M.setup(opts)
   vim.schedule(function()
     require('copilot_agent.checkpoints').prune_deleted()
   end)
-  -- Eagerly start the Go service in the background so it is ready by
-  -- the time the user opens the chat window. Session creation is deferred
-  -- until the user actually opens the chat to avoid prompting for session
-  -- selection at startup.
-  if state.config.auto_create_session and state.config.service.auto_start then
+  -- Eagerly connect to an existing shared service or start one if needed.
+  -- Session creation is still deferred until the user opens chat.
+  if state.config.service.auto_start then
     vim.schedule(function()
-      ensure_service_running(function() end)
+      ensure_service_running(function(err)
+        if err then
+          notify('Failed to start Copilot service: ' .. err, vim.log.levels.ERROR)
+          return
+        end
+        if state.config.lsp and state.config.lsp.enabled then
+          lsp.start_lsp()
+        end
+      end)
     end)
-  end
-  if state.config.lsp and state.config.lsp.enabled then
+  elseif state.config.lsp and state.config.lsp.enabled then
     vim.schedule(function()
       lsp.start_lsp()
     end)

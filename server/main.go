@@ -217,8 +217,25 @@ type managedSession struct {
 	inputResponseGrace   time.Duration
 }
 
+type copilotClient interface {
+	Start(context.Context) error
+	Stop() error
+	ForceStop()
+	State() copilot.ConnectionState
+	ListModels(context.Context) ([]copilot.ModelInfo, error)
+	ListSessions(context.Context, *copilot.SessionListFilter) ([]copilot.SessionMetadata, error)
+	GetSessionMetadata(context.Context, string) (*copilot.SessionMetadata, error)
+	CreateSession(context.Context, *copilot.SessionConfig) (*copilot.Session, error)
+	ResumeSession(context.Context, string, *copilot.ResumeSessionConfig) (*copilot.Session, error)
+	DeleteSession(context.Context, string) error
+	OnEventType(copilot.SessionLifecycleEventType, copilot.SessionLifecycleHandler) func()
+}
+
 type service struct {
-	client                  *copilot.Client
+	clientMu                sync.RWMutex
+	client                  copilotClient
+	clientFactory           func() copilotClient
+	clientCtx               context.Context
 	defaultModel            string
 	defaultWorkingDirectory string
 	sessions                map[string]*managedSession
@@ -255,47 +272,34 @@ func main() {
 		log.Fatal(err)
 	}
 
-	client := copilot.NewClient(&copilot.ClientOptions{
+	clientOptions := copilot.ClientOptions{
 		CLIPath:  strings.TrimSpace(*cliPath),
 		CLIUrl:   strings.TrimSpace(*cliURL),
 		Cwd:      workingDirectory,
 		LogLevel: *logLevel,
-	})
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err = client.Start(ctx); err != nil {
-		log.Fatalf("start copilot client: %v", err)
-	}
-	defer client.Stop()
-
 	svc := &service{
-		client:                  client,
+		clientCtx: ctx,
+		clientFactory: func() copilotClient {
+			return copilot.NewClient(&clientOptions)
+		},
 		defaultModel:            strings.TrimSpace(*model),
 		defaultWorkingDirectory: workingDirectory,
 		sessions:                make(map[string]*managedSession),
 	}
 
-	// Track session name updates from the SDK. The SDK auto-generates a summary
-	// after each turn and delivers it via a SessionLifecycleUpdated event.
-	client.OnEventType(copilot.SessionLifecycleUpdated, func(event copilot.SessionLifecycleEvent) {
-		if event.Metadata == nil || event.Metadata.Summary == nil {
-			return
+	if err = svc.startCopilotClient(); err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := svc.stopCopilotClient(); err != nil {
+			log.Printf("stop copilot client: %v", err)
 		}
-		svc.sessionsMu.RLock()
-		managed, ok := svc.sessions[event.SessionID]
-		svc.sessionsMu.RUnlock()
-		if !ok {
-			return
-		}
-		name := *event.Metadata.Summary
-		managed.sessionName = name
-		managed.broadcastHostEvent("host.session_name_updated", map[string]string{
-			"sessionId": event.SessionID,
-			"name":      name,
-		})
-	})
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", svc.handleHealth)
@@ -382,7 +386,144 @@ func main() {
 	}
 }
 
+func (s *service) currentClient() copilotClient {
+	s.clientMu.RLock()
+	defer s.clientMu.RUnlock()
+	return s.client
+}
+
+func (s *service) attachClientLifecycleHandlers(client copilotClient) {
+	// Track session name updates from the SDK. The SDK auto-generates a summary
+	// after each turn and delivers it via a SessionLifecycleUpdated event.
+	client.OnEventType(copilot.SessionLifecycleUpdated, func(event copilot.SessionLifecycleEvent) {
+		if event.Metadata == nil || event.Metadata.Summary == nil {
+			return
+		}
+		s.sessionsMu.RLock()
+		managed, ok := s.sessions[event.SessionID]
+		s.sessionsMu.RUnlock()
+		if !ok {
+			return
+		}
+		name := *event.Metadata.Summary
+		managed.sessionName = name
+		managed.broadcastHostEvent("host.session_name_updated", map[string]string{
+			"sessionId": event.SessionID,
+			"name":      name,
+		})
+	})
+}
+
+func (s *service) startCopilotClient() error {
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+	return s.startCopilotClientLocked()
+}
+
+func (s *service) startCopilotClientLocked() error {
+	if s.clientFactory == nil {
+		return errors.New("copilot client factory is not configured")
+	}
+	if s.clientCtx == nil {
+		return errors.New("copilot client context is not configured")
+	}
+	client := s.clientFactory()
+	if client == nil {
+		return errors.New("copilot client factory returned nil")
+	}
+	if err := client.Start(s.clientCtx); err != nil {
+		return fmt.Errorf("start copilot client: %w", err)
+	}
+	s.attachClientLifecycleHandlers(client)
+	s.client = client
+	return nil
+}
+
+func (s *service) stopCopilotClient() error {
+	s.clientMu.Lock()
+	client := s.client
+	s.client = nil
+	s.clientMu.Unlock()
+	if client == nil {
+		return nil
+	}
+	return client.Stop()
+}
+
+func (s *service) ensureClientConnected() error {
+	client := s.currentClient()
+	if client != nil && client.State() == copilot.StateConnected {
+		return nil
+	}
+	return s.restartCopilotClient(errors.New("copilot client is disconnected"), false)
+}
+
+func (s *service) restartCopilotClient(reason error, force bool) error {
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+
+	if !force && s.client != nil && s.client.State() == copilot.StateConnected {
+		return nil
+	}
+
+	oldClient := s.client
+	s.client = nil
+	if oldClient != nil {
+		log.Printf("restarting Copilot CLI client after failure: %v", reason)
+		oldClient.ForceStop()
+		s.closeManagedSessions(fmt.Errorf("copilot client restarted: %w", reason))
+	}
+
+	return s.startCopilotClientLocked()
+}
+
+func isRecoverableCopilotClientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "cli process exited"),
+		strings.Contains(message, "process exited unexpectedly"),
+		strings.Contains(message, "client not connected"),
+		strings.Contains(message, "client stopped"):
+		return true
+	default:
+		return false
+	}
+}
+
+func withCopilotClientRetry[T any](s *service, operation string, fn func(copilotClient) (T, error)) (T, error) {
+	var zero T
+
+	if err := s.ensureClientConnected(); err != nil {
+		return zero, err
+	}
+	client := s.currentClient()
+	if client == nil {
+		return zero, errors.New("copilot client is unavailable")
+	}
+
+	result, err := fn(client)
+	if err == nil || !isRecoverableCopilotClientError(err) {
+		return result, err
+	}
+
+	if restartErr := s.restartCopilotClient(fmt.Errorf("%s: %w", operation, err), true); restartErr != nil {
+		return zero, errors.Join(err, fmt.Errorf("restart copilot client: %w", restartErr))
+	}
+	client = s.currentClient()
+	if client == nil {
+		return zero, err
+	}
+	return fn(client)
+}
+
 func (s *service) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if err := s.ensureClientConnected(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("copilot client unavailable: %v", err))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -410,7 +551,9 @@ func listenInRange(host, portRange string) (net.Listener, error) {
 }
 
 func (s *service) handleListModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.client.ListModels(r.Context())
+	models, err := withCopilotClientRetry(s, "list models", func(client copilotClient) ([]copilot.ModelInfo, error) {
+		return client.ListModels(r.Context())
+	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("list models: %v", err))
 		return
@@ -420,7 +563,9 @@ func (s *service) handleListModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *service) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	persisted, err := s.client.ListSessions(r.Context(), nil)
+	persisted, err := withCopilotClientRetry(s, "list sessions", func(client copilotClient) ([]copilot.SessionMetadata, error) {
+		return client.ListSessions(r.Context(), nil)
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list sessions: %v", err))
 		return
@@ -515,30 +660,34 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// Pre-populate the session name from persisted metadata so it's available
 	// immediately in the statusline without waiting for the next turn.
 	if req.Resume {
-		if meta, metaErr := s.client.GetSessionMetadata(r.Context(), req.SessionID); metaErr == nil && meta != nil && meta.Summary != nil {
+		if meta, metaErr := withCopilotClientRetry(s, "get session metadata", func(client copilotClient) (*copilot.SessionMetadata, error) {
+			return client.GetSessionMetadata(r.Context(), req.SessionID)
+		}); metaErr == nil && meta != nil && meta.Summary != nil {
 			managed.sessionName = *meta.Summary
 		}
 	}
 
 	var session *copilot.Session
 	if req.Resume {
-		session, err = s.client.ResumeSession(r.Context(), req.SessionID, &copilot.ResumeSessionConfig{
-			ClientName:                     clientName,
-			Model:                          managed.model,
-			ReasoningEffort:                req.ReasoningEffort,
-			SystemMessage:                  req.SystemMessage,
-			AvailableTools:                 req.AvailableTools,
-			ExcludedTools:                  req.ExcludedTools,
-			OnPermissionRequest:            managed.handlePermissionRequest,
-			OnUserInputRequest:             managed.handleUserInputRequest,
-			WorkingDirectory:               workingDirectory,
-			EnableConfigDiscovery:          configDiscovery,
-			Streaming:                      streaming,
-			IncludeSubAgentStreamingEvents: req.IncludeSubAgentStreamingEvents,
-			CustomAgents:                   req.CustomAgents,
-			Agent:                          req.Agent,
-			SkillDirectories:               req.SkillDirectories,
-			DisabledSkills:                 req.DisabledSkills,
+		session, err = withCopilotClientRetry(s, "resume session", func(client copilotClient) (*copilot.Session, error) {
+			return client.ResumeSession(r.Context(), req.SessionID, &copilot.ResumeSessionConfig{
+				ClientName:                     clientName,
+				Model:                          managed.model,
+				ReasoningEffort:                req.ReasoningEffort,
+				SystemMessage:                  req.SystemMessage,
+				AvailableTools:                 req.AvailableTools,
+				ExcludedTools:                  req.ExcludedTools,
+				OnPermissionRequest:            managed.handlePermissionRequest,
+				OnUserInputRequest:             managed.handleUserInputRequest,
+				WorkingDirectory:               workingDirectory,
+				EnableConfigDiscovery:          configDiscovery,
+				Streaming:                      streaming,
+				IncludeSubAgentStreamingEvents: req.IncludeSubAgentStreamingEvents,
+				CustomAgents:                   req.CustomAgents,
+				Agent:                          req.Agent,
+				SkillDirectories:               req.SkillDirectories,
+				DisabledSkills:                 req.DisabledSkills,
+			})
 		})
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("resume session: %v", err))
@@ -547,25 +696,27 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		managed.session = session
 		managed.eventUnsubscribe = session.On(managed.handleSessionEvent)
 	} else {
-		session, err = s.client.CreateSession(r.Context(), &copilot.SessionConfig{
-			SessionID:                      req.SessionID,
-			ClientName:                     clientName,
-			Model:                          managed.model,
-			ReasoningEffort:                req.ReasoningEffort,
-			SystemMessage:                  req.SystemMessage,
-			AvailableTools:                 req.AvailableTools,
-			ExcludedTools:                  req.ExcludedTools,
-			OnPermissionRequest:            managed.handlePermissionRequest,
-			OnUserInputRequest:             managed.handleUserInputRequest,
-			WorkingDirectory:               workingDirectory,
-			Streaming:                      streaming,
-			IncludeSubAgentStreamingEvents: req.IncludeSubAgentStreamingEvents,
-			EnableConfigDiscovery:          configDiscovery,
-			CustomAgents:                   req.CustomAgents,
-			Agent:                          req.Agent,
-			SkillDirectories:               req.SkillDirectories,
-			DisabledSkills:                 req.DisabledSkills,
-			OnEvent:                        managed.handleSessionEvent,
+		session, err = withCopilotClientRetry(s, "create session", func(client copilotClient) (*copilot.Session, error) {
+			return client.CreateSession(r.Context(), &copilot.SessionConfig{
+				SessionID:                      req.SessionID,
+				ClientName:                     clientName,
+				Model:                          managed.model,
+				ReasoningEffort:                req.ReasoningEffort,
+				SystemMessage:                  req.SystemMessage,
+				AvailableTools:                 req.AvailableTools,
+				ExcludedTools:                  req.ExcludedTools,
+				OnPermissionRequest:            managed.handlePermissionRequest,
+				OnUserInputRequest:             managed.handleUserInputRequest,
+				WorkingDirectory:               workingDirectory,
+				Streaming:                      streaming,
+				IncludeSubAgentStreamingEvents: req.IncludeSubAgentStreamingEvents,
+				EnableConfigDiscovery:          configDiscovery,
+				CustomAgents:                   req.CustomAgents,
+				Agent:                          req.Agent,
+				SkillDirectories:               req.SkillDirectories,
+				DisabledSkills:                 req.DisabledSkills,
+				OnEvent:                        managed.handleSessionEvent,
+			})
 		})
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("create session: %v", err))
@@ -594,7 +745,9 @@ func (s *service) refreshManagedSessionSummary(ctx context.Context, managed *man
 		return
 	}
 
-	meta, err := s.client.GetSessionMetadata(ctx, managed.session.SessionID)
+	meta, err := withCopilotClientRetry(s, "get session metadata", func(client copilotClient) (*copilot.SessionMetadata, error) {
+		return client.GetSessionMetadata(ctx, managed.session.SessionID)
+	})
 	if err != nil || meta == nil || meta.Summary == nil {
 		return
 	}
@@ -609,7 +762,11 @@ func (s *service) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	managed, ok := s.removeManagedSession(id)
 	if !ok {
 		if deleteState {
-			if err := s.client.DeleteSession(r.Context(), id); err != nil {
+			if err := s.ensureClientConnected(); err != nil {
+				writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("copilot client unavailable: %v", err))
+				return
+			}
+			if err := s.currentClient().DeleteSession(r.Context(), id); err != nil {
 				writeError(w, http.StatusNotFound, fmt.Sprintf("delete session: %v", err))
 				return
 			}
@@ -624,7 +781,11 @@ func (s *service) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	managed.close(errors.New("session closed by host"))
 
 	if deleteState {
-		if err := s.client.DeleteSession(r.Context(), id); err != nil {
+		if err := s.ensureClientConnected(); err != nil {
+			writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("copilot client unavailable: %v", err))
+			return
+		}
+		if err := s.currentClient().DeleteSession(r.Context(), id); err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("delete session state: %v", err))
 			return
 		}
@@ -1105,7 +1266,9 @@ func (s *service) resolveRequestedModel(ctx context.Context, requested string) (
 		return "", nil
 	}
 
-	models, err := s.client.ListModels(ctx)
+	models, err := withCopilotClientRetry(s, "list models", func(client copilotClient) ([]copilot.ModelInfo, error) {
+		return client.ListModels(ctx)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -1140,6 +1303,10 @@ func (s *service) removeManagedSession(id string) (*managedSession, bool) {
 }
 
 func (s *service) disconnectAll() {
+	s.closeManagedSessions(errors.New("service shutdown"))
+}
+
+func (s *service) closeManagedSessions(reason error) {
 	s.sessionsMu.Lock()
 	sessions := make([]*managedSession, 0, len(s.sessions))
 	for id, managed := range s.sessions {
@@ -1149,7 +1316,18 @@ func (s *service) disconnectAll() {
 	s.sessionsMu.Unlock()
 
 	for _, managed := range sessions {
-		managed.close(errors.New("service shutdown"))
+		if managed.session != nil {
+			reasonText := ""
+			if reason != nil {
+				reasonText = reason.Error()
+			}
+			managed.broadcastHostEvent("host.session_disconnected", map[string]any{
+				"sessionId":        managed.session.SessionID,
+				"serviceRestarted": reasonText != "" && reasonText != "service shutdown",
+				"reason":           reasonText,
+			})
+		}
+		managed.close(reason)
 	}
 }
 

@@ -5,7 +5,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +25,91 @@ type decodedSessionEvent struct {
 	Data              json.RawMessage `json:"data"`
 	SequenceID        uint64          `json:"sequenceId"`
 	MessageChunkIndex *uint64         `json:"messageChunkIndex,omitempty"`
+}
+
+type fakeCopilotClient struct {
+	state                   copilot.ConnectionState
+	startErr                error
+	listModelsResp          []copilot.ModelInfo
+	listModelsErr           error
+	listSessionsResp        []copilot.SessionMetadata
+	listSessionsErr         error
+	getSessionMetadataResp  *copilot.SessionMetadata
+	getSessionMetadataErr   error
+	createSessionResp       *copilot.Session
+	createSessionErr        error
+	resumeSessionResp       *copilot.Session
+	resumeSessionErr        error
+	deleteSessionErr        error
+	startCalls              int
+	stopCalls               int
+	forceStopCalls          int
+	listModelsCalls         int
+	listSessionsCalls       int
+	getSessionMetadataCalls int
+	createSessionCalls      int
+	resumeSessionCalls      int
+	deleteSessionCalls      int
+}
+
+func (f *fakeCopilotClient) Start(context.Context) error {
+	f.startCalls++
+	if f.startErr != nil {
+		return f.startErr
+	}
+	if f.state == "" {
+		f.state = copilot.StateConnected
+	}
+	return nil
+}
+
+func (f *fakeCopilotClient) Stop() error {
+	f.stopCalls++
+	f.state = copilot.StateDisconnected
+	return nil
+}
+
+func (f *fakeCopilotClient) ForceStop() {
+	f.forceStopCalls++
+	f.state = copilot.StateDisconnected
+}
+
+func (f *fakeCopilotClient) State() copilot.ConnectionState {
+	return f.state
+}
+
+func (f *fakeCopilotClient) ListModels(context.Context) ([]copilot.ModelInfo, error) {
+	f.listModelsCalls++
+	return f.listModelsResp, f.listModelsErr
+}
+
+func (f *fakeCopilotClient) ListSessions(context.Context, *copilot.SessionListFilter) ([]copilot.SessionMetadata, error) {
+	f.listSessionsCalls++
+	return f.listSessionsResp, f.listSessionsErr
+}
+
+func (f *fakeCopilotClient) GetSessionMetadata(context.Context, string) (*copilot.SessionMetadata, error) {
+	f.getSessionMetadataCalls++
+	return f.getSessionMetadataResp, f.getSessionMetadataErr
+}
+
+func (f *fakeCopilotClient) CreateSession(context.Context, *copilot.SessionConfig) (*copilot.Session, error) {
+	f.createSessionCalls++
+	return f.createSessionResp, f.createSessionErr
+}
+
+func (f *fakeCopilotClient) ResumeSession(context.Context, string, *copilot.ResumeSessionConfig) (*copilot.Session, error) {
+	f.resumeSessionCalls++
+	return f.resumeSessionResp, f.resumeSessionErr
+}
+
+func (f *fakeCopilotClient) DeleteSession(context.Context, string) error {
+	f.deleteSessionCalls++
+	return f.deleteSessionErr
+}
+
+func (f *fakeCopilotClient) OnEventType(copilot.SessionLifecycleEventType, copilot.SessionLifecycleHandler) func() {
+	return func() {}
 }
 
 func decodeSessionEventPayload(t *testing.T, payload []byte) decodedSessionEvent {
@@ -340,7 +428,10 @@ func TestListenInRangeSinglePort(t *testing.T) {
 
 func TestHandleHealthReturns200(t *testing.T) {
 	t.Parallel()
-	svc := &service{}
+
+	svc := &service{
+		client: &fakeCopilotClient{state: copilot.StateConnected},
+	}
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
 	svc.handleHealth(w, req)
@@ -354,6 +445,63 @@ func TestHandleHealthReturns200(t *testing.T) {
 	}
 	if body["ok"] != true {
 		t.Fatalf("expected ok=true, got %v", body["ok"])
+	}
+}
+
+func TestHandleHealthRestartsDisconnectedClient(t *testing.T) {
+	t.Parallel()
+
+	staleClient := &fakeCopilotClient{state: copilot.StateDisconnected}
+	freshClient := &fakeCopilotClient{state: copilot.StateConnected}
+	svc := &service{
+		client:    staleClient,
+		clientCtx: context.Background(),
+		clientFactory: func() copilotClient {
+			return freshClient
+		},
+		sessions: make(map[string]*managedSession),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	svc.handleHealth(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if staleClient.forceStopCalls != 1 {
+		t.Fatalf("expected stale client to be force-stopped once, got %d", staleClient.forceStopCalls)
+	}
+	if freshClient.startCalls != 1 {
+		t.Fatalf("expected replacement client to start once, got %d", freshClient.startCalls)
+	}
+}
+
+func TestHandleHealthReturns503WhenRestartFails(t *testing.T) {
+	t.Parallel()
+
+	svc := &service{
+		client:    &fakeCopilotClient{state: copilot.StateDisconnected},
+		clientCtx: context.Background(),
+		clientFactory: func() copilotClient {
+			return &fakeCopilotClient{startErr: errors.New("boom")}
+		},
+		sessions: make(map[string]*managedSession),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	svc.handleHealth(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d", w.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if !strings.Contains(body["error"], "copilot client unavailable") {
+		t.Fatalf("unexpected error: %q", body["error"])
 	}
 }
 
@@ -810,5 +958,52 @@ func TestExtractBackgroundTasksSummarizesSubagentsAndNotifications(t *testing.T)
 	}
 	if tasks[1].DurationMs == nil || *tasks[1].DurationMs != durationMs {
 		t.Fatalf("expected duration %.0f, got %+v", durationMs, tasks[1])
+	}
+}
+
+func TestHandleCreateSessionRestartsDeadClientAndRetries(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	staleClient := &fakeCopilotClient{
+		state:            copilot.StateConnected,
+		createSessionErr: errors.New("failed to create session: CLI process exited: signal: killed"),
+	}
+	freshClient := &fakeCopilotClient{
+		state:             copilot.StateConnected,
+		createSessionResp: &copilot.Session{SessionID: "session-123"},
+	}
+	svc := &service{
+		client:    staleClient,
+		clientCtx: context.Background(),
+		clientFactory: func() copilotClient {
+			return freshClient
+		},
+		sessions: make(map[string]*managedSession),
+	}
+
+	body := fmt.Sprintf(`{"workingDirectory":%q,"enableConfigDiscovery":false}`, workingDir)
+	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	svc.handleCreateSession(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if staleClient.createSessionCalls != 1 {
+		t.Fatalf("expected stale client create to be attempted once, got %d", staleClient.createSessionCalls)
+	}
+	if staleClient.forceStopCalls != 1 {
+		t.Fatalf("expected stale client to be force-stopped once, got %d", staleClient.forceStopCalls)
+	}
+	if freshClient.startCalls != 1 {
+		t.Fatalf("expected replacement client to start once, got %d", freshClient.startCalls)
+	}
+	if freshClient.createSessionCalls != 1 {
+		t.Fatalf("expected replacement client create to be attempted once, got %d", freshClient.createSessionCalls)
+	}
+	if _, ok := svc.getManagedSession("session-123"); !ok {
+		t.Fatal("expected retried session to be stored after recovery")
 	}
 }

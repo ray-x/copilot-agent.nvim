@@ -48,7 +48,10 @@ function M.store_model_cache(models)
   end
 
   table.sort(items, function(left, right)
-    return left.label < right.label
+    if left.name ~= right.name then
+      return left.name < right.name
+    end
+    return left.id < right.id
   end)
   state.model_cache = items
   return items

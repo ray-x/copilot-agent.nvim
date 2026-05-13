@@ -53,6 +53,22 @@ const (
 	sessionIDPrefixMaxLen      = 8
 )
 
+func logInfof(format string, args ...any) {
+	log.Printf("[INFO] "+format, args...)
+}
+
+func logWarnf(format string, args ...any) {
+	log.Printf("[WARN] "+format, args...)
+}
+
+func logErrorf(format string, args ...any) {
+	log.Printf("[ERROR] "+format, args...)
+}
+
+func fatalErrorf(format string, args ...any) {
+	log.Fatalf("[ERROR] "+format, args...)
+}
+
 type createSessionRequest struct {
 	SessionID                      string                       `json:"sessionId,omitempty"`
 	Resume                         bool                         `json:"resume,omitempty"`
@@ -297,33 +313,33 @@ func main() {
 
 	if path := strings.TrimSpace(*logFile); path != "" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			log.Fatalf("create log directory: %v", err)
+			fatalErrorf("create log directory: %v", err)
 		}
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
-			log.Fatalf("open log file %s: %v", path, err)
+			fatalErrorf("open log file %s: %v", path, err)
 		}
 		defer f.Close()
 		// Write to both stderr (captured by Neovim) and the persistent file.
 		log.SetOutput(io.MultiWriter(os.Stderr, f))
-		log.Printf("logging to %s (pid %d)", path, os.Getpid())
+		logInfof("logging to %s (pid %d)", path, os.Getpid())
 	}
 
 	if *lspOnly {
 		if strings.TrimSpace(*serviceURL) == "" {
-			log.Fatal("service-url is required when -lsp-only is set")
+			fatalErrorf("service-url is required when -lsp-only is set")
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := runLSPServer(ctx, strings.TrimSpace(*serviceURL)); err != nil && err != context.Canceled {
-			log.Fatal(err)
+			fatalErrorf("%v", err)
 		}
 		return
 	}
 
 	workingDirectory, err := resolveWorkingDirectory(*cwdFlag)
 	if err != nil {
-		log.Fatal(err)
+		fatalErrorf("%v", err)
 	}
 
 	clientOptions := copilot.ClientOptions{
@@ -347,11 +363,11 @@ func main() {
 	}
 
 	if err = svc.startCopilotClient(); err != nil {
-		log.Fatal(err)
+		fatalErrorf("%v", err)
 	}
 	defer func() {
 		if err := svc.stopCopilotClient(); err != nil {
-			log.Printf("stop copilot client: %v", err)
+			logWarnf("stop copilot client: %v", err)
 		}
 	}()
 
@@ -392,7 +408,7 @@ func main() {
 		listener, err = net.Listen("tcp", listenAddr)
 	}
 	if err != nil {
-		log.Fatalf("listen %s: %v", listenAddr, err)
+		fatalErrorf("listen %s: %v", listenAddr, err)
 	}
 	boundAddr := listener.Addr().String()
 	// Ensure LSP proxy always has a full host:port (handles bare ":PORT" case).
@@ -412,21 +428,21 @@ func main() {
 	case socketPath != "":
 		cleanup, controlErr := startControlServer(ctx, svc, "unix", socketPath, "", boundAddr)
 		if controlErr != nil {
-			log.Fatalf("start control socket %s: %v", socketPath, controlErr)
+			fatalErrorf("start control socket %s: %v", socketPath, controlErr)
 		}
 		controlCleanup = cleanup
 		defer controlCleanup()
 	case controlListenAddr != "":
 		cleanup, controlErr := startControlServer(ctx, svc, "tcp", "", controlListenAddr, boundAddr)
 		if controlErr != nil {
-			log.Fatalf("start control listener %s: %v", controlListenAddr, controlErr)
+			fatalErrorf("start control listener %s: %v", controlListenAddr, controlErr)
 		}
 		controlCleanup = cleanup
 		defer controlCleanup()
 	case runtime.GOOS == "windows":
 		cleanup, controlErr := startControlServer(ctx, svc, "tcp", "", "127.0.0.1:0", boundAddr)
 		if controlErr != nil {
-			log.Fatalf("start control listener: %v", controlErr)
+			fatalErrorf("start control listener: %v", controlErr)
 		}
 		controlCleanup = cleanup
 		defer controlCleanup()
@@ -437,7 +453,7 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("shutdown HTTP server: %v", err)
+			logWarnf("shutdown HTTP server: %v", err)
 		}
 		svc.disconnectAll()
 	}()
@@ -447,17 +463,17 @@ func main() {
 		serviceURL := "http://" + boundAddr
 		go func() {
 			if err := runLSPServer(ctx, serviceURL); err != nil && err != context.Canceled {
-				log.Printf("lsp server: %v", err)
+				logWarnf("lsp server: %v", err)
 			}
 		}()
 	}
 
-	log.Printf("Neovim Copilot service listening on %s", boundAddr)
-	log.Printf("Default workspace: %s", workingDirectory)
+	logInfof("Neovim Copilot service listening on %s", boundAddr)
+	logInfof("Default workspace: %s", workingDirectory)
 	if strings.TrimSpace(*cliURL) != "" {
-		log.Printf("Using external Copilot CLI server at %s", strings.TrimSpace(*cliURL))
+		logInfof("Using external Copilot CLI server at %s", strings.TrimSpace(*cliURL))
 	} else if strings.TrimSpace(*cliPath) != "" {
-		log.Printf("Using Copilot CLI at %s", strings.TrimSpace(*cliPath))
+		logInfof("Using Copilot CLI at %s", strings.TrimSpace(*cliPath))
 	}
 
 	startClientLeaseWatcher(ctx, strings.TrimSpace(*clientLeaseDir), stop)
@@ -467,7 +483,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "COPILOT_AGENT_ADDR=%s\n", boundAddr)
 
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+		fatalErrorf("%v", err)
 	}
 }
 
@@ -515,7 +531,7 @@ func startControlServer(ctx context.Context, svc *service, network string, socke
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 			defer cancel()
 			if err := svc.shutdownHTTP(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Printf("shutdown via control socket: %v", err)
+				logWarnf("shutdown via control socket: %v", err)
 			}
 		}()
 	})
@@ -534,7 +550,7 @@ func startControlServer(ctx context.Context, svc *service, network string, socke
 
 	go func() {
 		if serveErr := controlServer.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			log.Printf("control socket server: %v", serveErr)
+			logWarnf("control socket server: %v", serveErr)
 		}
 	}()
 
@@ -570,7 +586,7 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 		seenLease := false
 		consecutiveEmpty := 0
 		shutdown := func(reason string) {
-			log.Printf("client lease dir empty (%s, %d consecutive checks); shutting down detached service", reason, consecutiveEmpty)
+			logWarnf("client lease dir empty (%s, %d consecutive checks); shutting down detached service", reason, consecutiveEmpty)
 			stop()
 		}
 
@@ -587,7 +603,7 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 					}
 					return false, "missing"
 				}
-				log.Printf("watch client leases %s: %v", leaseDir, err)
+				logWarnf("watch client leases %s: %v", leaseDir, err)
 				consecutiveEmpty = 0
 				return false, "error"
 			}
@@ -708,7 +724,7 @@ func (s *service) restartCopilotClient(reason error, force bool) error {
 	oldClient := s.client
 	s.client = nil
 	if oldClient != nil {
-		log.Printf("restarting Copilot CLI client after failure: %v", reason)
+		logWarnf("restarting Copilot CLI client after failure: %v", reason)
 		oldClient.ForceStop()
 		s.closeManagedSessions(fmt.Errorf("copilot client restarted: %w", reason))
 	}
@@ -929,6 +945,7 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			})
 		})
 		if err != nil {
+			logErrorf("resume session session_id=%s wd=%s: %v", req.SessionID, workingDirectory, err)
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("resume session: %v", err))
 			return
 		}
@@ -958,6 +975,7 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			})
 		})
 		if err != nil {
+			logErrorf("create session session_id=%s wd=%s: %v", req.SessionID, workingDirectory, err)
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("create session: %v", err))
 			return
 		}
@@ -965,6 +983,11 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.storeManagedSession(managed)
+	action := "created"
+	if req.Resume {
+		action = "resumed"
+	}
+	logInfof("session %s %s wd=%s model=%s mode=%s streaming=%t", req.SessionID, action, workingDirectory, managed.model, req.PermissionMode, streaming)
 	writeJSON(w, http.StatusCreated, managed.summary())
 }
 
@@ -1170,10 +1193,12 @@ func (s *service) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		RequestHeaders: req.RequestHeaders,
 	})
 	if err != nil {
+		logErrorf("send message session=%s: %v", managed.session.SessionID, err)
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("send message: %v", err))
 		return
 	}
 
+	logInfof("send message session=%s prompt_chars=%d attachments=%d message_id=%s", managed.session.SessionID, len(req.Prompt), len(req.Attachments), messageID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"sessionId": managed.session.SessionID, "messageId": messageID})
 }
 
@@ -1231,6 +1256,7 @@ func (s *service) handleStartFleet(w http.ResponseWriter, r *http.Request) {
 
 	started := result != nil && result.Started
 	if started {
+		logInfof("fleet started session=%s prompt_chars=%d", managed.session.SessionID, len(strings.TrimSpace(req.Prompt)))
 		managed.broadcastHostEvent("host.fleet_started", map[string]any{
 			"sessionId": managed.session.SessionID,
 			"prompt":    strings.TrimSpace(req.Prompt),
@@ -1264,8 +1290,10 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	sub := managed.subscribe()
 	defer managed.unsubscribe(sub)
 	s.refreshManagedSessionSummary(r.Context(), managed)
+	logInfof("SSE attached session=%s history=%t", managed.session.SessionID, queryBool(r, "history"))
 
 	if err := writeSSE(w, "host.session_attached", mustJSON(hostEvent{Timestamp: time.Now().UTC(), Data: managed.summary()})); err != nil {
+		logWarnf("SSE attach write failed session=%s: %v", managed.session.SessionID, err)
 		return
 	}
 	flusher.Flush()
@@ -1277,12 +1305,15 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 		replayPreviewChars := historyReplayPreviewChars(r)
 		events, err := managed.session.GetMessages(r.Context())
 		if err != nil {
+			logErrorf("get history session=%s: %v", managed.session.SessionID, err)
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("get history: %v", err))
 			return
 		}
 		payloads, replayedCount := managed.marshalReplaySessionEvents(events, replayPermissionHistory, replayTurnLimit, replayActivityLimit, replayPreviewChars)
+		logInfof("SSE replay start session=%s events=%d replay_permission_history=%t turn_limit=%d activity_limit=%d preview_chars=%d", managed.session.SessionID, replayedCount, replayPermissionHistory, replayTurnLimit, replayActivityLimit, replayPreviewChars)
 		for _, payload := range payloads {
 			if err := writeSSE(w, "session.event", payload); err != nil {
+				logWarnf("SSE replay write failed session=%s: %v", managed.session.SessionID, err)
 				return
 			}
 		}
@@ -1291,9 +1322,11 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			Timestamp: time.Now().UTC(),
 			Data:      map[string]any{"sessionId": managed.session.SessionID, "count": replayedCount},
 		})); err != nil {
+			logWarnf("SSE history done write failed session=%s: %v", managed.session.SessionID, err)
 			return
 		}
 		flusher.Flush()
+		logInfof("SSE replay done session=%s events=%d", managed.session.SessionID, replayedCount)
 	}
 
 	keepAlive := time.NewTicker(sseKeepAliveInterval)
@@ -1305,6 +1338,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-keepAlive.C:
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				logWarnf("SSE keepalive write failed session=%s: %v", managed.session.SessionID, err)
 				return
 			}
 			flusher.Flush()
@@ -1313,6 +1347,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := writeSSE(w, msg.Event, msg.Data); err != nil {
+				logWarnf("SSE write failed session=%s event=%s: %v", managed.session.SessionID, msg.Event, err)
 				return
 			}
 			// Drain any additional buffered messages before flushing to
@@ -1326,6 +1361,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					if err := writeSSE(w, msg.Event, msg.Data); err != nil {
+						logWarnf("SSE write failed session=%s event=%s: %v", managed.session.SessionID, msg.Event, err)
 						return
 					}
 				default:
@@ -1633,6 +1669,7 @@ func (s *service) handleSetTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *service) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	logInfof("shutdown requested")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	if s.shutdownHTTP == nil {
 		return
@@ -1641,7 +1678,7 @@ func (s *service) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer cancel()
 		if err := s.shutdownHTTP(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("shutdown via endpoint: %v", err)
+			logWarnf("shutdown via endpoint: %v", err)
 		}
 	}()
 }
@@ -2092,6 +2129,7 @@ func (m *managedSession) handlePermissionRequest(req copilot.PermissionRequest, 
 		select {
 		case result := <-pending.resultCh:
 			if result.Err != nil {
+				logWarnf("permission response error session=%s request_id=%s: %v", inv.SessionID, pending.view.ID, result.Err)
 				return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindRejected}, result.Err
 			}
 			kind := copilot.PermissionRequestResultKindApproved
@@ -2105,6 +2143,7 @@ func (m *managedSession) handlePermissionRequest(req copilot.PermissionRequest, 
 			})
 			return copilot.PermissionRequestResult{Kind: kind}, nil
 		case <-time.After(m.inputResponseGrace):
+			logWarnf("timed out waiting for permission response session=%s request_id=%s", inv.SessionID, pending.view.ID)
 			return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindRejected},
 				fmt.Errorf("timed out waiting for permission response %s", pending.view.ID)
 		}
@@ -2159,6 +2198,7 @@ func (m *managedSession) handleUserInputRequest(req copilot.UserInputRequest, in
 	select {
 	case result := <-pending.resultCh:
 		if result.Err != nil {
+			logWarnf("user input response error session=%s request_id=%s: %v", inv.SessionID, pending.view.ID, result.Err)
 			return copilot.UserInputResponse{}, result.Err
 		}
 		m.broadcastHostEvent("host.user_input_resolved", map[string]any{
@@ -2167,6 +2207,7 @@ func (m *managedSession) handleUserInputRequest(req copilot.UserInputRequest, in
 		})
 		return result.Response, nil
 	case <-time.After(m.inputResponseGrace):
+		logWarnf("timed out waiting for user input session=%s request_id=%s", inv.SessionID, pending.view.ID)
 		return copilot.UserInputResponse{}, fmt.Errorf("timed out waiting for user input %s", pending.view.ID)
 	}
 }
@@ -2513,7 +2554,7 @@ func (m *managedSession) broadcast(msg sseMessage) {
 		select {
 		case ch <- msg:
 		default:
-			log.Printf("SSE subscriber channel full, dropped event: %s (session %s)", msg.Event, m.session.SessionID)
+			logWarnf("SSE subscriber channel full, dropped event: %s (session %s)", msg.Event, m.session.SessionID)
 		}
 	}
 }
@@ -2540,7 +2581,7 @@ func (m *managedSession) close(reason error) {
 
 	if m.session != nil {
 		if err := m.session.Disconnect(); err != nil {
-			log.Printf("disconnect session %s: %v", m.session.SessionID, err)
+			logWarnf("disconnect session %s: %v", m.session.SessionID, err)
 		}
 	}
 
@@ -2761,7 +2802,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+		logInfof("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -2773,7 +2814,7 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			if rec := recover(); rec != nil {
 				stack := debug.Stack()
-				log.Printf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, stack)
+				logErrorf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, stack)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 		}()

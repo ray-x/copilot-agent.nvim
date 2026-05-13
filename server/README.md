@@ -37,6 +37,7 @@ go build -o copilot-agent .
 | `-cli-path`   | auto-detected | Path to Copilot CLI binary/JS entrypoint              |
 | `-cli-url`    | —             | URL of an already-running Copilot CLI server          |
 | `-log-level`  | —             | Copilot CLI log level                                 |
+| `-log-file`   | stderr only   | Mirror service logs to a file with INFO/WARN/ERROR prefixes |
 | `-lsp`        | `true`        | Start LSP server on stdio                             |
 | `-lsp-only`   | `false`       | Start only the LSP server and reuse an existing HTTP service |
 | `-service-url`| —             | HTTP base URL used by `-lsp-only`                     |
@@ -44,6 +45,9 @@ go build -o copilot-agent .
 The service always prints `COPILOT_AGENT_ADDR=127.0.0.1:<PORT>` to stderr once the
 listener is bound. When `auto_start = true`, the plugin reads this line and
 configures its HTTP client automatically — no manual `base_url` needed.
+
+Service log lines are prefixed with `[INFO]`, `[WARN]`, or `[ERROR]` when
+`-log-file` is set.
 
 ---
 

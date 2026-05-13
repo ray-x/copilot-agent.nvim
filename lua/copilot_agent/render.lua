@@ -2924,28 +2924,32 @@ function M.reserve_overlay_gutter(task_line_count, reasoning_line_count)
     return
   end
 
-  local restore_view = state.overlay_gutter_restore_view
-  if restore_view and (restore_view.winid ~= winid or restore_view.bufnr ~= bufnr) then
-    state.overlay_gutter_restore_view = nil
-    restore_view = nil
-  end
-  if not restore_view and not auto_follow_active_conversation() and not M.chat_at_bottom() then
-    local cursor = vim.api.nvim_win_get_cursor(winid)
-    state.overlay_gutter_restore_view = {
-      winid = winid,
-      bufnr = bufnr,
-      topline = current_topline,
-      cursor_line = (cursor and cursor[1]) or current_topline,
-    }
+  local at_bottom = M.chat_at_bottom()
+  if state.chat_auto_scroll_enabled == false and not at_bottom then
+    -- Respect manual transcript browsing: never auto-shift the viewport while
+    -- the user has scrolled away from live output.
+    if state.overlay_gutter_restore_view then
+      state.overlay_gutter_restore_view = nil
+    end
     log(
       string.format(
-        'reasoning overlay gutter saved restore view top=%d cursor=%d %s',
-        state.overlay_gutter_restore_view.topline,
-        state.overlay_gutter_restore_view.cursor_line,
+        'reasoning overlay gutter skipped while browsing history current=%d target=%d raw_target=%d padding=%d line_count=%d current_%s target_%s %s',
+        current_topline,
+        target_topline,
+        raw_target_topline,
+        padding,
+        current_metrics.line_count,
+        chat_view_metrics_summary(current_metrics),
+        chat_view_metrics_summary(target_metrics),
         chat_view_log_summary()
       ),
       vim.log.levels.DEBUG
     )
+    return
+  end
+
+  if state.overlay_gutter_restore_view and (state.overlay_gutter_restore_view.winid ~= winid or state.overlay_gutter_restore_view.bufnr ~= bufnr) then
+    state.overlay_gutter_restore_view = nil
   end
 
   local step = math.max(1, math.floor(current_metrics.win_height / 2))

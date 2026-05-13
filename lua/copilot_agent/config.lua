@@ -28,6 +28,10 @@ local defaults = {
     cwd = nil, -- defaults to <plugin_root>/server
     env = nil,
     port_range = nil, -- e.g. '18000-19000'; appended as --port-range when set
+    log = {
+      enabled = false, -- When true, pass --log-file to the Go service.
+      path = nil, -- nil = default to stdpath('state') .. '/copilot-agent-service.log'
+    },
     -- detach: run the Go service in a new process group (setsid) so it survives
     -- across Neovim instances and can be shared. Lifecycle cleanup logic stops
     -- the detached service when the last Neovim instance exits.

@@ -140,6 +140,10 @@ optional — defaults are shown below: >lua
       cwd                     = nil,    -- defaults to <plugin_root>/server
       env                     = nil,
       port_range              = nil,    -- e.g. "18000-19000"
+      log = {
+        enabled = false,                 -- set true to enable Go service file logging
+        path = nil,                      -- nil = stdpath("state") .. "/copilot-agent-service.log"
+      },
       healthcheck_path        = "/healthz",
       startup_timeout_ms      = 15000,
       startup_poll_interval_ms = 250,
@@ -161,6 +165,10 @@ optional — defaults are shown below: >lua
 
 Back-compat: top-level `auto_start = ...` in `setup()` is still accepted and
 mapped to `service.auto_start` unless `service.auto_start` is set explicitly.
+
+`service.log.enabled` defaults to `false`. When enabled,
+`service.log.path` overrides the log file location; when `path` is `nil`, the
+default is `stdpath("state") .. "/copilot-agent-service.log"`.
 
 ==============================================================================
 5. COMMANDS                                       *copilot-agent-commands*

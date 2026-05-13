@@ -18,6 +18,7 @@ local LOCK_WAIT_PID_ENTROPY_PRIME = 131 -- Mix in a small prime so different PID
 local SERVICE_OUTPUT_HISTORY_LIMIT = 20 -- Keep only the most recent startup lines for diagnostics without unbounded memory growth.
 local CONTROL_REQUEST_TIMEOUT_SECONDS = '2' -- Bound local control-socket curl calls so stale sockets cannot hang startup or exit indefinitely.
 local SAVED_ADDR_PROBE_TIMEOUT_SECONDS = '1' -- Quick probe timeout when validating persisted service addresses.
+local DEFAULT_SERVICE_LOG_PATH = vim.fn.stdpath('state') .. '/copilot-agent-service.log'
 
 local _root_markers = { '.git', 'go.mod', 'package.json', 'Cargo.toml', 'pyproject.toml', '.hg', '.svn' }
 
@@ -147,7 +148,6 @@ function M.service_command()
       value = vim.list_extend(vim.deepcopy(value), { '--port-range', pr })
     end
   end
-  -- Automatically persist Go service logs to a file for diagnostics.
   if type(value) == 'table' then
     local has_log_file = false
     for _, arg in ipairs(value) do
@@ -157,12 +157,27 @@ function M.service_command()
       end
     end
     if not has_log_file then
-      local log_path = state.config.service.log_file
-      if log_path == nil then
-        log_path = vim.fn.stdpath('state') .. '/copilot-agent-service.log'
+      local service_log = state.config.service.log
+      local enabled = false
+      local log_path = nil
+      if type(service_log) == 'table' then
+        if service_log.enabled ~= nil then
+          enabled = service_log.enabled == true
+        end
+        log_path = service_log.path
       end
-      if type(log_path) == 'string' and log_path ~= '' then
-        value = vim.list_extend(vim.deepcopy(value), { '--log-file', log_path })
+      if enabled then
+        if type(log_path) ~= 'string' or log_path == '' then
+          local legacy_log_path = state.config.service.log_file
+          if type(legacy_log_path) == 'string' and legacy_log_path ~= '' then
+            log_path = legacy_log_path
+          else
+            log_path = DEFAULT_SERVICE_LOG_PATH
+          end
+        end
+        if type(log_path) == 'string' and log_path ~= '' then
+          value = vim.list_extend(vim.deepcopy(value), { '--log-file', log_path })
+        end
       end
     end
   end

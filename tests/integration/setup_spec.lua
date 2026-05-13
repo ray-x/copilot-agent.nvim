@@ -867,6 +867,59 @@ describe('service coordination', function()
     assert_false(vim.tbl_contains(command, '--control-socket'))
   end)
 
+  it('adds a default service log path when service logging is enabled', function()
+    local original_service_command = vim.deepcopy(agent.state.config.service.command)
+    local original_service_log = vim.deepcopy(agent.state.config.service.log)
+    agent.state.config.service.command = { '/path/to/copilot-agent' }
+    agent.state.config.service.log = {
+      enabled = true,
+      path = nil,
+    }
+    local command = service.service_command()
+    agent.state.config.service.command = original_service_command
+    agent.state.config.service.log = original_service_log
+
+    assert_true(vim.tbl_contains(command, '--log-file'))
+    local log_file_index
+    for idx, arg in ipairs(command) do
+      if arg == '--log-file' then
+        log_file_index = idx
+        break
+      end
+    end
+    assert_true(log_file_index ~= nil)
+    assert_true(type(command[log_file_index + 1]) == 'string')
+    assert_true(command[log_file_index + 1]:find('copilot%-agent%-service%.log$', 1) ~= nil)
+  end)
+
+  it('does not add a service log path by default', function()
+    local original_service_command = vim.deepcopy(agent.state.config.service.command)
+    local original_service_log = vim.deepcopy(agent.state.config.service.log)
+    agent.state.config.service.command = { '/path/to/copilot-agent' }
+    agent.state.config.service.log = nil
+    local command = service.service_command()
+    agent.state.config.service.command = original_service_command
+    agent.state.config.service.log = original_service_log
+
+    assert_false(vim.tbl_contains(command, '--log-file'))
+  end)
+
+  it('does not add a service log path when service logging is disabled', function()
+    local original_service_command = vim.deepcopy(agent.state.config.service.command)
+    local original_service_log = vim.deepcopy(agent.state.config.service.log)
+    agent.state.config.service.command = { '/path/to/copilot-agent' }
+    agent.state.config.service.log = {
+      enabled = false,
+      path = '/tmp/ignored.log',
+    }
+    local command = service.service_command()
+    agent.state.config.service.command = original_service_command
+    agent.state.config.service.log = original_service_log
+
+    assert_false(vim.tbl_contains(command, '--log-file'))
+    assert_false(vim.tbl_contains(command, '/tmp/ignored.log'))
+  end)
+
   it('uses the saved TCP control endpoint when shutting down on Windows', function()
     vim.uv.os_uname = function()
       return { sysname = 'Windows_NT' }
@@ -3384,7 +3437,7 @@ describe('model state sync', function()
     assert_eq(with_spacers_count - 3, vim.api.nvim_buf_line_count(bufnr))
   end)
 
-  it('scrolls live output to reveal overlay virtual text even when follow is paused', function()
+  it('keeps manual view stable while overlay virtual text updates when follow is paused', function()
     local render = require('copilot_agent.render')
     agent.open_chat()
 
@@ -3401,22 +3454,6 @@ describe('model state sync', function()
     end)
     agent.state.chat_auto_scroll_enabled = false
 
-    local prompt_idx = render.append_entry('user', 'prompt')
-    agent.state.session_id = 'overlay-scroll'
-    agent.state.pending_checkpoint_turn = {
-      session_id = 'overlay-scroll',
-      prompt = 'prompt',
-      entry_index = prompt_idx,
-    }
-
-    events.handle_session_event({
-      type = 'tool.execution_start',
-      data = {
-        toolName = 'bash',
-        command = 'git',
-        arguments = { 'status', '--short' },
-      },
-    })
     events.handle_session_event({
       type = 'assistant.reasoning_delta',
       data = {
@@ -3428,28 +3465,22 @@ describe('model state sync', function()
     vim.wait(500)
 
     local view = vim.fn.getwininfo(winid)[1]
-    assert_true(view.topline > 1)
-    assert_eq(vim.api.nvim_buf_line_count(bufnr), view.botline)
+    assert_true(view.topline >= 1)
 
-    local assistant_idx = render.append_entry('assistant', '')
-    local assistant_entry = agent.state.entries[assistant_idx]
-    assistant_entry.content = table.concat({
-      'line a',
-      'line b',
-      'line c',
-      'line d',
-      'line e',
-      'line f',
-    }, '\n')
-    render.stream_update(assistant_entry, assistant_idx)
+    events.handle_session_event({
+      type = 'assistant.reasoning_delta',
+      data = {
+        messageId = 'overlay-scroll-message',
+        deltaContent = '\nfour\nfive',
+      },
+    })
     vim.wait(200)
 
     local streamed_view = vim.fn.getwininfo(winid)[1]
-    assert_true(streamed_view.topline > view.topline)
-    assert_eq(vim.api.nvim_buf_line_count(bufnr), streamed_view.botline)
+    assert_eq(view.topline, streamed_view.topline)
   end)
 
-  it('restores the previous manual chat view after the reasoning overlay clears', function()
+  it('clears reasoning overlay extmarks after assistant output starts', function()
     local render = require('copilot_agent.render')
     agent.open_chat()
 
@@ -3466,7 +3497,6 @@ describe('model state sync', function()
     end)
     agent.state.chat_auto_scroll_enabled = false
 
-    local before = vim.fn.getwininfo(winid)[1]
     events.handle_session_event({
       type = 'assistant.reasoning_delta',
       data = {
@@ -3477,8 +3507,6 @@ describe('model state sync', function()
 
     vim.wait(500)
 
-    local shifted = vim.fn.getwininfo(winid)[1]
-    assert_true(shifted.topline > before.topline)
     local ns = vim.api.nvim_get_namespaces().copilot_agent_reasoning
     local extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
     assert_eq(1, #extmarks)
@@ -3493,8 +3521,6 @@ describe('model state sync', function()
 
     vim.wait(300)
 
-    local restored = vim.fn.getwininfo(winid)[1]
-    assert_eq(before.topline, restored.topline)
     extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
     assert_eq(0, #extmarks)
   end)
@@ -10756,6 +10782,91 @@ describe('chat input behavior', function()
     view = vim.fn.getwininfo(winid)[1]
     assert_true(view.topline > bottom_topline)
 
+    vim.api.nvim_win_get_height = original_get_height
+    agent.state.chat_bufnr = original_chat_bufnr
+    agent.state.chat_winid = original_chat_winid
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+  end)
+
+  it('keeps the current view stable while browsing history even when overlay gutter updates', function()
+    local render = require('copilot_agent.render')
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    local winid = vim.api.nvim_get_current_win()
+    local original_chat_bufnr = agent.state.chat_bufnr
+    local original_chat_winid = agent.state.chat_winid
+    local original_get_height = vim.api.nvim_win_get_height
+
+    agent.state.history_loading = false
+    agent.state.chat_bufnr = bufnr
+    agent.state.chat_winid = winid
+    agent.state.entries = {
+      {
+        kind = 'assistant',
+        content = table.concat({
+          'old line 1',
+          'old line 2',
+          'old line 3',
+          'old line 4',
+          'old line 5',
+          'old line 6',
+        }, '\n'),
+      },
+    }
+    agent.state.entry_row_index = {}
+    agent.state.active_conversation_entry_index = nil
+    agent.state.chat_follow_topline = nil
+    agent.state.chat_auto_scroll_enabled = true
+    agent.state.chat_scroll_guard = 0
+    vim.api.nvim_win_set_buf(winid, bufnr)
+    vim.api.nvim_win_get_height = function(target_winid)
+      if target_winid == winid then
+        return 8
+      end
+      return original_get_height(target_winid)
+    end
+
+    render.reset_frozen_render()
+    render.render_chat()
+    render.scroll_to_bottom()
+    vim.wait(120)
+
+    local prompt_idx = render.append_entry('user', 'new prompt')
+    local assistant_idx = render.append_entry('assistant', '')
+    local assistant_entry = agent.state.entries[assistant_idx]
+    assistant_entry.content = table.concat({
+      'line a',
+      'line b',
+      'line c',
+      'line d',
+      'line e',
+      'line f',
+      'line g',
+      'line h',
+      'line i',
+      'line j',
+    }, '\n')
+    render.stream_update(assistant_entry, assistant_idx)
+    vim.wait(200)
+
+    vim.api.nvim_win_set_cursor(winid, { 1, 0 })
+    vim.api.nvim_win_call(winid, function()
+      vim.fn.winrestview({ topline = 1 })
+    end)
+    render.handle_chat_window_scrolled(winid)
+    assert_false(agent.state.chat_auto_scroll_enabled)
+
+    local view_before = vim.fn.getwininfo(winid)[1]
+    render.reserve_overlay_gutter(4, 3)
+    local view_after = vim.fn.getwininfo(winid)[1]
+    assert_eq(view_before.topline, view_after.topline)
+
+    agent.state.chat_busy = false
+    agent.state.stream_line_start = nil
+    agent.state.active_turn_assistant_index = nil
+    agent.state.live_assistant_entry_index = nil
+    agent.state.active_turn_assistant_message_id = nil
+    agent.state.active_assistant_merge_group = nil
+    agent.state.pending_checkpoint_turn = nil
     vim.api.nvim_win_get_height = original_get_height
     agent.state.chat_bufnr = original_chat_bufnr
     agent.state.chat_winid = original_chat_winid

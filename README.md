@@ -236,6 +236,10 @@ For most users, this minimal setup is enough:
         cwd = nil,                         -- defaults to <plugin_root>/server
         detach = true,                     -- default: reuse one detached background service across Neovim instances
         port_range = nil,                  -- e.g. "18000-19000" for fixed range
+        log = {
+          enabled = false,                 -- set true to enable Go service file logging
+          path = nil,                     -- nil = stdpath("state") .. "/copilot-agent-service.log"
+        },
         startup_timeout_ms = 15000,
         startup_poll_interval_ms = 250,
       },
@@ -296,6 +300,8 @@ For most users, this minimal setup is enough:
 ```
 
 `file_log_batch` controls buffered file logging behavior. Set `enabled = false` to restore immediate per-line writes.
+
+`service.log.enabled` defaults to `false`. When enabled, `service.log.path` overrides the log file location; when `path` is `nil`, the default is `stdpath("state") .. "/copilot-agent-service.log"`.
 
 </details>
 
@@ -363,31 +369,31 @@ Use `:CopilotAgentDashboard` or `:CopilotAgentChat` to get started.
 <details>
 <summary><strong>📂 Full command reference</strong></summary>
 
-| Command                              | Description                                                                                  |
-| ------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `:CopilotAgentInstall`               | Download pre-built binary for the current platform                                           |
-| `:CopilotAgentDashboard`             | Open the Copilot Agent startup dashboard                                                     |
-| `:CopilotAgentChat [fullscreen]`     | Open the chat buffer; `fullscreen` opens in a new tab                                        |
-| `:CopilotAgentChatToggle`            | Hide/show chat + input UI windows without reconnect/replay                                   |
-| `:CopilotAgentChatFocus`             | Focus or switch to an open chat buffer                                                       |
-| `:CopilotAgentAsk [prompt]`          | Send a prompt; no argument opens the input buffer                                            |
-| `:CopilotAgentCompose [tab]`         | Open the compose scratch buffer; `tab` opens it in a new tab                                 |
-| `:CopilotAgentPromoteToCompose`      | Move current prompt-buffer text into compose                                                 |
-| `:CopilotAgentSendBuffer`            | Send the active compose buffer                                                               |
-| `:CopilotAgentNewSession`            | Disconnect current session and start a fresh one                                             |
-| `:CopilotAgentSwitchSession`         | Pick from all persisted sessions and switch                                                  |
-| `:CopilotAgentDeleteSession`         | Pick a session by summary + exact ID and delete it                                           |
-| `:CopilotAgentModel [id]`            | Pick or set a model; tab-completes from service model list                                   |
-| `:CopilotAgentStart`                 | Manually start the Go service                                                                |
-| `:CopilotAgentStop`                  | Disconnect the active session                                                                |
-| `:CopilotAgentStop!`                 | Delete the active session; checkpoint cleanup waits 7 days                                   |
-| `:CopilotAgentCancel`                | Cancel the current agent turn                                                                |
-| `:CopilotAgentDiff`                  | Pick two checkpoints and open vimdiff for a changed file                                     |
+| Command                              | Description                                                                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `:CopilotAgentInstall`               | Download pre-built binary for the current platform                                                                             |
+| `:CopilotAgentDashboard`             | Open the Copilot Agent startup dashboard                                                                                       |
+| `:CopilotAgentChat [fullscreen]`     | Open the chat buffer; `fullscreen` opens in a new tab                                                                          |
+| `:CopilotAgentChatToggle`            | Hide/show chat + input UI windows without reconnect/replay                                                                     |
+| `:CopilotAgentChatFocus`             | Focus or switch to an open chat buffer                                                                                         |
+| `:CopilotAgentAsk [prompt]`          | Send a prompt; no argument opens the input buffer                                                                              |
+| `:CopilotAgentCompose [tab]`         | Open the compose scratch buffer; `tab` opens it in a new tab                                                                   |
+| `:CopilotAgentPromoteToCompose`      | Move current prompt-buffer text into compose                                                                                   |
+| `:CopilotAgentSendBuffer`            | Send the active compose buffer                                                                                                 |
+| `:CopilotAgentNewSession`            | Disconnect current session and start a fresh one                                                                               |
+| `:CopilotAgentSwitchSession`         | Pick from all persisted sessions and switch                                                                                    |
+| `:CopilotAgentDeleteSession`         | Pick a session by summary + exact ID and delete it                                                                             |
+| `:CopilotAgentModel [id]`            | Pick or set a model; tab-completes from service model list                                                                     |
+| `:CopilotAgentStart`                 | Manually start the Go service                                                                                                  |
+| `:CopilotAgentStop`                  | Disconnect the active session                                                                                                  |
+| `:CopilotAgentStop!`                 | Delete the active session; checkpoint cleanup waits 7 days                                                                     |
+| `:CopilotAgentCancel`                | Cancel the current agent turn                                                                                                  |
+| `:CopilotAgentDiff`                  | Pick two checkpoints and open vimdiff for a changed file                                                                       |
 | `:CopilotAgentFugitiveCommit [last]` | Generate a commit message and open fugitive commit; waits for final post-tool output; `last` reuses the latest assistant reply |
-| `:CopilotAgentStatus`                | Show service URL, session id, stream status                                                  |
-| `:CopilotAgentLsp`                   | Start (or reuse) the LSP client for code actions                                             |
-| `:CopilotAgentPasteImage`            | Paste clipboard image as attachment                                                          |
-| `:CopilotAgentRetryInput`            | Re-show the last dismissed ask_user prompt                                                   |
+| `:CopilotAgentStatus`                | Show service URL, session id, stream status                                                                                    |
+| `:CopilotAgentLsp`                   | Start (or reuse) the LSP client for code actions                                                                               |
+| `:CopilotAgentPasteImage`            | Paste clipboard image as attachment                                                                                            |
+| `:CopilotAgentRetryInput`            | Re-show the last dismissed ask_user prompt                                                                                     |
 
 </details>
 
@@ -421,8 +427,8 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `zA` (output)                     | Toggle collapsed `Activity:` transcript blocks                                                          |
 | `<CR>` (output)                   | On Activity lines, open the editable diff split; otherwise open input                                   |
 | `K` (output)                      | Toggle the read-only Activity hover preview while keeping focus in chat                                 |
-| `gK` (output)                     | Move focus into the current Activity hover preview (opens it first if needed)                            |
-| `<C-w>j` (output)                 | Move into Activity hover preview when available; otherwise fallback to normal window-down (`<C-w>j`)     |
+| `gK` (output)                     | Move focus into the current Activity hover preview (opens it first if needed)                           |
+| `<C-w>j` (output)                 | Move into Activity hover preview when available; otherwise fallback to normal window-down (`<C-w>j`)    |
 | `CursorHold` / `CursorHoldI`      | When `activity_hover_cursor_hold=true`, show the concise read-only hover preview on Activity lines      |
 | `[[` / `]]` (output)              | Jump to previous/next conversation (`User:` block)                                                      |
 | `[a` / `]a` (output)              | Jump to previous/next `Assistant:` or `Activity:` block                                                 |

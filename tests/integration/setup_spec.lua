@@ -4,7 +4,7 @@
 -- or the CI workflow.
 
 -- Use plenary if available, otherwise a tiny shim.
-local assert_eq, assert_true, assert_false, assert_not_nil, assert_nil
+local assert_eq, assert_true, assert_false, assert_not_nil
 do
   local ok, luassert = pcall(require, 'luassert')
   if ok then
@@ -19,9 +19,6 @@ do
     end
     assert_not_nil = function(v, msg)
       luassert.is_not_nil(v, msg)
-    end
-    assert_nil = function(v, msg)
-      luassert.is_nil(v, msg)
     end
   else
     local function fail(msg)
@@ -45,11 +42,6 @@ do
     assert_not_nil = function(v, msg)
       if v == nil then
         fail(msg or 'expected non-nil')
-      end
-    end
-    assert_nil = function(v, msg)
-      if v ~= nil then
-        fail(msg or 'expected nil')
       end
     end
   end
@@ -750,6 +742,7 @@ describe('service coordination', function()
   local original_jobstart
   local original_filereadable
   local original_executable
+  local original_os_uname
   local temp_state_dir
 
   before_each(function()
@@ -762,6 +755,7 @@ describe('service coordination', function()
     original_jobstart = vim.fn.jobstart
     original_filereadable = vim.fn.filereadable
     original_executable = vim.fn.executable
+    original_os_uname = vim.uv.os_uname
     temp_state_dir = vim.fn.tempname()
     vim.fn.mkdir(temp_state_dir, 'p')
     vim.fn.stdpath = function(kind)
@@ -777,6 +771,7 @@ describe('service coordination', function()
     vim.fn.jobstart = original_jobstart
     vim.fn.filereadable = original_filereadable
     vim.fn.executable = original_executable
+    vim.uv.os_uname = original_os_uname
     pcall(service._release_spawn_lock)
   end)
 
@@ -823,7 +818,7 @@ describe('service coordination', function()
 
   it('uses a detached shutdown request when the last client exits', function()
     local calls = {}
-    local socket_path = temp_state_dir .. '/copilot-agent.control.sock'
+    local socket_path = temp_state_dir .. '/copilot-agent.sock'
     local addr_path = temp_state_dir .. '/copilot-agent.addr'
 
     vim.fn.writefile({ '' }, socket_path)
@@ -856,7 +851,49 @@ describe('service coordination', function()
     assert_true(vim.tbl_contains(calls[1].args, '--unix-socket'))
     assert_true(vim.tbl_contains(calls[1].args, socket_path))
     assert_true(vim.tbl_contains(calls[1].args, 'http://localhost/shutdown'))
-    assert_nil(service._load_service_addr())
+    assert_eq('127.0.0.1:43123', service._load_service_addr())
+  end)
+
+  it('uses a TCP control endpoint on Windows', function()
+    vim.uv.os_uname = function()
+      return { sysname = 'Windows_NT' }
+    end
+
+    agent.state.config.service.command = { '/path/to/copilot-agent' }
+    local command = service.service_command()
+
+    assert_true(vim.tbl_contains(command, '--control-addr'))
+    assert_true(vim.tbl_contains(command, '127.0.0.1:0'))
+    assert_false(vim.tbl_contains(command, '--control-socket'))
+  end)
+
+  it('uses the saved TCP control endpoint when shutting down on Windows', function()
+    vim.uv.os_uname = function()
+      return { sysname = 'Windows_NT' }
+    end
+
+    local calls = {}
+    vim.fn.executable = function(path)
+      if path == agent.state.config.curl_bin then
+        return 1
+      end
+      return original_executable(path)
+    end
+    vim.fn.jobstart = function(args, opts)
+      calls[#calls + 1] = {
+        args = vim.deepcopy(args),
+        opts = vim.deepcopy(opts),
+      }
+      return 77
+    end
+
+    service._save_control_addr('127.0.0.1:43123')
+    service.maybe_shutdown_detached_service_if_last_client({ nonblocking = true })
+
+    assert_eq(1, #calls)
+    assert_eq(1, calls[1].opts.detach)
+    assert_true(vim.tbl_contains(calls[1].args, 'http://127.0.0.1:43123/shutdown'))
+    assert_false(vim.tbl_contains(calls[1].args, '--unix-socket'))
   end)
 end)
 
@@ -7627,6 +7664,47 @@ describe('chat help', function()
     assert_true(text:find(':CopilotAgentDeleteSession', 1, true) ~= nil)
     assert_true(text:find('checkpoints kept 7 days', 1, true) ~= nil)
     assert_true(text:find('Transcript separators show the completed-turn Checkpoint ID (v001...)', 1, true) ~= nil)
+    assert_true(text:find('Hover preview', 1, true) ~= nil)
+    assert_true(text:find("default 'K'", 1, true) ~= nil)
+    assert_true(text:find("default 'gK'", 1, true) ~= nil)
+  end)
+
+  it('opens the help popup without depending on render.show_help', function()
+    pcall(vim.cmd, 'tabonly | only')
+    wipe_copilot_test_buffers()
+
+    package.loaded['copilot_agent.chat'] = nil
+    local chat = require('copilot_agent.chat')
+    local before = #vim.api.nvim_list_wins()
+
+    local ok, err = pcall(chat._show_help_popup)
+    assert_true(ok, err)
+
+    local after = #vim.api.nvim_list_wins()
+    assert_eq(before + 1, after)
+
+    local help_win = vim.api.nvim_get_current_win()
+    assert_eq('editor', vim.api.nvim_win_get_config(help_win).relative)
+    pcall(vim.api.nvim_win_close, help_win, true)
+  end)
+
+  it('registers g? in the chat buffer keymaps', function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.chat'] = nil
+    local agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, auto_start = false, notify = false })
+    agent.open_chat()
+
+    local keymaps = vim.api.nvim_buf_get_keymap(agent.state.chat_bufnr, 'n')
+    local has_help_keymap = false
+    for _, map in ipairs(keymaps) do
+      if map.lhs == 'g?' then
+        has_help_keymap = true
+        break
+      end
+    end
+
+    assert_true(has_help_keymap)
   end)
 end)
 
@@ -7660,6 +7738,12 @@ describe('chat input behavior', function()
     agent = require('copilot_agent')
     agent.setup({
       auto_create_session = false,
+      service = {
+        auto_start = false,
+      },
+      lsp = {
+        enabled = false,
+      },
       chat = {
         render_markdown = false,
       },
@@ -8374,10 +8458,11 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
     assert.same({
+      'commands: :CopilotAgentNewSession  :CopilotAgentAsk  :CopilotAgentStop',
       'No messages yet.',
       'Press i or <Enter> to open the input buffer.',
       'Run :CopilotAgentAsk to send a prompt from the command line.',
-    }, { unpack(lines, 5, 7) })
+    }, { unpack(lines, 5, 8) })
   end)
 
   it('preserves assistant blank lines instead of compacting prose spacing', function()

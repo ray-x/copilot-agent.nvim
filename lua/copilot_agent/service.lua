@@ -17,6 +17,7 @@ local LOCK_WAIT_MIN_DELAY_MS = 25 -- Avoid busy-waiting when another Neovim inst
 local LOCK_WAIT_PID_ENTROPY_PRIME = 131 -- Mix in a small prime so different PIDs spread their retry jitter more evenly.
 local SERVICE_OUTPUT_HISTORY_LIMIT = 20 -- Keep only the most recent startup lines for diagnostics without unbounded memory growth.
 local CONTROL_REQUEST_TIMEOUT_SECONDS = '2' -- Bound local control-socket curl calls so stale sockets cannot hang startup or exit indefinitely.
+local SAVED_ADDR_PROBE_TIMEOUT_SECONDS = '1' -- Quick probe timeout when validating persisted service addresses.
 
 local _root_markers = { '.git', 'go.mod', 'package.json', 'Cargo.toml', 'pyproject.toml', '.hg', '.svn' }
 
@@ -36,6 +37,11 @@ local function find_project_root(start_dir)
     dir = parent
   end
   return nil
+end
+
+local function is_windows()
+  local uname = uv.os_uname()
+  return type(uname) == 'table' and type(uname.sysname) == 'string' and uname.sysname:find('Windows', 1, true) ~= nil
 end
 
 function M.cwd()
@@ -109,14 +115,23 @@ function M.service_command()
   end
   if type(value) == 'table' then
     local has_control_socket = false
+    local has_control_addr = false
     for _, arg in ipairs(value) do
       if arg == '--control-socket' or arg == '-control-socket' then
         has_control_socket = true
+      elseif arg == '--control-addr' or arg == '-control-addr' then
+        has_control_addr = true
+      end
+      if has_control_socket or has_control_addr then
         break
       end
     end
-    if not has_control_socket then
-      value = vim.list_extend(vim.deepcopy(value), { '--control-socket', vim.fn.stdpath('state') .. '/copilot-agent.control.sock' })
+    if not has_control_socket and not has_control_addr then
+      if is_windows() then
+        value = vim.list_extend(vim.deepcopy(value), { '--control-addr', '127.0.0.1:0' })
+      else
+        value = vim.list_extend(vim.deepcopy(value), { '--control-socket', vim.fn.stdpath('state') .. '/copilot-agent.sock' })
+      end
     end
   end
   local pr = state.config.service.port_range
@@ -141,7 +156,11 @@ local function addr_state_file()
 end
 
 local function control_socket_file()
-  return vim.fn.stdpath('state') .. '/copilot-agent.control.sock'
+  return vim.fn.stdpath('state') .. '/copilot-agent.sock'
+end
+
+local function control_addr_file()
+  return vim.fn.stdpath('state') .. '/copilot-agent.control-addr'
 end
 
 local function addr_lock_dir()
@@ -178,8 +197,50 @@ local function append_json_request_body(args, body)
   table.insert(args, json_encode(body))
 end
 
-local function build_control_request_args(method, path, body, opts)
+local build_http_request_args
+local write_text_file
+local read_first_line
+local load_service_pid
+local signal_service_pid
+
+local function save_control_addr(addr)
+  if type(addr) ~= 'string' or addr == '' then
+    return
+  end
+  write_text_file(control_addr_file(), addr)
+end
+
+local function load_control_addr()
+  return read_first_line(control_addr_file())
+end
+
+local function clear_control_addr()
+  pcall(uv.fs_unlink, control_addr_file())
+end
+
+local function control_endpoint()
+  if is_windows() then
+    local addr = load_control_addr()
+    if type(addr) == 'string' and addr ~= '' then
+      return { kind = 'tcp', addr = addr }
+    end
+    return nil
+  end
+
+  if vim.fn.filereadable(control_socket_file()) == 1 then
+    return { kind = 'unix', socket = control_socket_file() }
+  end
+  return nil
+end
+
+local function build_control_request_args(endpoint, method, path, body, opts)
   opts = opts or {}
+  if type(endpoint) ~= 'table' then
+    return nil
+  end
+  if endpoint.kind == 'tcp' then
+    return build_http_request_args(method, path, body, vim.tbl_extend('force', opts, { base_url = 'http://' .. endpoint.addr }))
+  end
   local args = {
     state.config.curl_bin,
     '-sS',
@@ -188,7 +249,7 @@ local function build_control_request_args(method, path, body, opts)
     '--max-time',
     tostring(opts.max_time or CONTROL_REQUEST_TIMEOUT_SECONDS),
     '--unix-socket',
-    control_socket_file(),
+    endpoint.socket or control_socket_file(),
     '-X',
     method,
     'http://localhost' .. path,
@@ -206,9 +267,9 @@ local function build_control_request_args(method, path, body, opts)
   return args
 end
 
-local function build_http_request_args(method, path, body, opts)
+build_http_request_args = function(method, path, body, opts)
   opts = opts or {}
-  local base_url = normalize_base_url(state.config.base_url)
+  local base_url = normalize_base_url(opts.base_url or state.config.base_url)
   if type(base_url) ~= 'string' or base_url == '' then
     return nil
   end
@@ -238,26 +299,22 @@ local function spawn_detached_request(args)
 end
 
 local function control_request_sync(method, path, body)
-  if vim.fn.filereadable(control_socket_file()) ~= 1 then
+  local endpoint = control_endpoint()
+  if not endpoint then
     return nil, 'control socket unavailable'
   end
   if vim.fn.executable(state.config.curl_bin) ~= 1 then
     return nil, 'curl executable not found: ' .. state.config.curl_bin
   end
 
-  local args = build_control_request_args(method, path, body, { capture_response = true })
-
-  local raw_stdout, exit_code, stderr_text
-  if vim.system then
-    local result = vim.system(args, { text = true }):wait()
-    raw_stdout = result.stdout or ''
-    exit_code = tonumber(result.code) or 0
-    stderr_text = result.stderr or ''
-  else
-    raw_stdout = vim.fn.system(args)
-    exit_code = tonumber(vim.v.shell_error) or 0
-    stderr_text = raw_stdout
+  local args = build_control_request_args(endpoint, method, path, body, { capture_response = true })
+  if not args then
+    return nil, 'control socket unavailable'
   end
+
+  local raw_stdout = vim.fn.system(args)
+  local exit_code = tonumber(vim.v.shell_error) or 0
+  local stderr_text = raw_stdout
 
   local response_body, status_text = raw_stdout:match('^(.*)\n(%d%d%d)%s*$')
   local status = tonumber(status_text)
@@ -294,8 +351,9 @@ local function request_shutdown_nonblocking()
     return false
   end
 
-  if vim.fn.filereadable(control_socket_file()) == 1 then
-    local control_args = build_control_request_args('POST', '/shutdown', {}, { capture_response = false })
+  local endpoint = control_endpoint()
+  if endpoint then
+    local control_args = build_control_request_args(endpoint, 'POST', '/shutdown', {}, { capture_response = false })
     if spawn_detached_request(control_args) then
       return true
     end
@@ -304,6 +362,13 @@ local function request_shutdown_nonblocking()
   if refresh_service_addr_from_state() then
     local http_args = build_http_request_args('POST', '/shutdown', {}, { capture_response = false })
     if spawn_detached_request(http_args) then
+      return true
+    end
+  end
+
+  local pid = load_service_pid()
+  if pid and signal_service_pid(pid, 0) then
+    if signal_service_pid(pid, 15) then
       return true
     end
   end
@@ -339,6 +404,10 @@ local function client_lease_file(pid)
   return client_lease_dir() .. '/' .. tostring(pid)
 end
 
+local function service_pid_file()
+  return vim.fn.stdpath('state') .. '/copilot-agent.pid'
+end
+
 local function now_ms()
   if uv and uv.hrtime then
     return math.floor(uv.hrtime() / NANOSECONDS_PER_MILLISECOND)
@@ -352,7 +421,7 @@ local function interval_settings()
   return timeout_ms, interval_ms
 end
 
-local function write_text_file(path, content)
+write_text_file = function(path, content)
   local ok, err = pcall(function()
     local f = assert(io.open(path, 'w'))
     f:write(content)
@@ -364,7 +433,7 @@ local function write_text_file(path, content)
   return nil, err
 end
 
-local function read_first_line(path)
+read_first_line = function(path)
   local ok, data = pcall(function()
     local f = io.open(path, 'r')
     if not f then
@@ -409,6 +478,8 @@ function M.forget_service_addr()
   pcall(uv.fs_unlink, addr_state_file())
   state.service_addr_known = false
   if state.base_url_managed ~= false then
+    state.config.base_url = ''
+  else
     state.config.base_url = defaults.base_url
   end
 end
@@ -423,6 +494,96 @@ local function process_exists(pid)
   end
   vim.fn.system({ 'kill', '-0', tostring(pid) })
   return vim.v.shell_error == 0
+end
+
+load_service_pid = function()
+  local line = read_first_line(service_pid_file())
+  if line and line:find('^%d+$') then
+    return tonumber(line)
+  end
+  return nil
+end
+
+local function save_service_pid(pid)
+  pid = tonumber(pid)
+  if not pid or pid <= 0 then
+    return
+  end
+  write_text_file(service_pid_file(), tostring(pid) .. '\n')
+end
+
+local function clear_service_pid(expected_pid)
+  expected_pid = tonumber(expected_pid)
+  if not expected_pid or expected_pid <= 0 then
+    return
+  end
+  local current_pid = load_service_pid()
+  if current_pid == expected_pid then
+    pcall(uv.fs_unlink, service_pid_file())
+  end
+end
+
+signal_service_pid = function(pid, signal)
+  pid = tonumber(pid)
+  if not pid or pid <= 0 or not process_exists(pid) then
+    return false
+  end
+  return pcall(uv.kill, pid, signal or 15)
+end
+
+local function saved_addr_healthy(addr)
+  if type(addr) ~= 'string' or addr == '' then
+    return false
+  end
+  if vim.fn.executable(state.config.curl_bin) ~= 1 then
+    return false
+  end
+
+  local args = {
+    state.config.curl_bin,
+    '-sS',
+    '-o',
+    '-',
+    '-w',
+    '\n%{http_code}',
+    '--connect-timeout',
+    SAVED_ADDR_PROBE_TIMEOUT_SECONDS,
+    '--max-time',
+    SAVED_ADDR_PROBE_TIMEOUT_SECONDS,
+    'http://' .. addr .. state.config.service.healthcheck_path,
+  }
+
+  local raw_stdout = vim.fn.system(args)
+  local exit_code = tonumber(vim.v.shell_error) or 0
+
+  local _, status_text = raw_stdout:match('^(.*)\n(%d%d%d)%s*$')
+  local status = tonumber(status_text)
+  return exit_code == 0 and status and status < 400
+end
+
+local function shared_service_pid_alive()
+  local pid = load_service_pid()
+  if pid and process_exists(pid) then
+    local has_control_socket = not is_windows() and vim.fn.filereadable(control_socket_file()) == 1
+    local has_control_addr = is_windows() and vim.fn.filereadable(control_addr_file()) == 1
+    local saved_addr = load_service_addr()
+    local has_saved_addr = saved_addr_healthy(saved_addr)
+    if has_control_socket or has_control_addr or has_saved_addr then
+      return pid
+    end
+
+    -- A live PID without discoverable control/address artifacts is stale for
+    -- managed-mode startup; clear it so this instance can spawn a fresh service.
+    pcall(uv.fs_unlink, service_pid_file())
+    pcall(uv.fs_unlink, addr_state_file())
+    clear_control_addr()
+    return nil
+  end
+  if pid then
+    pcall(uv.fs_unlink, service_pid_file())
+  end
+  clear_control_addr()
+  return nil
 end
 
 local function prune_stale_client_leases()
@@ -462,7 +623,7 @@ function M.maybe_shutdown_detached_service_if_last_client(opts)
 
   if opts.nonblocking ~= false then
     if request_shutdown_nonblocking() then
-      M.forget_service_addr()
+      return
     end
     return
   end
@@ -482,9 +643,6 @@ function M.maybe_shutdown_detached_service_if_last_client(opts)
 end
 
 refresh_service_addr_from_state = function()
-  if state.config.service.detach ~= true then
-    return false
-  end
   if state.base_url_managed == false then
     return false
   end
@@ -502,6 +660,7 @@ local function release_spawn_lock()
 end
 
 local function try_acquire_spawn_lock(stale_after_ms)
+  vim.fn.mkdir(vim.fn.fnamemodify(addr_lock_dir(), ':h'), 'p')
   local ok, err = uv.fs_mkdir(addr_lock_dir(), LOCK_DIRECTORY_MODE)
   if ok then
     local write_ok, write_err = write_text_file(addr_lock_owner_file(), string.format('%d\n%d\n', now_ms(), vim.fn.getpid()))
@@ -559,6 +718,10 @@ function M.remember_service_output(data)
           save_service_addr(addr)
         end
       end
+      local control_addr = line:match('^COPILOT_AGENT_CONTROL_ADDR=(.+)$')
+      if control_addr then
+        save_control_addr(control_addr)
+      end
       table.insert(state.service_output, line)
     end
   end
@@ -574,6 +737,7 @@ function M.stop_service()
   end
   if state.config.service.detach ~= true then
     M.forget_service_addr()
+    clear_control_addr()
   end
 end
 
@@ -582,8 +746,13 @@ function M.last_service_output()
 end
 
 function M.check_service_health(callback)
-  if not refresh_service_addr_from_control() then
-    refresh_service_addr_from_state()
+  local discovered = refresh_service_addr_from_control()
+  if not discovered then
+    discovered = refresh_service_addr_from_state()
+  end
+  if state.base_url_managed ~= false and not discovered then
+    callback(false, 'service address not discovered yet', nil)
+    return
   end
   local http = require('copilot_agent.http')
   http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
@@ -714,6 +883,10 @@ function M.ensure_service_running(callback)
           vim.schedule(function()
             if state.service_job_id == job_id then
               state.service_job_id = nil
+              if state.service_process_pid then
+                clear_service_pid(state.service_process_pid)
+              end
+              state.service_process_pid = nil
             end
             if state.service_starting then
               M.forget_service_addr()
@@ -742,6 +915,10 @@ function M.ensure_service_running(callback)
       end
 
       state.service_job_id = service_job_id
+      state.service_process_pid = tonumber(vim.fn.jobpid(service_job_id)) or nil
+      if state.service_process_pid then
+        save_service_pid(state.service_process_pid)
+      end
       append_entry('system', 'Starting service: ' .. (type(command) == 'table' and table.concat(command, ' ') or command))
 
       local attempts = math.max(1, math.floor(timeout_ms / interval_ms))
@@ -753,6 +930,11 @@ function M.ensure_service_running(callback)
     M.check_service_health(function(healthy)
       if healthy then
         finish(nil)
+        return
+      end
+
+      if shared_service_pid_alive() then
+        vim.defer_fn(wait_for_service_start, lock_wait_delay_ms(interval_ms))
         return
       end
 
@@ -793,6 +975,10 @@ function M.ensure_service_running(callback)
       poll_service_health(attempts)
       return
     end
+    if shared_service_pid_alive() then
+      wait_for_service_start()
+      return
+    end
     local acquired, acquire_err = try_acquire_spawn_lock(timeout_ms)
     if acquire_err then
       finish(acquire_err)
@@ -807,11 +993,68 @@ function M.ensure_service_running(callback)
   end)
 end
 
+function M.debug_snapshot()
+  local command = M.service_command()
+  local command_text = type(command) == 'table' and table.concat(command, ' ') or tostring(command)
+  local base_url = normalize_base_url(state.config.base_url)
+  local control_socket = control_socket_file()
+  local control_addr_path = control_addr_file()
+  local addr_file = addr_state_file()
+  local lock_path = addr_lock_dir()
+  local pid_file = service_pid_file()
+  local control_payload, control_err = control_request_sync('GET', '/service-addr', nil)
+  local control_health_payload, control_health_err, control_health_status = control_request_sync('GET', '/healthz', nil)
+  local saved_addr = load_service_addr()
+  local saved_pid = load_service_pid()
+  local shared_pid_alive = shared_service_pid_alive()
+  local snapshot = {
+    managed_mode = state.base_url_managed ~= false,
+    auto_start = state.config.service.auto_start == true,
+    detach = state.config.service.detach == true,
+    base_url = base_url,
+    service_addr_known = state.service_addr_known == true,
+    service_job_id = state.service_job_id,
+    service_process_pid = state.service_process_pid,
+    service_starting = state.service_starting == true,
+    launch_command = command_text,
+    launch_cwd = M.service_cwd(),
+    last_service_output = M.last_service_output(),
+    control_socket_path = control_socket,
+    control_socket_present = vim.fn.filereadable(control_socket) == 1,
+    control_addr_path = control_addr_path,
+    control_addr_present = vim.fn.filereadable(control_addr_path) == 1,
+    control_addr_value = load_control_addr(),
+    control_service_addr = type(control_payload) == 'table' and control_payload.serviceAddr or nil,
+    control_service_addr_error = control_err,
+    control_health_status = control_health_status,
+    control_health_error = control_health_err,
+    control_health_payload = control_health_payload,
+    addr_file_path = addr_file,
+    addr_file_present = vim.fn.filereadable(addr_file) == 1,
+    addr_file_value = saved_addr,
+    pid_file_path = pid_file,
+    pid_file_present = vim.fn.filereadable(pid_file) == 1,
+    pid_file_value = saved_pid,
+    pid_file_alive = saved_pid and process_exists(saved_pid) or false,
+    shared_service_pid = shared_pid_alive,
+    spawn_lock_path = lock_path,
+    spawn_lock_present = uv.fs_stat(lock_path) ~= nil,
+    pending_callback_count = #state.pending_service_callbacks,
+  }
+  return snapshot
+end
+
 M._save_service_addr = save_service_addr
 M._load_service_addr = load_service_addr
+M._save_control_addr = save_control_addr
+M._load_control_addr = load_control_addr
 M._refresh_service_addr_from_state = refresh_service_addr_from_state
 M._try_acquire_spawn_lock = try_acquire_spawn_lock
 M._release_spawn_lock = release_spawn_lock
 M._addr_lock_dir = addr_lock_dir
+M._load_service_pid = load_service_pid
+M._save_service_pid = save_service_pid
+M._clear_service_pid = clear_service_pid
+M._control_addr_file = control_addr_file
 
 return M

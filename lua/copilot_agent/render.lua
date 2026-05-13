@@ -3287,7 +3287,14 @@ function M.render_chat()
     state.entry_row_index = {}
 
     lines[#lines + 1] = state.config.chat.title
-    lines[#lines + 1] = 'service: ' .. normalize_base_url(state.config.base_url)
+    local service_url = normalize_base_url(state.config.base_url)
+    if service_url == '' then
+      service_url = '<discovering via control socket>'
+    end
+    lines[#lines + 1] = 'service: ' .. service_url
+    if type(state.service_launch_info) == 'string' and state.service_launch_info ~= '' then
+      lines[#lines + 1] = 'launch: ' .. state.service_launch_info
+    end
     lines[#lines + 1] = 'session: ' .. (state.session_id or '<none>')
     lines[#lines + 1] = 'commands: :CopilotAgentNewSession  :CopilotAgentAsk  :CopilotAgentStop'
 

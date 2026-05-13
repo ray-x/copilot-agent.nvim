@@ -171,7 +171,7 @@ local function fetch_sorted_sessions(context, callback)
       return ta > tb
     end)
     callback(sessions, nil, response)
-  end)
+  end, { auto_start = false })
 end
 
 local function latest_matching_session(sessions, target_cwd)
@@ -432,7 +432,7 @@ function M.resume_session(session_id, callback, opts)
     if callback then
       callback(state.session_id, nil)
     end
-  end)
+  end, { auto_start = false })
 end
 
 function M.latest_project_session_sync()
@@ -726,7 +726,7 @@ function M.pick_or_create_session(callback)
         create_session(callback)
       end
     end)
-  end)
+  end, { auto_start = false })
 end
 
 create_session = function(callback, opts)
@@ -843,7 +843,7 @@ create_session = function(callback, opts)
     if callback then
       callback(state.session_id)
     end
-  end)
+  end, { auto_start = false })
 end
 
 -- Force-create a brand-new session, bypassing any pick/resume logic.
@@ -1239,7 +1239,7 @@ function M.cancel()
       return
     end
     log('cancel request acknowledged for session ' .. tostring(session_id), vim.log.levels.DEBUG)
-  end)
+  end, { auto_start = false })
 end
 
 M._on_session_ready = on_session_ready

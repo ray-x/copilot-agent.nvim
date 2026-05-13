@@ -178,6 +178,8 @@ local state = {
   chat_statusline_managed = false, -- true when plugin populated the chat window local statusline
   input_statusline_managed = false, -- true when plugin populated the input window local statusline
   service_job_id = nil,
+  service_process_pid = nil,
+  service_launch_info = nil, -- human-readable launch mode/command shown in chat header
   service_starting = false,
   shutting_down = false, -- true during VimLeavePre cleanup; suppress reconnect/recovery noise on intentional shutdown
   service_addr_known = false, -- set true when COPILOT_AGENT_ADDR= line received
@@ -329,7 +331,11 @@ local SLASH_COMMANDS = {
 }
 
 local function normalize_base_url(url)
-  return utils.normalize_base_url(url, defaults.base_url)
+  local fallback = defaults.base_url
+  if state.base_url_managed then
+    fallback = ''
+  end
+  return utils.normalize_base_url(url, fallback)
 end
 
 return {

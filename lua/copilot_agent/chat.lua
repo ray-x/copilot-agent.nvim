@@ -113,6 +113,39 @@ local function help_lines()
   }
 end
 
+local function show_help_popup()
+  local lines = help_lines()
+  local max_w = 0
+  for _, l in ipairs(lines) do
+    max_w = math.max(max_w, vim.fn.strdisplaywidth(l))
+  end
+  local win_h = #lines
+  local win_w = max_w + 2
+  local row = math.max(0, (vim.o.lines - win_h) / 2)
+  local col = math.max(0, (vim.o.columns - win_w) / 2)
+  local help_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(help_buf, 0, -1, false, lines)
+  vim.bo[help_buf].modifiable = false
+  local help_win = vim.api.nvim_open_win(help_buf, true, {
+    relative = 'editor',
+    row = row,
+    col = col,
+    width = win_w,
+    height = win_h,
+    style = 'minimal',
+    border = 'rounded',
+    title = ' Help ',
+    title_pos = 'center',
+  })
+  win.disable_folds(help_win)
+  vim.wo[help_win].cursorline = false
+  for _, key in ipairs({ '<Space>', '<CR>', '<Esc>', 'q', 'g?' }) do
+    vim.keymap.set('n', key, function()
+      vim.api.nvim_win_close(help_win, true)
+    end, { buffer = help_buf, silent = true, nowait = true })
+  end
+end
+
 local function ensure_chat_keymaps(bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then
     return
@@ -162,7 +195,7 @@ local function ensure_chat_keymaps(bufnr)
   end, { buffer = bufnr, silent = true, desc = 'Jump to next Assistant/Activity' })
 
   vim.keymap.set('n', 'g?', function()
-    render.show_help()
+    show_help_popup()
   end, { buffer = bufnr, silent = true, desc = 'Show help' })
 
   vim.keymap.set('n', '<C-w>j', function()
@@ -1120,36 +1153,7 @@ function M.setup_action_keymaps(bufnr)
 
   -- Help popup (g? in normal mode).
   vim.keymap.set('n', 'g?', function()
-    local lines = help_lines()
-    local max_w = 0
-    for _, l in ipairs(lines) do
-      max_w = math.max(max_w, vim.fn.strdisplaywidth(l))
-    end
-    local win_h = #lines
-    local win_w = max_w + 2
-    local row = math.max(0, (vim.o.lines - win_h) / 2)
-    local col = math.max(0, (vim.o.columns - win_w) / 2)
-    local help_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(help_buf, 0, -1, false, lines)
-    vim.bo[help_buf].modifiable = false
-    local help_win = vim.api.nvim_open_win(help_buf, true, {
-      relative = 'editor',
-      row = row,
-      col = col,
-      width = win_w,
-      height = win_h,
-      style = 'minimal',
-      border = 'rounded',
-      title = ' Help ',
-      title_pos = 'center',
-    })
-    win.disable_folds(help_win)
-    vim.wo[help_win].cursorline = false
-    for _, key in ipairs({ '<Space>', '<CR>', '<Esc>', 'q', 'g?' }) do
-      vim.keymap.set('n', key, function()
-        vim.api.nvim_win_close(help_win, true)
-      end, { buffer = help_buf, silent = true, nowait = true })
-    end
+    show_help_popup()
   end, { buffer = bufnr, silent = true, desc = 'Show keybinding help' })
 end
 
@@ -1301,5 +1305,6 @@ function M.ask(prompt, opts)
 end
 
 M._help_lines = help_lines
+M._show_help_popup = show_help_popup
 
 return M

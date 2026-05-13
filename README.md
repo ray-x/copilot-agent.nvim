@@ -143,6 +143,9 @@ The model picker shows each model's billing multiplier when the SDK provides one
 
 Run `:checkhealth copilot_agent` after installation to verify all requirements.
 
+> [!NOTE]
+> Seeing `service.command is empty — auto_start will not work` in `:checkhealth` can be a false warning when `service.command = nil` (runtime auto-detection). The plugin can still auto-detect `<plugin_root>/bin/copilot-agent` or fall back to `go run .` at runtime.
+
 ---
 
 ## Installation
@@ -174,6 +177,8 @@ You can also download manually from the
 [releases page](https://github.com/ray-x/copilot-agent.nvim/releases/tag/latest)
 and place it anywhere; then set `service.command = { "/path/to/copilot-agent" }`.
 
+On Windows, the plugin automatically switches its local control channel from a Unix socket to a loopback TCP listener, so you do not need MSYS2 just to make the service start.
+
 ### Step 2 — Plugin setup with lazy.nvim
 
 For most users, this minimal setup is enough:
@@ -182,13 +187,15 @@ For most users, this minimal setup is enough:
 {
   "ray-x/copilot-agent.nvim",
   build = ":CopilotAgentInstall",
-  config = function()
+  opts = function()
     require("copilot_agent").setup({
-      lsp = { enabled = true },
+      -- lsp = { enabled = true }, -- experimental if you want to start lsp, it will be a separate copilot-agent lsp process
     })
   end,
 }
 ```
+
+`service.auto_start` defaults to `true`. For backward compatibility, a top-level `auto_start = ...` in `setup()` is still accepted and mapped to `service.auto_start` unless you explicitly set `service.auto_start`.
 
 <details>
 <summary><strong>📂 Full setup example with common options</strong></summary>
@@ -239,7 +246,7 @@ For most users, this minimal setup is enough:
         protect_markdown_buffer = true,  -- upstream Neovim Treesitter workaround for the prompt buffer; set false to disable
         diff_cmd = { 'delta' },          -- external diff viewer; false = builtin float
         diff_review = true,              -- offer vimdiff after agent modifies a git-tracked file; clean buffers auto-reload, conflicting modified buffers prompt before reload
-        activity_view = 'hover',         -- 'hover' (default) opens a read-only preview on cursor idle; 'diff' opens editable file diffs on <CR>; 'raw' keeps the patch-text viewer
+        activity_view = 'hover',         -- 'hover' (default) opens a read-only preview via K (or CursorHold when enabled); 'diff' opens editable file diffs on <CR>; 'raw' keeps the patch-text viewer
         activity_diff_tool = 'native',   -- 'native', 'diffview', 'fugitive', or a custom Vim command name
         -- Hover & preview controls:
         -- activity_hover_key: string (default: 'K') - key to toggle the read-only hover preview when activity_view='hover' while keeping focus in chat.
@@ -308,6 +315,8 @@ service = { auto_start = true, command = { "/path/to/copilot-agent", "--addr", "
 service = { auto_start = true, command = { "/path/to/copilot-agent" }, port_range = "18000-19000" }
 ```
 
+When the plugin starts the service on Windows, it appends a localhost control address automatically (`--control-addr 127.0.0.1:0`) unless you already provided `--control-addr` or `--control-socket` yourself. Keep `service.command` as a list/table so those flags can be added.
+
 **Global service vs isolated instances**
 
 By default, `auto_start = true` connects to the shared service if it is already running, otherwise it starts a single detached background service for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default. On quit, the last Neovim instance now requests detached-service shutdown in the background so exit does not wait on a slow control socket.
@@ -340,6 +349,11 @@ Reuse the same stable port when reopening the same project later. If you open mu
 
 See [server/README.md](server/README.md#running-the-service-manually) for manual startup, build flags, and service runtime details.
 
+### Startup troubleshooting
+
+- A `copilot-agent` binary alone is not enough: the GitHub Copilot CLI runtime must also be resolvable (`-cli-path`, environment, or `PATH`).
+- GUI Neovim launches (Finder/Spotlight/app launchers) often have a different `PATH` than terminal shells. If startup fails there but works in terminal Neovim, set explicit paths in your config (`service.command`, service env vars, or CLI path env) and re-run `:checkhealth copilot_agent`.
+
 ---
 
 ## Commands
@@ -369,7 +383,7 @@ Use `:CopilotAgentDashboard` or `:CopilotAgentChat` to get started.
 | `:CopilotAgentStop!`                 | Delete the active session; checkpoint cleanup waits 7 days                                   |
 | `:CopilotAgentCancel`                | Cancel the current agent turn                                                                |
 | `:CopilotAgentDiff`                  | Pick two checkpoints and open vimdiff for a changed file                                     |
-| `:CopilotAgentFugitiveCommit [last]` | Generate a commit message and open fugitive commit; `last` reuses the latest assistant reply |
+| `:CopilotAgentFugitiveCommit [last]` | Generate a commit message and open fugitive commit; waits for final post-tool output; `last` reuses the latest assistant reply |
 | `:CopilotAgentStatus`                | Show service URL, session id, stream status                                                  |
 | `:CopilotAgentLsp`                   | Start (or reuse) the LSP client for code actions                                             |
 | `:CopilotAgentPasteImage`            | Paste clipboard image as attachment                                                          |
@@ -406,9 +420,10 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-c>` (output)                  | Cancel current turn                                                                                     |
 | `zA` (output)                     | Toggle collapsed `Activity:` transcript blocks                                                          |
 | `<CR>` (output)                   | On Activity lines, open the editable diff split; otherwise open input                                   |
-| `K` (output)                      | Toggle the read-only Activity hover preview while keeping focus in chat                                  |
-| `gK` / `<C-w>j` (output)          | Move focus into the current Activity hover preview (opens it first if needed)                            |
-| `CursorHold` / `CursorHoldI`      | When `activity_hover_cursor_hold=true`, show the concise read-only hover preview on Activity lines       |
+| `K` (output)                      | Toggle the read-only Activity hover preview while keeping focus in chat                                 |
+| `gK` (output)                     | Move focus into the current Activity hover preview (opens it first if needed)                            |
+| `<C-w>j` (output)                 | Move into Activity hover preview when available; otherwise fallback to normal window-down (`<C-w>j`)     |
+| `CursorHold` / `CursorHoldI`      | When `activity_hover_cursor_hold=true`, show the concise read-only hover preview on Activity lines      |
 | `[[` / `]]` (output)              | Jump to previous/next conversation (`User:` block)                                                      |
 | `[a` / `]a` (output)              | Jump to previous/next `Assistant:` or `Activity:` block                                                 |
 | `gT` (normal)                     | Open TODO float for the current turn                                                                    |
@@ -423,42 +438,42 @@ The input buffer supports built-in slash commands handled by the plugin before t
 <details>
 <summary><strong>📂 Supported slash commands</strong></summary>
 
-| Command                | Arguments                                                              | What it does                                                                                                                                                                                                |
-| ---------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/add-dir`             | `[path]`                                                               | Add a directory to the session's allowed-directory list; prompts if omitted                                                                                                                                 |
-| `/agent`               | `[name\|default\|clear]`                                               | Pick a discovered custom agent, or reset back to the default agent                                                                                                                                          |
-| `/allow-all`           | —                                                                      | Switch permission mode to `approve-all`                                                                                                                                                                     |
-| `/ask`                 | `[question]`                                                           | Ask a side question in a temporary read-only session and show the answer separately                                                                                                                         |
-| `/clear`               | —                                                                      | Clear the current conversation and start a fresh session                                                                                                                                                    |
-| `/compact`             | —                                                                      | Compact session history and refresh context usage                                                                                                                                                           |
-| `/context`             | —                                                                      | Show current context-window token usage plus the latest quota and usage snapshot                                                                                                                           |
-| `/cwd`                 | `[path]`                                                               | Show or change the working directory used for future session actions                                                                                                                                        |
-| `/diff`                | `[vNNN\|from to\|from..to] [--difftool [name]]`                        | Show a checkpoint diff summary (default shows latest checkpoint changes), or open a visual diff via `--difftool` (`CodeDiff`, `Fugitive`, or native vim diff when no name is provided)                      |
-| `/env`                 | —                                                                      | Show the current environment, service, session, model, and mode snapshot                                                                                                                                    |
-| `/fleet`               | `[prompt]`                                                             | Start fleet mode for the active session                                                                                                                                                                     |
-| `/init`                | `[args]`                                                               | Run the project initialization helper                                                                                                                                                                       |
-| `/instructions`        | `[name]`                                                               | Open a discovered instructions file from the repository                                                                                                                                                     |
-| `/list-dir`            | —                                                                      | List allowed directories for the current session                                                                                                                                                            |
-| `/list-dirs`           | —                                                                      | Alias for `/list-dir`                                                                                                                                                                                       |
-| `/list-tools`          | —                                                                      | List remembered tool approvals for the current session; if empty, explain that the backend does not expose a full available-tools inventory                                                                 |
-| `/lsp`                 | `[create\|status\|show\|test\|help]`                                   | Bootstrap or inspect project LSP config for Copilot CLI                                                                                                                                                     |
-| `/mcp`                 | `[add\|show\|edit\|delete\|disable\|enable\|reload] ...`               | Manage MCP servers in `.mcp.json`, `.vscode/mcp.json`, and `~/.copilot/mcp-config.json` (global): add/show/edit/delete entries, toggle disabled state, and reconnect the active session to reload discovery |
-| `/model`               | `[id]`                                                                 | Pick or switch the active model                                                                                                                                                                             |
-| `/new`                 | —                                                                      | Start a fresh session                                                                                                                                                                                       |
-| `/plan`                | `[draft text]`                                                         | Switch the input buffer to plan mode and optionally prefill the prompt                                                                                                                                      |
-| `/rename`              | `[name]`                                                               | Rename the active session                                                                                                                                                                                   |
-| `/research`            | `[topic]`                                                              | Send a research-oriented prompt that can use GitHub and web sources                                                                                                                                         |
-| `/reset-allowed-tools` | —                                                                      | Clear remembered tool approvals for the current session                                                                                                                                                     |
-| `/resume`              | `[session-id]`                                                         | Resume or switch to another saved session; prompts if omitted                                                                                                                                               |
-| `/review`              | `[focus]`                                                              | Ask Copilot to review the current changes, optionally with extra focus text                                                                                                                                 |
-| `/rewind`              | `[checkpoint]`                                                         | Rewind the session to a checkpoint such as `v003`, then queue the target git hash and reverted checkpoint summaries into the next Copilot prompt                                                            |
-| `/search`              | `[text]`                                                               | Search the current transcript and jump to a matching entry                                                                                                                                                  |
+| Command                | Arguments                                                              | What it does                                                                                                                                                                                                                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/add-dir`             | `[path]`                                                               | Add a directory to the session's allowed-directory list; prompts if omitted                                                                                                                                                                                                                  |
+| `/agent`               | `[name\|default\|clear]`                                               | Pick a discovered custom agent, or reset back to the default agent                                                                                                                                                                                                                           |
+| `/allow-all`           | —                                                                      | Switch permission mode to `approve-all`                                                                                                                                                                                                                                                      |
+| `/ask`                 | `[question]`                                                           | Ask a side question in a temporary read-only session and show the answer separately                                                                                                                                                                                                          |
+| `/clear`               | —                                                                      | Clear the current conversation and start a fresh session                                                                                                                                                                                                                                     |
+| `/compact`             | —                                                                      | Compact session history and refresh context usage                                                                                                                                                                                                                                            |
+| `/context`             | —                                                                      | Show current context-window token usage plus the latest quota and usage snapshot                                                                                                                                                                                                             |
+| `/cwd`                 | `[path]`                                                               | Show or change the working directory used for future session actions                                                                                                                                                                                                                         |
+| `/diff`                | `[vNNN\|from to\|from..to] [--difftool [name]]`                        | Show a checkpoint diff summary (default shows latest checkpoint changes), or open a visual diff via `--difftool` (`CodeDiff`, `Fugitive`, or native vim diff when no name is provided)                                                                                                       |
+| `/env`                 | —                                                                      | Show the current environment, service, session, model, and mode snapshot                                                                                                                                                                                                                     |
+| `/fleet`               | `[prompt]`                                                             | Start fleet mode for the active session                                                                                                                                                                                                                                                      |
+| `/init`                | `[args]`                                                               | Run the project initialization helper                                                                                                                                                                                                                                                        |
+| `/instructions`        | `[name]`                                                               | Open a discovered instructions file from the repository                                                                                                                                                                                                                                      |
+| `/list-dir`            | —                                                                      | List allowed directories for the current session                                                                                                                                                                                                                                             |
+| `/list-dirs`           | —                                                                      | Alias for `/list-dir`                                                                                                                                                                                                                                                                        |
+| `/list-tools`          | —                                                                      | List remembered tool approvals for the current session; if empty, explain that the backend does not expose a full available-tools inventory                                                                                                                                                  |
+| `/lsp`                 | `[create\|status\|show\|test\|help]`                                   | Bootstrap or inspect project LSP config for Copilot CLI                                                                                                                                                                                                                                      |
+| `/mcp`                 | `[add\|show\|edit\|delete\|disable\|enable\|reload] ...`               | Manage MCP servers in `.mcp.json`, `.vscode/mcp.json`, and `~/.copilot/mcp-config.json` (global): add/show/edit/delete entries, toggle disabled state, and reconnect the active session to reload discovery                                                                                  |
+| `/model`               | `[id]`                                                                 | Pick or switch the active model                                                                                                                                                                                                                                                              |
+| `/new`                 | —                                                                      | Start a fresh session                                                                                                                                                                                                                                                                        |
+| `/plan`                | `[draft text]`                                                         | Switch the input buffer to plan mode and optionally prefill the prompt                                                                                                                                                                                                                       |
+| `/rename`              | `[name]`                                                               | Rename the active session                                                                                                                                                                                                                                                                    |
+| `/research`            | `[topic]`                                                              | Send a research-oriented prompt that can use GitHub and web sources                                                                                                                                                                                                                          |
+| `/reset-allowed-tools` | —                                                                      | Clear remembered tool approvals for the current session                                                                                                                                                                                                                                      |
+| `/resume`              | `[session-id]`                                                         | Resume or switch to another saved session; prompts if omitted                                                                                                                                                                                                                                |
+| `/review`              | `[focus]`                                                              | Ask Copilot to review the current changes, optionally with extra focus text                                                                                                                                                                                                                  |
+| `/rewind`              | `[checkpoint]`                                                         | Rewind the session to a checkpoint such as `v003`, then queue the target git hash and reverted checkpoint summaries into the next Copilot prompt                                                                                                                                             |
+| `/search`              | `[text]`                                                               | Search the current transcript and jump to a matching entry                                                                                                                                                                                                                                   |
 | `/session`             | `[info\|checkpoints\|files\|plan\|rename\|cleanup\|prune\|delete] ...` | Inspect and manage sessions; bare `/session` still opens the switch picker. `/session prune --older-than <days> [--dry-run] [--include-named]` prunes old saved sessions, and `/session prune --keep-last <count> [--session <id>] [--dry-run]` trims old checkpoint snapshots for a session |
-| `/share`               | `[markdown\|html] [path]`                                              | Export the current transcript as Markdown or HTML                                                                                                                                                           |
-| `/skills`              | `[name]`                                                               | Open a discovered skill from the repository                                                                                                                                                                 |
-| `/tasks`               | `[filter]`                                                             | Show background task and sub-agent activity                                                                                                                                                                 |
-| `/undo`                | —                                                                      | Restore the latest checkpoint for the current session, then queue the restore git hash/context into the next Copilot prompt                                                                                 |
-| `/usage`               | —                                                                      | Show detailed session usage, quota snapshot, discovery counts, and context-window stats                                                                                                                    |
+| `/share`               | `[markdown\|html] [path]`                                              | Export the current transcript as Markdown or HTML                                                                                                                                                                                                                                            |
+| `/skills`              | `[name]`                                                               | Open a discovered skill from the repository                                                                                                                                                                                                                                                  |
+| `/tasks`               | `[filter]`                                                             | Show background task and sub-agent activity                                                                                                                                                                                                                                                  |
+| `/undo`                | —                                                                      | Restore the latest checkpoint for the current session, then queue the restore git hash/context into the next Copilot prompt                                                                                                                                                                  |
+| `/usage`               | —                                                                      | Show detailed session usage, quota snapshot, discovery counts, and context-window stats                                                                                                                                                                                                      |
 
 </details>
 

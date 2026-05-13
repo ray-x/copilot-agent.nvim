@@ -21,6 +21,11 @@ function M.build_url(path)
   return normalize_base_url(state.config.base_url) .. path
 end
 
+local function has_base_url()
+  local base_url = normalize_base_url(state.config.base_url)
+  return type(base_url) == 'string' and base_url ~= ''
+end
+
 local function log_http_request(mode, method, path, body)
   if not should_log(vim.log.levels.DEBUG) then
     return
@@ -274,6 +279,25 @@ end
 -- to avoid circular requires between http and service modules.
 function M.request(method, path, body, callback, opts)
   opts = opts or {}
+
+  if not has_base_url() then
+    if opts.auto_start == false then
+      callback(nil, 'service address not discovered yet', nil)
+      return
+    end
+
+    -- Lazy-require to avoid circular dependency with service.lua.
+    local service = require('copilot_agent.service')
+    service.ensure_service_running(function(start_err)
+      if start_err then
+        callback(nil, start_err, nil)
+        return
+      end
+      M.raw_request(method, path, body, callback)
+    end)
+    return
+  end
+
   M.raw_request(method, path, body, function(payload, err, status)
     if err and opts.auto_start ~= false and is_connection_error(err) then
       log(

@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,8 +42,9 @@ const (
 	httpReadHeaderTimeout      = 10 * time.Second // Long enough for local clients while still rejecting stalled connections promptly.
 	httpShutdownTimeout        = 5 * time.Second  // Allow in-flight HTTP requests a brief grace period during service shutdown.
 	sseKeepAliveInterval       = 15 * time.Second // Keep reverse proxies and clients from treating idle event streams as dead.
-	sseSubscriberBufferSize    = 256              // Absorb bursts of session events (tool calls can produce 100+ events rapidly).
-	asyncResultChannelSize     = 1                // Each pending prompt/permission only needs to hold a single terminal response.
+	clientLeasePollInterval    = 500 * time.Millisecond
+	sseSubscriberBufferSize    = 256 // Absorb bursts of session events (tool calls can produce 100+ events rapidly).
+	asyncResultChannelSize     = 1   // Each pending prompt/permission only needs to hold a single terminal response.
 	permissionRequestIDPrefix  = "perm"
 	userInputRequestIDPrefix   = "input"
 	sessionIDPrefix            = "nvim"
@@ -278,6 +280,8 @@ func main() {
 	addr := flag.String("addr", "", "HTTP listen address (host:port). Leave empty or use port 0 to let the OS assign a free port (default).")
 	portRange := flag.String("port-range", "", "Port range to try when -addr is not set, e.g. 18000-19000. The first available port in the range is used.")
 	controlSocket := flag.String("control-socket", "", "Unix socket path for local control API (GET /service-addr, GET /healthz, POST /shutdown)")
+	controlAddr := flag.String("control-addr", "", "TCP listen address for local control API (use on Windows, e.g. 127.0.0.1:0)")
+	clientLeaseDir := flag.String("client-lease-dir", "", "Neovim client lease directory used to self-stop detached services when no clients remain")
 	cliPath := flag.String("cli-path", defaultCLIPath(), "path to Copilot CLI binary or JS entrypoint")
 	cliURL := flag.String("cli-url", "", "URL for an already-running Copilot CLI server")
 	model := flag.String("model", defaultModel, "default model for new sessions; empty uses the Copilot CLI account default")
@@ -385,10 +389,27 @@ func main() {
 	}
 	svc.shutdownHTTP = server.Shutdown
 	controlCleanup := func() {}
-	if socketPath := strings.TrimSpace(*controlSocket); socketPath != "" {
-		cleanup, controlErr := startControlServer(ctx, svc, socketPath, boundAddr)
+	socketPath := strings.TrimSpace(*controlSocket)
+	controlListenAddr := strings.TrimSpace(*controlAddr)
+	switch {
+	case socketPath != "":
+		cleanup, controlErr := startControlServer(ctx, svc, "unix", socketPath, "", boundAddr)
 		if controlErr != nil {
 			log.Fatalf("start control socket %s: %v", socketPath, controlErr)
+		}
+		controlCleanup = cleanup
+		defer controlCleanup()
+	case controlListenAddr != "":
+		cleanup, controlErr := startControlServer(ctx, svc, "tcp", "", controlListenAddr, boundAddr)
+		if controlErr != nil {
+			log.Fatalf("start control listener %s: %v", controlListenAddr, controlErr)
+		}
+		controlCleanup = cleanup
+		defer controlCleanup()
+	case runtime.GOOS == "windows":
+		cleanup, controlErr := startControlServer(ctx, svc, "tcp", "", "127.0.0.1:0", boundAddr)
+		if controlErr != nil {
+			log.Fatalf("start control listener: %v", controlErr)
 		}
 		controlCleanup = cleanup
 		defer controlCleanup()
@@ -422,6 +443,8 @@ func main() {
 		log.Printf("Using Copilot CLI at %s", strings.TrimSpace(*cliPath))
 	}
 
+	startClientLeaseWatcher(ctx, strings.TrimSpace(*clientLeaseDir), stop)
+
 	// Print the machine-readable address to stderr so it doesn't pollute the
 	// LSP stdio stream. The Neovim plugin reads it from on_stderr.
 	fmt.Fprintf(os.Stderr, "COPILOT_AGENT_ADDR=%s\n", boundAddr)
@@ -431,22 +454,26 @@ func main() {
 	}
 }
 
-func startControlServer(ctx context.Context, svc *service, socketPath string, serviceAddr string) (func(), error) {
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+func startControlServer(ctx context.Context, svc *service, network string, socketPath string, listenAddr string, serviceAddr string) (func(), error) {
+	if network == "unix" {
+		if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 	}
 
-	ln, err := net.Listen("unix", socketPath)
+	ln, err := net.Listen(network, firstNonEmpty(listenAddr, socketPath))
 	if err != nil {
 		return nil, err
 	}
-	if chmodErr := os.Chmod(socketPath, 0o600); chmodErr != nil {
-		ln.Close()
-		_ = os.Remove(socketPath)
-		return nil, chmodErr
+	if network == "unix" {
+		if chmodErr := os.Chmod(socketPath, 0o600); chmodErr != nil {
+			ln.Close()
+			_ = os.Remove(socketPath)
+			return nil, chmodErr
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -494,11 +521,74 @@ func startControlServer(ctx context.Context, svc *service, socketPath string, se
 		}
 	}()
 
+	if network != "unix" {
+		fmt.Fprintf(os.Stderr, "COPILOT_AGENT_CONTROL_ADDR=%s\n", ln.Addr().String())
+	}
+
 	return func() {
 		_ = controlServer.Close()
 		_ = ln.Close()
-		_ = os.Remove(socketPath)
+		if network == "unix" {
+			_ = os.Remove(socketPath)
+		}
 	}, nil
+}
+
+func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) {
+	leaseDir = strings.TrimSpace(leaseDir)
+	if leaseDir == "" || stop == nil {
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(clientLeasePollInterval)
+		defer ticker.Stop()
+
+		seenLease := false
+		shutdown := func(reason string) {
+			log.Printf("client lease dir empty (%s); shutting down detached service", reason)
+			stop()
+		}
+
+		check := func() (bool, string) {
+			entries, err := os.ReadDir(leaseDir)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					if seenLease {
+						return true, "missing"
+					}
+					return false, "missing"
+				}
+				log.Printf("watch client leases %s: %v", leaseDir, err)
+				return false, "error"
+			}
+			if len(entries) > 0 {
+				seenLease = true
+				return false, "live"
+			}
+			if seenLease {
+				return true, "empty"
+			}
+			return false, "empty"
+		}
+
+		if shouldStop, reason := check(); shouldStop {
+			shutdown(reason)
+			return
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if shouldStop, reason := check(); shouldStop {
+					shutdown(reason)
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (s *service) currentClient() copilotClient {

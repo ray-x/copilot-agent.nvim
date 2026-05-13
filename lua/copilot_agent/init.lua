@@ -82,6 +82,37 @@ function M.close_dashboard()
   dashboard.close()
 end
 
+local function quoted_shell_arg(arg)
+  arg = tostring(arg or '')
+  if arg == '' then
+    return "''"
+  end
+  if arg:find('%s') or arg:find('"', 1, true) or arg:find("'", 1, true) or arg:find('`', 1, true) or arg:find('$', 1, true) or arg:find('\\', 1, true) then
+    return vim.fn.shellescape(arg)
+  end
+  return arg
+end
+
+local function describe_service_launch()
+  if state.config.service.auto_start ~= true then
+    return 'external (auto_start=false)'
+  end
+
+  local command = service.service_command()
+  local cwd = service.service_cwd()
+  if type(command) == 'table' and #command > 0 then
+    local parts = {}
+    for _, arg in ipairs(command) do
+      parts[#parts + 1] = quoted_shell_arg(arg)
+    end
+    return string.format('auto-start: %s  (cwd: %s)', table.concat(parts, ' '), cwd)
+  end
+  if type(command) == 'string' and command ~= '' then
+    return string.format('auto-start: %s  (cwd: %s)', command, cwd)
+  end
+  return string.format('auto-start: <invalid command>  (cwd: %s)', cwd)
+end
+
 function M.setup(opts)
   local normalized_opts = vim.deepcopy(opts or {})
   -- Back-compat: allow top-level auto_start to mirror service.auto_start.
@@ -92,8 +123,27 @@ function M.setup(opts)
   end
 
   state.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), normalized_opts)
+  local explicit_base_url = nil
+  if type(normalized_opts.base_url) == 'string' then
+    explicit_base_url = vim.trim(normalized_opts.base_url):gsub('/+$', '')
+    if explicit_base_url == '' then
+      explicit_base_url = nil
+    end
+  end
+  local legacy_default_base_url = defaults.base_url:gsub('/+$', '')
+  local explicit_default_base_url = explicit_base_url ~= nil and explicit_base_url == legacy_default_base_url
+
+  -- Keep backward compatibility for configs that explicitly set the historical
+  -- default base_url (127.0.0.1:8088) while still using auto-started managed
+  -- service discovery.
+  state.base_url_managed = explicit_base_url == nil or (explicit_default_base_url and state.config.service.auto_start == true)
+  if state.base_url_managed then
+    -- In managed mode the service address is discovered dynamically via control socket.
+    -- Do not preload the legacy 8088 fallback into UI/state before discovery completes.
+    state.config.base_url = ''
+  end
   state.config.base_url = normalize_base_url(state.config.base_url)
-  state.base_url_managed = normalized_opts.base_url == nil
+  state.service_launch_info = describe_service_launch()
   state.shutting_down = false
   -- Initialize runtime permission mode from config.
   state.permission_mode = state.config.permission_mode or 'interactive'
@@ -415,6 +465,7 @@ function M.statusline_reasoning(max_len)
 end
 
 function M.status()
+  local snapshot = service.debug_snapshot()
   local lines = {
     'service: ' .. normalize_base_url(state.config.base_url),
     'session: ' .. (state.session_id or '<none>'),
@@ -423,6 +474,9 @@ function M.status()
     'service_starting: ' .. tostring(state.service_starting),
     'streaming: ' .. tostring(state.events_job_id ~= nil),
     'buffer: ' .. tostring(state.chat_bufnr or '<none>'),
+    'control_socket: ' .. tostring(snapshot.control_socket_present),
+    'addr_file: ' .. tostring(snapshot.addr_file_present),
+    'shared_pid: ' .. tostring(snapshot.shared_service_pid or '<none>'),
   }
   notify(table.concat(lines, ' | '))
   return {
@@ -432,6 +486,44 @@ function M.status()
     events_job_id = state.events_job_id,
     chat_bufnr = state.chat_bufnr,
   }
+end
+
+function M.debug_service()
+  local snapshot = service.debug_snapshot()
+  local lines = {
+    'Service debug:',
+    '  managed_mode: ' .. tostring(snapshot.managed_mode),
+    '  auto_start: ' .. tostring(snapshot.auto_start),
+    '  detach: ' .. tostring(snapshot.detach),
+    '  base_url: ' .. tostring(snapshot.base_url),
+    '  service_addr_known: ' .. tostring(snapshot.service_addr_known),
+    '  service_starting: ' .. tostring(snapshot.service_starting),
+    '  service_job_id: ' .. tostring(snapshot.service_job_id or '<none>'),
+    '  service_process_pid: ' .. tostring(snapshot.service_process_pid or '<none>'),
+    '  pending_callbacks: ' .. tostring(snapshot.pending_callback_count),
+    '  launch_command: ' .. tostring(snapshot.launch_command),
+    '  launch_cwd: ' .. tostring(snapshot.launch_cwd),
+    '  control_socket_present: ' .. tostring(snapshot.control_socket_present),
+    '  control_socket_path: ' .. tostring(snapshot.control_socket_path),
+    '  control_service_addr: ' .. tostring(snapshot.control_service_addr or '<none>'),
+    '  control_service_addr_error: ' .. tostring(snapshot.control_service_addr_error or '<none>'),
+    '  control_health_status: ' .. tostring(snapshot.control_health_status or '<none>'),
+    '  control_health_error: ' .. tostring(snapshot.control_health_error or '<none>'),
+    '  addr_file_present: ' .. tostring(snapshot.addr_file_present),
+    '  addr_file_path: ' .. tostring(snapshot.addr_file_path),
+    '  addr_file_value: ' .. tostring(snapshot.addr_file_value or '<none>'),
+    '  pid_file_present: ' .. tostring(snapshot.pid_file_present),
+    '  pid_file_path: ' .. tostring(snapshot.pid_file_path),
+    '  pid_file_value: ' .. tostring(snapshot.pid_file_value or '<none>'),
+    '  pid_file_alive: ' .. tostring(snapshot.pid_file_alive),
+    '  shared_service_pid: ' .. tostring(snapshot.shared_service_pid or '<none>'),
+    '  spawn_lock_present: ' .. tostring(snapshot.spawn_lock_present),
+    '  spawn_lock_path: ' .. tostring(snapshot.spawn_lock_path),
+    '  last_service_output: ' .. tostring(snapshot.last_service_output or '<none>'),
+  }
+  append_entry('system', table.concat(lines, '\n'))
+  notify('Service debug snapshot added to chat', vim.log.levels.INFO)
+  return snapshot
 end
 
 -- ── Statusline component API ──────────────────────────────────────────────────

@@ -201,6 +201,7 @@ function M.is_connection_error(err)
     'transfer closed with outstanding read data remaining',
     'Connection reset by peer',
     'Recv failure',
+    'No host part in the URL',
   }) do
     if err:find(pattern, 1, true) then
       return true

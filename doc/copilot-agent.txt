@@ -70,6 +70,9 @@ Optional:
   • snacks.picker, telescope, fzf-lua, or mini.pick — fuzzy file picker
 
 Run |:checkhealth| copilot_agent to verify all requirements.
+If startup fails even though `copilot-agent` exists, verify the Copilot CLI
+runtime is resolvable (`-cli-path`, env vars, or PATH). GUI Neovim launches
+can have a different PATH than terminal shells.
 
 ==============================================================================
 3. INSTALLATION                                   *copilot-agent-installation*
@@ -132,8 +135,8 @@ optional — defaults are shown below: >lua
     },
 
     service = {
-      auto_start              = false,
-      command                 = { "go", "run", "." },
+      auto_start              = true,
+      command                 = nil,          -- nil = auto-detect binary, else { "go", "run", "." }
       cwd                     = nil,    -- defaults to <plugin_root>/server
       env                     = nil,
       port_range              = nil,    -- e.g. "18000-19000"
@@ -155,6 +158,9 @@ optional — defaults are shown below: >lua
     },
   })
 <
+
+Back-compat: top-level `auto_start = ...` in `setup()` is still accepted and
+mapped to `service.auto_start` unless `service.auto_start` is set explicitly.
 
 ==============================================================================
 5. COMMANDS                                       *copilot-agent-commands*
@@ -264,7 +270,10 @@ Normal and insert mode (unless noted):
   <C-n> / <M-n>       Next prompt from history
   zA (normal)         Toggle collapsed Activity transcript blocks
   <CR> (normal)       On Activity lines, open the editable diff split; otherwise open input
-    CursorHold/CursorHoldI  On Activity lines, show a tooltip-like hover preview (auto-closes after 2.5s)
+  K (normal)          Toggle Activity hover preview without leaving chat
+  gK (normal)         Focus/open Activity hover preview
+  <C-w>j (normal)     Focus Activity hover when available, else normal window-down
+  CursorHold/CursorHoldI  When `chat.activity_hover_cursor_hold = true`, show hover preview
   gT (normal)         Open TODO float for the current turn
   g? (normal)         Show help with keybindings and session commands
 
@@ -564,8 +573,8 @@ session.auto_resume ~
 
 service.auto_start ~
   Type: boolean
-  Default: `false`
-  Start the Go service automatically when the plugin is loaded.
+  Default: `true`
+  Auto-connect to the shared service (or start it) during setup.
 
 service.command ~
   Type: string[] | function() → string[] | nil
@@ -574,6 +583,8 @@ service.command ~
   uses `<plugin_root>/bin/copilot-agent` if present (installed via
   |:CopilotAgentInstall|), otherwise falls back to `{ "go", "run", "." }`.
   Set explicitly to override: `{ "/path/to/copilot-agent" }`.
+  Note: |:checkhealth| may still warn `service.command is empty` when this is
+  `nil`; runtime auto-detection is still used when starting the service.
 
 service.cwd ~
   Type: string | nil
@@ -639,7 +650,8 @@ chat.activity_view ~
   Type: string  ("diff" | "hover" | "raw")
   Default: `"hover"`
   Controls how activity blocks behave. `"hover"` opens a concise read-only
-  summary preview on cursor idle (default). File-change blocks list every file
+  summary preview via `K` by default (or CursorHold when
+  `chat.activity_hover_cursor_hold = true`). File-change blocks list every file
   summary in hover and still open an editable file diff view when you press
   `<CR>`. `"raw"` keeps the patch-text popup used today.
 

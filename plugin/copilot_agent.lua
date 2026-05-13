@@ -109,6 +109,10 @@ vim.api.nvim_create_user_command('CopilotAgentStatus', function()
   copilot_agent.status()
 end, { desc = 'Show Copilot Go session state' })
 
+vim.api.nvim_create_user_command('CopilotAgentDebugService', function()
+  copilot_agent.debug_service()
+end, { desc = 'Show detailed Copilot Go service discovery/startup debug info' })
+
 vim.api.nvim_create_user_command('CopilotAgentLsp', function()
   copilot_agent.start_lsp()
 end, { desc = 'Start the Copilot LSP server (code actions: explain, fix, add tests, add docs)' })

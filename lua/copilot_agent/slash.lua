@@ -232,6 +232,7 @@ local function extract_side_session_answer(session_events)
   local turn_started = false
   local turn_finished = false
   local final_message_seen = false
+  local saw_tool_activity = false
   for _, event in ipairs(session_events or {}) do
     local event_type = event_type_of(event)
     local data = event_data_of(event)
@@ -246,12 +247,17 @@ local function extract_side_session_answer(session_events)
       local tool_requests = data.toolRequests or data.ToolRequests
       local has_tool_requests = type(tool_requests) == 'table' and not vim.tbl_isempty(tool_requests)
       local content = first_non_empty_string(data.content, data.Content)
+      if has_tool_requests then
+        saw_tool_activity = true
+      end
       if content and vim.trim(content) ~= '' then
         answer = content
         if not has_tool_requests then
           final_message_seen = true
         end
       end
+    elseif type(event_type) == 'string' and vim.startswith(event_type, 'tool.') then
+      saw_tool_activity = true
     elseif event_type == 'assistant.turn_end' and turn_started then
       turn_finished = true
     elseif event_type == 'session.error' or event_type == 'error' then
@@ -262,7 +268,7 @@ local function extract_side_session_answer(session_events)
     answer = table.concat(answer_parts)
   end
   local has_answer = type(answer) == 'string' and vim.trim(answer) ~= ''
-  return answer, (turn_finished and has_answer) or final_message_seen, nil
+  return answer, final_message_seen or (turn_finished and has_answer and not saw_tool_activity), nil
 end
 
 local function show_side_question_result(prompt, answer)

@@ -4526,6 +4526,19 @@ describe('ask command', function()
     assert_eq(nil, err)
   end)
 
+  it('keeps polling when a tool-using side turn only has a planning preamble so far', function()
+    local answer, done, err = slash._extract_side_session_answer({
+      { Type = 'assistant.turn_start' },
+      { Type = 'assistant.message_delta', Data = { DeltaContent = "I'll inspect the staged state first." } },
+      { Type = 'tool.execution_start', Data = { toolName = 'bash' } },
+      { Type = 'assistant.turn_end' },
+    })
+
+    assert_eq("I'll inspect the staged state first.", answer)
+    assert_false(done)
+    assert_eq(nil, err)
+  end)
+
   it('shows the side answer for /ask from message history', function()
     local result_buf
 

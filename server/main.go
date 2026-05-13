@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"math"
@@ -19,6 +20,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -286,11 +288,26 @@ func main() {
 	cliURL := flag.String("cli-url", "", "URL for an already-running Copilot CLI server")
 	model := flag.String("model", defaultModel, "default model for new sessions; empty uses the Copilot CLI account default")
 	logLevel := flag.String("log-level", "error", "Copilot CLI log level")
+	logFile := flag.String("log-file", "", "path to write service logs (default: stderr only)")
 	cwdFlag := flag.String("cwd", "", "default working directory for new sessions")
 	lspMode := flag.Bool("lsp", true, "run LSP server over stdio alongside the HTTP service (default: true)")
 	lspOnly := flag.Bool("lsp-only", false, "run only the LSP server over stdio and connect to an existing HTTP service")
 	serviceURL := flag.String("service-url", "", "HTTP service URL for -lsp-only mode, e.g. http://127.0.0.1:8088")
 	flag.Parse()
+
+	if path := strings.TrimSpace(*logFile); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			log.Fatalf("create log directory: %v", err)
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			log.Fatalf("open log file %s: %v", path, err)
+		}
+		defer f.Close()
+		// Write to both stderr (captured by Neovim) and the persistent file.
+		log.SetOutput(io.MultiWriter(os.Stderr, f))
+		log.Printf("logging to %s (pid %d)", path, os.Getpid())
+	}
 
 	if *lspOnly {
 		if strings.TrimSpace(*serviceURL) == "" {
@@ -384,7 +401,7 @@ func main() {
 	}
 
 	server := &http.Server{
-		Handler:           withCORS(loggingMiddleware(mux)),
+		Handler:           withCORS(recoveryMiddleware(loggingMiddleware(mux))),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	svc.shutdownHTTP = server.Shutdown
@@ -540,13 +557,20 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 		return
 	}
 
+	// Require several consecutive empty reads before shutting down.
+	// This prevents transient filesystem glitches (momentary empty
+	// directory during lease renewal, NFS caching, etc.) from killing
+	// the service while a client is still connected.
+	const emptyThreshold = 6 // 6 × 500ms = 3 seconds of consecutive empty
+
 	go func() {
 		ticker := time.NewTicker(clientLeasePollInterval)
 		defer ticker.Stop()
 
 		seenLease := false
+		consecutiveEmpty := 0
 		shutdown := func(reason string) {
-			log.Printf("client lease dir empty (%s); shutting down detached service", reason)
+			log.Printf("client lease dir empty (%s, %d consecutive checks); shutting down detached service", reason, consecutiveEmpty)
 			stop()
 		}
 
@@ -555,19 +579,29 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					if seenLease {
-						return true, "missing"
+						consecutiveEmpty++
+						if consecutiveEmpty >= emptyThreshold {
+							return true, "missing"
+						}
+						return false, "missing"
 					}
 					return false, "missing"
 				}
 				log.Printf("watch client leases %s: %v", leaseDir, err)
+				consecutiveEmpty = 0
 				return false, "error"
 			}
 			if len(entries) > 0 {
 				seenLease = true
+				consecutiveEmpty = 0
 				return false, "live"
 			}
 			if seenLease {
-				return true, "empty"
+				consecutiveEmpty++
+				if consecutiveEmpty >= emptyThreshold {
+					return true, "empty"
+				}
+				return false, "empty"
 			}
 			return false, "empty"
 		}
@@ -2728,6 +2762,22 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// recoveryMiddleware catches panics in HTTP handlers so a single bad request
+// cannot crash the entire service process.  The panic and stack trace are
+// logged before returning 500 to the client.
+func recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				stack := debug.Stack()
+				log.Printf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, stack)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
 	})
 }
 

@@ -147,6 +147,25 @@ function M.service_command()
       value = vim.list_extend(vim.deepcopy(value), { '--port-range', pr })
     end
   end
+  -- Automatically persist Go service logs to a file for diagnostics.
+  if type(value) == 'table' then
+    local has_log_file = false
+    for _, arg in ipairs(value) do
+      if arg == '--log-file' or arg == '-log-file' then
+        has_log_file = true
+        break
+      end
+    end
+    if not has_log_file then
+      local log_path = state.config.service.log_file
+      if log_path == nil then
+        log_path = vim.fn.stdpath('state') .. '/copilot-agent-service.log'
+      end
+      if type(log_path) == 'string' and log_path ~= '' then
+        value = vim.list_extend(vim.deepcopy(value), { '--log-file', log_path })
+      end
+    end
+  end
   return value
 end
 

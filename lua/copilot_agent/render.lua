@@ -1376,7 +1376,11 @@ local function active_turn_entry_index()
   if not pending_turn or pending_turn.session_id ~= state.session_id then
     return nil
   end
-  if state.history_loading and not live_turn_render_allowed() then
+  -- During history replay ALL events are replayed from the server; live-turn
+  -- events only arrive after host.history_done clears history_loading.
+  -- Returning nil here prevents replayed old-turn messages from being bound
+  -- to the current live turn entry via ensure_assistant_entry().
+  if state.history_loading then
     return nil
   end
   local index = state.active_turn_assistant_index

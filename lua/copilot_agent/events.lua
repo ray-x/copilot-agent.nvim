@@ -1431,9 +1431,193 @@ local function capture_turn_activity_summary(event_type, data)
   end
 end
 
+local pending_compaction_activity = nil
+
+local function summarize_compaction_tokens(value, suffix)
+  local n = tonumber(value)
+  if not n then
+    return nil
+  end
+  local formatted = assistant_usage.format_summary_tokens(n) or tostring(math.floor(n + 0.5))
+  if type(suffix) == 'string' and suffix ~= '' then
+    return formatted .. ' ' .. suffix
+  end
+  return formatted
+end
+
+local function build_compaction_start_snapshot(data)
+  return {
+    conversation_tokens = tonumber(data.conversationTokens) or nil,
+    system_tokens = tonumber(data.systemTokens) or nil,
+    tool_tokens = tonumber(data.toolDefinitionsTokens) or nil,
+  }
+end
+
+local function compact_checkpoint_label(data)
+  local checkpoint_number = tonumber(data.checkpointNumber)
+  if checkpoint_number then
+    return string.format('checkpoint #%d', checkpoint_number)
+  end
+  local path = sanitize_permission_text(data.checkpointPath)
+  if type(path) == 'string' and path ~= '' then
+    local basename = path:match('([^/\\]+)$')
+    return basename and ('checkpoint ' .. basename) or ('checkpoint ' .. path)
+  end
+  return nil
+end
+
+local function compaction_start_details(snapshot)
+  local parts = {}
+  if type(snapshot) == 'table' then
+    local conversation = summarize_compaction_tokens(snapshot.conversation_tokens, 'conversation')
+    local system = summarize_compaction_tokens(snapshot.system_tokens, 'system')
+    local tools = summarize_compaction_tokens(snapshot.tool_tokens, 'tools')
+    if conversation then
+      parts[#parts + 1] = conversation
+    end
+    if system then
+      parts[#parts + 1] = system
+    end
+    if tools then
+      parts[#parts + 1] = tools
+    end
+  end
+  if #parts == 0 then
+    return nil
+  end
+  return table.concat(parts, ', ')
+end
+
+local function format_compaction_start_line(snapshot)
+  local detail = compaction_start_details(snapshot)
+  if detail then
+    return 'Compaction started — ' .. detail
+  end
+  return 'Compaction started'
+end
+
+local function format_compaction_complete_line(data, start_snapshot)
+  local headline = data.success == false and 'Compaction failed' or 'Compaction completed'
+  local parts = {}
+  local checkpoint_label = compact_checkpoint_label(data)
+  if checkpoint_label then
+    parts[#parts + 1] = checkpoint_label
+  end
+  local pre_tokens = summarize_compaction_tokens(data.preCompactionTokens, 'tokens')
+  if pre_tokens then
+    parts[#parts + 1] = 'pre ' .. pre_tokens
+  end
+  local pre_messages = tonumber(data.preCompactionMessagesLength)
+  if pre_messages then
+    parts[#parts + 1] = string.format('%d messages', math.floor(pre_messages + 0.5))
+  end
+  local start_detail = compaction_start_details(start_snapshot)
+  if start_detail then
+    parts[#parts + 1] = start_detail
+  end
+  local compaction_tokens_used = type(data.compactionTokensUsed) == 'table' and data.compactionTokensUsed or {}
+  local model = sanitize_permission_text(compaction_tokens_used.model)
+  if model then
+    parts[#parts + 1] = 'model ' .. model
+  end
+  local summary_input = summarize_compaction_tokens(compaction_tokens_used.inputTokens)
+  local summary_output = summarize_compaction_tokens(compaction_tokens_used.outputTokens)
+  if summary_input and summary_output then
+    parts[#parts + 1] = 'summary ' .. summary_input .. '/' .. summary_output .. ' tokens'
+  elseif summary_input then
+    parts[#parts + 1] = 'summary ' .. summary_input .. ' tokens in'
+  elseif summary_output then
+    parts[#parts + 1] = 'summary ' .. summary_output .. ' tokens out'
+  end
+  if #parts == 0 then
+    return headline
+  end
+  return headline .. ' — ' .. table.concat(parts, ', ')
+end
+
+local function compaction_start_item(snapshot)
+  return {
+    kind = 'session_compaction',
+    phase = 'start',
+    snapshot = vim.deepcopy(snapshot),
+  }
+end
+
+local function compaction_complete_item(data)
+  local item = {
+    kind = 'session_compaction',
+    phase = 'complete',
+    success = data.success == true,
+    checkpoint_number = tonumber(data.checkpointNumber) or nil,
+    checkpoint_path = sanitize_permission_text(data.checkpointPath),
+    pre_compaction_tokens = tonumber(data.preCompactionTokens) or nil,
+    pre_compaction_messages = tonumber(data.preCompactionMessagesLength) or nil,
+  }
+  local used = type(data.compactionTokensUsed) == 'table' and data.compactionTokensUsed or {}
+  item.compaction_tokens_used = {
+    model = sanitize_permission_text(used.model),
+    input_tokens = tonumber(used.inputTokens) or nil,
+    output_tokens = tonumber(used.outputTokens) or nil,
+  }
+  return item
+end
+
+local function entry_compaction_start_snapshot(entry)
+  local items = type(entry) == 'table' and type(entry.activity_items) == 'table' and entry.activity_items or {}
+  for _, item in ipairs(items) do
+    if type(item) == 'table' and item.kind == 'session_compaction' and item.phase == 'start' then
+      return type(item.snapshot) == 'table' and item.snapshot or nil
+    end
+  end
+  return nil
+end
+
+local function handle_compaction_start(data)
+  local snapshot = build_compaction_start_snapshot(data)
+  local index = append_entry('activity', format_compaction_start_line(snapshot), nil, {
+    activity_items = { compaction_start_item(snapshot) },
+  })
+  pending_compaction_activity = {
+    session_id = state.session_id,
+    entry_index = index,
+  }
+end
+
+local function handle_compaction_complete(data)
+  local pending = pending_compaction_activity
+  pending_compaction_activity = nil
+  if pending and pending.session_id == state.session_id then
+    local intervening_activity = false
+    for idx = (tonumber(pending.entry_index) or 0) + 1, #state.entries do
+      local between = state.entries[idx]
+      if type(between) == 'table' and between.kind == 'activity' then
+        intervening_activity = true
+        break
+      end
+    end
+    local entry = state.entries[pending.entry_index]
+    if not intervening_activity and type(entry) == 'table' and entry.kind == 'activity' then
+      local snapshot = entry_compaction_start_snapshot(entry)
+      if snapshot then
+        entry.content = format_compaction_complete_line(data, snapshot)
+        entry.activity_items = entry.activity_items or {}
+        entry.activity_items[#entry.activity_items + 1] = compaction_complete_item(data)
+        invalidate_frozen_render_from(pending.entry_index)
+        schedule_render()
+        return
+      end
+    end
+  end
+
+  append_entry('activity', format_compaction_complete_line(data, nil), nil, {
+    activity_items = { compaction_complete_item(data) },
+  })
+end
+
 local function flush_recent_activity_summary()
   local lines = state.recent_activity_lines or {}
   local items = state.recent_activity_items or {}
+  local appended_activity = false
   if #items > 0 then
     local file_lines, file_items = {}, {}
     local other_lines, other_items = {}, {}
@@ -1515,6 +1699,7 @@ local function flush_recent_activity_summary()
         entry_data.code_change = code_change
       end
       append_entry('activity', table.concat(group_lines, '\n'), nil, entry_data)
+      appended_activity = true
     end
 
     append_group(file_lines, file_items, true)
@@ -1523,11 +1708,15 @@ local function flush_recent_activity_summary()
     append_entry('activity', table.concat(lines, '\n'), nil, {
       activity_items = items,
     })
+    appended_activity = true
   end
 
   state.recent_activity_lines = {}
   state.recent_activity_items = {}
   state.recent_activity_tool_calls = {}
+  if appended_activity then
+    pending_compaction_activity = nil
+  end
 end
 
 local function schedule_overlay_tool_clear(delay_ms, run_id)
@@ -1592,6 +1781,7 @@ local function reset_live_activity_state()
   state.active_assistant_merge_group = nil
   state.assistant_chunk_state = {}
   state.current_intent = nil
+  pending_compaction_activity = nil
   clear_reasoning_preview('live activity reset')
 end
 
@@ -1751,11 +1941,19 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
     return
   end
 
+  local debug_reconnect = should_log(vim.log.levels.DEBUG)
+
   state.event_stream_recovery_session_id = session_id
   state.history_loading = false
   state.chat_busy = false
   refresh_statuslines()
   append_entry('system', 'Event stream disconnected. Reconnecting...')
+
+  if debug_reconnect then
+    local detail =
+      string.format('SSE exit code=%s stderr=%s session=%s base_url=%s', tostring(code), tostring(stderr_message or ''):sub(1, 200), tostring(session_id), tostring(state.config.base_url or ''))
+    notify(detail, vim.log.levels.DEBUG)
+  end
 
   service.ensure_service_live(function(service_err)
     if neovim_is_exiting() then
@@ -1774,6 +1972,10 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
       return
     end
 
+    if debug_reconnect then
+      notify(string.format('Service alive at %s, resuming session %s', tostring(state.config.base_url or ''), tostring(session_id)), vim.log.levels.DEBUG)
+    end
+
     state.creating_session = true
     local session = require('copilot_agent.session')
     session.resume_session(session_id, function(_, resume_err)
@@ -1786,6 +1988,9 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
         return
       end
       if resume_err and session.is_missing_session_error(resume_err) then
+        if debug_reconnect then
+          notify(string.format('Session %s missing on server, recovering after restart', tostring(session_id)), vim.log.levels.DEBUG)
+        end
         session.recover_after_service_restart(session_id, function(_, recovery_err)
           if neovim_is_exiting() then
             state.event_stream_recovery_session_id = nil
@@ -1794,6 +1999,8 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
           state.event_stream_recovery_session_id = nil
           if recovery_err then
             append_entry('error', 'Failed to recover event stream: ' .. recovery_err)
+          elseif debug_reconnect then
+            notify('Session recovered after service restart', vim.log.levels.DEBUG)
           end
         end)
         return
@@ -1801,6 +2008,8 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
       state.event_stream_recovery_session_id = nil
       if resume_err then
         append_entry('error', 'Failed to recover event stream: ' .. resume_err)
+      elseif debug_reconnect then
+        notify(string.format('SSE reconnected session=%s url=%s', tostring(session_id), tostring(state.config.base_url or '')), vim.log.levels.DEBUG)
       end
     end, {
       guard_current_session_id = session_id,
@@ -2358,6 +2567,9 @@ local function handle_host_event(event_name, payload)
     state.permission_mode = data.mode or state.permission_mode
     refresh_statuslines()
   elseif event_name == 'host.history_done' then
+    if should_log(vim.log.levels.DEBUG) then
+      notify(string.format('History replay finished session=%s entries=%d', tostring(state.session_id), #state.entries), vim.log.levels.DEBUG)
+    end
     state.history_loading = false
     state.history_replay_turn_index = 0
     state.history_checkpoint_ids = nil
@@ -3309,6 +3521,16 @@ local function handle_session_event(payload)
     return
   end
 
+  if event_type == 'session.compaction_start' then
+    handle_compaction_start(data)
+    return
+  end
+
+  if event_type == 'session.compaction_complete' then
+    handle_compaction_complete(data)
+    return
+  end
+
   if event_type == 'assistant.usage' then
     local usage = state.last_assistant_usage or assistant_usage.capture(data, { record_activity = false })
     local primary_quota = usage and usage.primary_quota or nil
@@ -3534,6 +3756,11 @@ function M.start_event_stream(session_id)
   state.history_loading = true -- suppress rendering until host.history_done arrives
   state.history_replay_turn_index = 0
   state.history_pending_user_entries = {}
+
+  if should_log(vim.log.levels.DEBUG) then
+    notify(string.format('Starting SSE stream session=%s history=true', tostring(session_id)), vim.log.levels.DEBUG)
+  end
+
   preload_history_checkpoint_ids(session_id)
   refresh_statuslines()
 

@@ -897,6 +897,86 @@ describe('service coordination', function()
   end)
 end)
 
+describe('compaction activity events', function()
+  local agent
+  local events
+  local render
+
+  before_each(function()
+    package.loaded['copilot_agent'] = nil
+    package.loaded['copilot_agent.events'] = nil
+    package.loaded['copilot_agent.render'] = nil
+    agent = require('copilot_agent')
+    agent.setup({ auto_create_session = false, auto_start = false, notify = false })
+    events = require('copilot_agent.events')
+    render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+  end)
+
+  it('combines compaction start and complete into one activity when no other activity is appended', function()
+    events.handle_session_event({
+      type = 'session.compaction_start',
+      data = {
+        conversationTokens = 193236,
+        systemTokens = 11800,
+        toolDefinitionsTokens = 12799,
+      },
+    })
+
+    events.handle_session_event({
+      type = 'session.compaction_complete',
+      data = {
+        success = true,
+        checkpointNumber = 4,
+        preCompactionTokens = 156778,
+        preCompactionMessagesLength = 90,
+        compactionTokensUsed = {
+          model = 'claude-opus-4.6',
+          inputTokens = 159751,
+          outputTokens = 3448,
+        },
+      },
+    })
+
+    assert_eq(1, #agent.state.entries)
+    local entry = agent.state.entries[1]
+    assert_eq('activity', entry.kind)
+    assert_true(entry.content:find('Compaction completed', 1, true) ~= nil)
+    assert_true(entry.content:find('checkpoint #4', 1, true) ~= nil)
+    assert_true(entry.content:find('conversation', 1, true) ~= nil)
+    assert_eq(2, #entry.activity_items)
+    assert_eq('start', entry.activity_items[1].phase)
+    assert_eq('complete', entry.activity_items[2].phase)
+  end)
+
+  it('keeps compaction complete separate when another activity is appended in between', function()
+    events.handle_session_event({
+      type = 'session.compaction_start',
+      data = {
+        conversationTokens = 193236,
+      },
+    })
+
+    render.append_entry('activity', 'Refreshing session context')
+
+    events.handle_session_event({
+      type = 'session.compaction_complete',
+      data = {
+        success = true,
+        checkpointNumber = 5,
+      },
+    })
+
+    assert_eq(3, #agent.state.entries)
+    assert_true(agent.state.entries[1].content:find('Compaction started', 1, true) ~= nil)
+    assert_true(agent.state.entries[2].content:find('Refreshing session context', 1, true) ~= nil)
+    assert_true(agent.state.entries[3].content:find('Compaction completed', 1, true) ~= nil)
+    assert_eq(1, #(agent.state.entries[1].activity_items or {}))
+    assert_eq('complete', (agent.state.entries[3].activity_items or {})[1].phase)
+  end)
+end)
+
 describe('user commands', function()
   before_each(function()
     package.loaded['copilot_agent'] = nil

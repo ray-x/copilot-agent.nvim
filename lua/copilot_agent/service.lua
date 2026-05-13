@@ -793,7 +793,20 @@ function M.ensure_service_running(callback)
   end
 
   if state.config.service.auto_start ~= true then
-    callback('service auto_start is disabled')
+    M.check_service_health(function(healthy, err, status)
+      if healthy then
+        callback(nil)
+        return
+      end
+      local message = err
+      if not message then
+        message = 'service auto_start is disabled'
+        if status then
+          message = message .. ' with status ' .. tostring(status)
+        end
+      end
+      callback(message)
+    end)
     return
   end
 

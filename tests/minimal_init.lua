@@ -98,6 +98,81 @@ table.insert(package.loaders, 2, function(modname)
   end
 end)
 
+local function find_free_port()
+  local tcp = assert(vim.uv.new_tcp())
+  assert(tcp:bind('127.0.0.1', 0))
+  local addr = tcp:getsockname()
+  tcp:close()
+  if type(addr) == 'table' then
+    return tonumber(addr.port or addr[2])
+  end
+  return nil
+end
+
+local shared_service_port = find_free_port()
+if not shared_service_port then
+  error('failed to allocate a shared Copilot service port')
+end
+
+local shared_service_url = string.format('http://127.0.0.1:%d', shared_service_port)
+local shared_service_socket = vim.fn.stdpath('state') .. '/copilot-agent.sock'
+
+local function start_shared_service()
+  local binary = dev_root .. '/bin/copilot-agent'
+  local args
+  if vim.fn.executable(binary) == 1 then
+    args = { binary, '-addr', '127.0.0.1:' .. tostring(shared_service_port), '-control-socket', shared_service_socket, '-lsp=false' }
+  else
+    args = { 'go', 'run', '.', '-addr', '127.0.0.1:' .. tostring(shared_service_port), '-control-socket', shared_service_socket, '-lsp=false' }
+  end
+
+  local job_id = vim.fn.jobstart(args, {
+    cwd = dev_root .. '/server',
+    detach = 1,
+  })
+  if job_id <= 0 then
+    error('failed to start shared Copilot service')
+  end
+
+  local ready = vim.wait(30000, function()
+    local output = vim.fn.system({
+      'curl',
+      '-sS',
+      '--max-time',
+      '1',
+      shared_service_url .. '/healthz',
+    })
+    return vim.v.shell_error == 0 and type(output) == 'string' and output ~= ''
+  end, 100)
+  if not ready then
+    error('timed out waiting for shared Copilot service')
+  end
+end
+
+start_shared_service()
+
+vim.g.copilot_agent_shared_base_url = shared_service_url
+_G.copilot_agent_shared_base_url = shared_service_url
+
+package.preload['copilot_agent'] = function()
+  local mod = dofile(dev_lua .. 'copilot_agent/init.lua')
+  if type(mod) == 'table' and type(mod.setup) == 'function' then
+    local original_setup = mod.setup
+    mod.setup = function(opts)
+      local normalized = vim.deepcopy(opts or {})
+      local shared_base_url = rawget(_G, 'copilot_agent_shared_base_url')
+      if (type(normalized.base_url) ~= 'string' or vim.trim(normalized.base_url) == '') and type(shared_base_url) == 'string' and shared_base_url ~= '' then
+        normalized.base_url = shared_base_url
+        normalized.service = vim.tbl_deep_extend('force', normalized.service or {}, {
+          auto_start = true,
+        })
+      end
+      return original_setup(normalized)
+    end
+  end
+  return mod
+end
+
 local function append_dependency(name)
   local data = vim.fn.stdpath('data')
   local candidates = {
@@ -118,6 +193,20 @@ end
 
 append_dependency('plenary.nvim')
 vim.cmd('silent! packadd plenary.nvim')
+
+vim.api.nvim_create_autocmd('VimLeavePre', {
+  callback = function()
+    if type(shared_service_url) == 'string' and shared_service_url ~= '' then
+      pcall(vim.fn.system, {
+        'curl',
+        '-sS',
+        '-X',
+        'POST',
+        shared_service_url .. '/shutdown',
+      })
+    end
+  end,
+})
 
 vim.opt.swapfile = false
 vim.opt.backup = false

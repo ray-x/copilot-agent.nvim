@@ -17,12 +17,30 @@ local is_connection_error = utils.is_connection_error
 
 local M = {}
 
+local function effective_base_url()
+  local base_url = normalize_base_url(state.config.base_url)
+  if type(base_url) == 'string' and base_url ~= '' then
+    return base_url
+  end
+
+  local shared = rawget(_G, 'copilot_agent_shared_base_url')
+  if shared == nil and type(vim.g) == 'table' then
+    shared = vim.g.copilot_agent_shared_base_url
+  end
+  shared = normalize_base_url(shared)
+  if type(shared) == 'string' and shared ~= '' then
+    return shared
+  end
+
+  return base_url
+end
+
 function M.build_url(path)
-  return normalize_base_url(state.config.base_url) .. path
+  return effective_base_url() .. path
 end
 
 local function has_base_url()
-  local base_url = normalize_base_url(state.config.base_url)
+  local base_url = effective_base_url()
   return type(base_url) == 'string' and base_url ~= ''
 end
 

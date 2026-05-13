@@ -1369,9 +1369,14 @@ local function adopt_pending_assistant_entry(message_id)
   return index
 end
 
+local live_turn_render_allowed
+
 local function active_turn_entry_index()
   local pending_turn = state.pending_checkpoint_turn
-  if state.history_loading or not pending_turn or pending_turn.session_id ~= state.session_id then
+  if not pending_turn or pending_turn.session_id ~= state.session_id then
+    return nil
+  end
+  if state.history_loading and not live_turn_render_allowed() then
     return nil
   end
   local index = state.active_turn_assistant_index
@@ -1379,6 +1384,11 @@ local function active_turn_entry_index()
     return nil
   end
   return index
+end
+
+live_turn_render_allowed = function()
+  local pending_turn = state.pending_checkpoint_turn
+  return state.history_loading == true and type(pending_turn) == 'table' and pending_turn.session_id == state.session_id
 end
 
 local function current_assistant_merge_group(create_if_missing)
@@ -1448,7 +1458,7 @@ local function bind_live_assistant_entry(index)
 end
 
 local function trailing_assistant_entry_index()
-  if state.history_loading or state.chat_busy ~= true then
+  if (state.history_loading and not live_turn_render_allowed()) or state.chat_busy ~= true then
     return nil
   end
   local index = state.live_assistant_entry_index
@@ -2833,7 +2843,7 @@ function M.overlay_bottom_topline(line_count, win_height, padding)
 end
 
 local function auto_follow_active_conversation()
-  if state.history_loading then
+  if state.history_loading and not live_turn_render_allowed() then
     return false
   end
   if not state.active_conversation_entry_index then
@@ -3238,7 +3248,7 @@ local stream_pending = false
 
 function M.render_chat()
   state.render_pending = false
-  if state.history_loading then
+  if state.history_loading and not live_turn_render_allowed() then
     return
   end
   local bufnr = state.chat_bufnr
@@ -3383,7 +3393,7 @@ end
 -- ── Debounced / incremental render ────────────────────────────────────────────
 
 function M.schedule_render()
-  if state.render_pending or state.history_loading then
+  if state.render_pending or (state.history_loading and not live_turn_render_allowed()) then
     return
   end
   state.render_pending = true
@@ -3394,7 +3404,7 @@ end
 -- render_chat and stream_update can reference them.
 
 function M.stream_update(entry, idx)
-  if state.history_loading then
+  if state.history_loading and not live_turn_render_allowed() then
     return
   end
   -- Stash latest entry/idx so the deferred callback uses the most recent data.
@@ -3520,7 +3530,7 @@ function M.append_entry(kind, content, attachments, opts)
 
   -- When the user sends a new prompt, freeze everything rendered so far so
   -- that subsequent render_chat() calls only rebuild the current conversation.
-  if kind == 'user' and not state.history_loading then
+  if kind == 'user' and (not state.history_loading or live_turn_render_allowed()) then
     M.freeze_current_buffer()
   end
 
@@ -3529,14 +3539,14 @@ function M.append_entry(kind, content, attachments, opts)
   if kind == 'assistant' then
     bind_assistant_merge_group(idx)
   end
-  if kind == 'user' and not state.history_loading then
+  if kind == 'user' and (not state.history_loading or live_turn_render_allowed()) then
     state.active_conversation_entry_index = idx
     state.chat_follow_topline = nil
     state.chat_auto_scroll_enabled = true
   end
   state.stream_line_start = nil
 
-  if state.history_loading then
+  if state.history_loading and not live_turn_render_allowed() then
     return idx
   end
 

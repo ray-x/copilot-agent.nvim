@@ -839,11 +839,15 @@ local function session_cleanup_command(args)
 end
 
 local function parse_session_prune_args(args)
+  local usage = 'Usage: /session prune (--older-than <days> [--include-named] | --keep-last <count> [--session <id>]) [--dry-run]'
   local tokens = vim.split(vim.trim(args or ''), '%s+', { trimempty = true })
   local parsed = {
     dry_run = false,
     include_named = false,
     older_than_days = nil,
+    keep_last = nil,
+    session_id = nil,
+    mode = nil,
   }
 
   local idx = 1
@@ -857,26 +861,77 @@ local function parse_session_prune_args(args)
       idx = idx + 1
       local value = tonumber(tokens[idx] or '')
       if not value or value < 0 then
-        return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+        return nil, usage
       end
       parsed.older_than_days = value
+    elseif token == '--keep-last' then
+      idx = idx + 1
+      local value = tonumber(tokens[idx] or '')
+      if not value or value < 1 then
+        return nil, usage
+      end
+      parsed.keep_last = math.floor(value)
+    elseif token == '--session' then
+      idx = idx + 1
+      local value = vim.trim(tokens[idx] or '')
+      if value == '' then
+        return nil, usage
+      end
+      parsed.session_id = value
     else
       local inline = token:match('^%-%-older%-than=(.+)$')
       if inline then
         local value = tonumber(inline)
         if not value or value < 0 then
-          return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+          return nil, usage
         end
         parsed.older_than_days = value
       else
-        return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+        inline = token:match('^%-%-keep%-last=(.+)$')
+        if inline then
+          local value = tonumber(inline)
+          if not value or value < 1 then
+            return nil, usage
+          end
+          parsed.keep_last = math.floor(value)
+        else
+          inline = token:match('^%-%-session=(.+)$')
+          if inline then
+            inline = vim.trim(inline)
+            if inline == '' then
+              return nil, usage
+            end
+            parsed.session_id = inline
+          elseif vim.startswith(token, '--') then
+            return nil, usage
+          elseif not parsed.session_id then
+            parsed.session_id = token
+          else
+            return nil, usage
+          end
+        end
       end
     end
     idx = idx + 1
   end
 
-  if parsed.older_than_days == nil then
-    return nil, 'Usage: /session prune --older-than <days> [--dry-run] [--include-named]'
+  if parsed.older_than_days ~= nil and parsed.keep_last ~= nil then
+    return nil, usage
+  end
+
+  if parsed.older_than_days ~= nil then
+    parsed.mode = 'sessions'
+  elseif parsed.keep_last ~= nil then
+    parsed.mode = 'checkpoints'
+  else
+    return nil, usage
+  end
+
+  if parsed.mode == 'sessions' and parsed.session_id then
+    return nil, usage
+  end
+  if parsed.mode == 'checkpoints' and parsed.include_named then
+    return nil, usage
   end
   return parsed, nil
 end
@@ -924,10 +979,76 @@ local function append_session_prune_report(title, opts, candidates, skipped, fai
   append_entry('system', table.concat(lines, '\n'))
 end
 
+local function append_checkpoint_prune_report(title, target, parsed, total, result, dry_run)
+  local summary = target and target.session and target.session.summary or nil
+  local session_id = target and target.session_id or state.session_id or '<unknown>'
+  local removed = result and (tonumber(result.removed) or 0) or math.max(total - parsed.keep_last, 0)
+  local kept = result and (tonumber(result.kept) or 0) or math.min(total, parsed.keep_last)
+  local lines = {
+    title,
+    '  Mode: checkpoints',
+    '  Session: ' .. session_label(session_id, summary),
+    '  Keep last: ' .. tostring(parsed.keep_last),
+    '  Current checkpoints: ' .. tostring(total),
+  }
+
+  if dry_run then
+    lines[#lines + 1] = '  Would remove: ' .. tostring(removed)
+  else
+    lines[#lines + 1] = '  Removed: ' .. tostring(removed)
+    lines[#lines + 1] = '  Kept: ' .. tostring(kept)
+  end
+
+  if result and result.first_kept then
+    lines[#lines + 1] = '  First kept: ' .. tostring(result.first_kept)
+  end
+  if result and result.last_kept then
+    lines[#lines + 1] = '  Last kept: ' .. tostring(result.last_kept)
+  end
+  if removed == 0 then
+    lines[#lines + 1] = '  No checkpoint pruning needed.'
+  end
+
+  append_entry('system', table.concat(lines, '\n'))
+end
+
 local function session_prune_command(args)
   local parsed, parse_err = parse_session_prune_args(args)
   if parse_err then
     append_entry('error', parse_err)
+    return true
+  end
+
+  if parsed.mode == 'checkpoints' then
+    resolve_session_target(parsed.session_id or '', {
+      missing_message = 'No active session to prune checkpoints for',
+      allow_raw_id = true,
+    }, function(target, err)
+      if err then
+        append_entry('error', err)
+        return
+      end
+
+      local checkpoint_info = target.checkpoint_info or checkpoints.session_info(target.session_id)
+      local total = tonumber(checkpoint_info and checkpoint_info.checkpoint_count) or #(checkpoints.list(target.session_id) or {})
+      if parsed.dry_run then
+        append_checkpoint_prune_report('Session prune preview:', target, parsed, total, nil, true)
+        return
+      end
+
+      local result, prune_err = checkpoints.prune_history(target.session_id, parsed.keep_last)
+      if prune_err then
+        append_entry('error', 'Failed to prune checkpoints: ' .. tostring(prune_err))
+        return
+      end
+
+      append_checkpoint_prune_report('Session prune:', target, parsed, total, result, false)
+    end)
+    return true
+  end
+
+  if parsed.mode ~= 'sessions' then
+    append_entry('error', 'Unsupported prune mode')
     return true
   end
 
@@ -1135,13 +1256,137 @@ local function allow_all_command()
   return true
 end
 
-local function context_command()
-  if not state.context_tokens or not state.context_limit or state.context_limit <= 0 then
-    notify('Context window usage is not available yet for this session', vim.log.levels.INFO)
-    return true
+local function latest_usage_snapshot()
+  if type(state.last_assistant_usage) == 'table' then
+    return state.last_assistant_usage
   end
-  local percent = math.floor((state.context_tokens / state.context_limit) * 100 + 0.5)
-  append_entry('system', string.format('Context window: %d / %d tokens (%d%%)', state.context_tokens, state.context_limit, percent))
+  if type(state.last_assistant_usage_snapshot) == 'table' then
+    return state.last_assistant_usage_snapshot
+  end
+  return nil
+end
+
+local function format_usage_snapshot_percentage(value)
+  local rem_num = tonumber(value)
+  if rem_num == nil then
+    return nil
+  end
+  if rem_num >= 0 and rem_num <= 1 then
+    rem_num = rem_num * 100
+  end
+  return string.format('%d%%', math.floor(rem_num + 0.5))
+end
+
+local function append_usage_snapshot_lines(lines, usage)
+  if type(usage) ~= 'table' then
+    return false
+  end
+
+  local primary = type(usage.primary_quota) == 'table' and usage.primary_quota or (type(usage.quotas) == 'table' and usage.quotas[1])
+  if primary then
+    local label = tostring(primary.display_name or primary.id or '<quota>')
+    local used = tonumber(primary.used_requests) or tonumber(primary.used) or nil
+    local total = tonumber(primary.entitlement_requests) or tonumber(primary.entitlement) or nil
+    local rem_str = format_usage_snapshot_percentage(primary.remaining_percentage)
+    local quota_line = '  Quota: ' .. label
+    if total and total > 0 then
+      quota_line = quota_line .. string.format(' %d/%d', (used or 0), total)
+    elseif used and used > 0 then
+      quota_line = quota_line .. ' ' .. tostring(used)
+    end
+    if rem_str then
+      quota_line = quota_line .. ' (' .. rem_str .. ')'
+    end
+    lines[#lines + 1] = quota_line
+  end
+
+  if usage.model or usage.input_tokens or usage.output_tokens or usage.cost or usage.duration_ms then
+    local metrics = {
+      'model=' .. tostring(usage.model or '<unknown>'),
+      'cost=' .. tostring(usage.cost or '<unknown>'),
+      'input=' .. tostring(usage.input_tokens or '<unknown>'),
+      'output=' .. tostring(usage.output_tokens or '<unknown>'),
+    }
+    if usage.reasoning_tokens ~= nil then
+      metrics[#metrics + 1] = 'reasoning=' .. tostring(usage.reasoning_tokens)
+    end
+    if usage.cache_read_tokens ~= nil then
+      metrics[#metrics + 1] = 'cache_read=' .. tostring(usage.cache_read_tokens)
+    end
+    if usage.cache_write_tokens ~= nil then
+      metrics[#metrics + 1] = 'cache_write=' .. tostring(usage.cache_write_tokens)
+    end
+    if usage.duration_ms ~= nil then
+      metrics[#metrics + 1] = 'duration=' .. tostring(usage.duration_ms) .. 'ms'
+    end
+    lines[#lines + 1] = '  Last usage: ' .. table.concat(metrics, ' ')
+  end
+
+  return true
+end
+
+local function format_context_percentage(tokens, total)
+  local token_num = tonumber(tokens)
+  local total_num = tonumber(total)
+  if not token_num or not total_num or total_num <= 0 then
+    return nil
+  end
+  return math.floor((token_num / total_num) * 100 + 0.5)
+end
+
+local function append_context_breakdown_lines(lines, context_window)
+  if type(context_window) ~= 'table' then
+    return false
+  end
+
+  local current_tokens = tonumber(context_window.currentTokens)
+  local token_limit = tonumber(context_window.tokenLimit)
+  if not current_tokens or not token_limit or token_limit <= 0 then
+    return false
+  end
+
+  local current_percent = format_context_percentage(current_tokens, token_limit) or 0
+  lines[#lines + 1] = string.format('  Context window: %d / %d tokens (%d%%)', current_tokens, token_limit, current_percent)
+
+  local categories = {
+    { label = 'System/Tools', tokens = tonumber(context_window.systemToolsTokens), extra = nil },
+    { label = 'Messages', tokens = tonumber(context_window.conversationTokens), extra = tonumber(context_window.messagesLength) },
+    { label = 'Free space', tokens = tonumber(context_window.freeTokens), extra = nil },
+    { label = 'Buffer', tokens = tonumber(context_window.bufferTokens), extra = nil },
+  }
+  for _, category in ipairs(categories) do
+    if category.tokens then
+      local percent = format_context_percentage(category.tokens, token_limit) or 0
+      local line = string.format('  %s: %d tokens (%d%%)', category.label, category.tokens, percent)
+      if category.label == 'Messages' and category.extra then
+        line = line .. string.format(' across %d messages', category.extra)
+      end
+      lines[#lines + 1] = line
+    end
+  end
+
+  return true
+end
+
+local function context_command()
+  session.with_session(function(session_id)
+    request('GET', string.format('/sessions/%s/context', session_id), nil, function(response, err)
+      if err then
+        append_entry('error', 'Failed to fetch context usage: ' .. tostring(err))
+        return
+      end
+
+      local lines = { 'Context usage snapshot:' }
+      local has_context = append_context_breakdown_lines(lines, response and response.contextWindow)
+      local has_usage = append_usage_snapshot_lines(lines, latest_usage_snapshot())
+      if not has_context and not has_usage then
+        notify('Context window usage is not available yet for this session', vim.log.levels.INFO)
+        return
+      end
+
+      append_entry('system', table.concat(lines, '\n'))
+    end)
+  end)
   return true
 end
 
@@ -1164,45 +1409,8 @@ local function usage_command()
     lines[#lines + 1] = string.format('  Context window: %d / %d tokens', state.context_tokens, state.context_limit)
   end
 
-  -- Include the latest assistant usage or persistent usage snapshot when available.
-  local usage = type(state.last_assistant_usage) == 'table' and state.last_assistant_usage or (type(state.last_assistant_usage_snapshot) == 'table' and state.last_assistant_usage_snapshot or nil)
-  if usage then
-    local primary = type(usage.primary_quota) == 'table' and usage.primary_quota or (type(usage.quotas) == 'table' and usage.quotas[1])
-    if primary then
-      local label = tostring(primary.display_name or primary.id or '<quota>')
-      local used = tonumber(primary.used_requests) or tonumber(primary.used) or nil
-      local total = tonumber(primary.entitlement_requests) or tonumber(primary.entitlement) or nil
-      local rem = primary.remaining_percentage
-      local rem_str = nil
-      if rem ~= nil then
-        local rem_num = tonumber(rem)
-        if rem_num ~= nil then
-          if rem_num >= 0 and rem_num <= 1 then
-            rem_num = rem_num * 100
-          end
-          rem_str = string.format('%d%%', math.floor(rem_num + 0.5))
-        end
-      end
-      local quota_line = '  Quota: ' .. label
-      -- Only show used/total when total is a positive number to avoid confusing '0/0'.
-      if total and total > 0 then
-        quota_line = quota_line .. string.format(' %d/%d', (used or 0), total)
-      elseif used and used > 0 then
-        quota_line = quota_line .. ' ' .. tostring(used)
-      end
-      if rem_str then
-        quota_line = quota_line .. ' (' .. rem_str .. ')'
-      end
-      lines[#lines + 1] = quota_line
-    end
-
-    -- Show basic last usage metrics (tokens/cost) if present.
-    if usage.input_tokens or usage.output_tokens or usage.cost then
-      local input = usage.input_tokens and tostring(usage.input_tokens) or '<unknown>'
-      local output = usage.output_tokens and tostring(usage.output_tokens) or '<unknown>'
-      local cost = usage.cost and tostring(usage.cost) or '<unknown>'
-      lines[#lines + 1] = string.format('  Last usage: model=%s cost=%s input=%s output=%s', tostring(usage.model or '<unknown>'), cost, input, output)
-    end
+  if not append_usage_snapshot_lines(lines, latest_usage_snapshot()) then
+    lines[#lines + 1] = '  Last usage: unavailable'
   end
 
   append_entry('system', table.concat(lines, '\n'))

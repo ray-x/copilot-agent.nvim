@@ -287,7 +287,7 @@ local function open_preview_float(title, diff_text, opts)
   vim.bo[buf].readonly = true
   vim.bo[buf].filetype = 'diff'
 
-  local enter = state.activity_hover_opened_by_key == true
+  local enter = type(opts) == 'table' and opts.enter == true
   local win = vim.api.nvim_open_win(buf, enter, {
     relative = config.relative,
     width = config.width,
@@ -295,6 +295,7 @@ local function open_preview_float(title, diff_text, opts)
     row = config.row,
     col = config.col,
     style = 'minimal',
+    focusable = true,
     border = 'rounded',
     title = ' ' .. title .. ' ',
     title_pos = 'center',

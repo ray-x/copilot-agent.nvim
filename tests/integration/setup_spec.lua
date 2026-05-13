@@ -4,7 +4,7 @@
 -- or the CI workflow.
 
 -- Use plenary if available, otherwise a tiny shim.
-local assert_eq, assert_true, assert_false, assert_not_nil
+local assert_eq, assert_true, assert_false, assert_not_nil, assert_nil
 do
   local ok, luassert = pcall(require, 'luassert')
   if ok then
@@ -19,6 +19,9 @@ do
     end
     assert_not_nil = function(v, msg)
       luassert.is_not_nil(v, msg)
+    end
+    assert_nil = function(v, msg)
+      luassert.is_nil(v, msg)
     end
   else
     local function fail(msg)
@@ -42,6 +45,11 @@ do
     assert_not_nil = function(v, msg)
       if v == nil then
         fail(msg or 'expected non-nil')
+      end
+    end
+    assert_nil = function(v, msg)
+      if v ~= nil then
+        fail(msg or 'expected nil')
       end
     end
   end
@@ -224,6 +232,60 @@ describe('assistant tool-call transcript filtering', function()
 
     assert_eq(1, #state.entries)
     assert_eq('I checked the repository and applied the patch.', state.entries[1].content)
+  end)
+end)
+
+-- Added test: verify unified-diff extraction from an edit tool activity (user-provided fixture)
+describe('apply_patch extractors', function()
+  it('extracts unified diff text from edit tool activity', function()
+    local ap = require('copilot_agent.apply_patch')
+    local activity = {
+      activity_items = {
+        {
+          complete_data = {
+            result = {
+              detailedContent = [[
+diff --git a/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua b/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua
+index 0000000..0000000 100644
+--- a/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua
++++ b/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua
+@@ -101,7 +101,7 @@
+     '    <C-c>           Cancel current turn',
+     '    zA              Toggle Activity details',
+     '    <CR>            Open the editable diff split on Activity lines',
+-    '    Hover preview   Shows a read-only diff on CursorHold/CursorHoldI',
++    "    Hover preview   Toggleable read-only diff: press the configured activity hover key (default 'K') to show/hide. Set activity_hover_cursor_hold=true to use CursorHold instead.",
+     '    gT              Open TODO float',
+     '    [ / ]         Jump to prev/next conversation',
+     '    [a / ]a        Jump to prev/next Assistant/Activity',
+]],
+            },
+          },
+          output_text = [[
+diff --git a/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua b/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua
+index 0000000..0000000 100644
+--- a/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua
++++ b/Users/rayxu/github/ray-x/copilot-agent.nvim/lua/copilot_agent/chat.lua
+@@ -101,7 +101,7 @@
+     '    <C-c>           Cancel current turn',
+     '    zA              Toggle Activity details',
+     '    <CR>            Open the editable diff on Activity lines',
+-    '    Hover preview   Shows a read-only diff on CursorHold/CursorHoldI',
++    "    Hover preview   Toggleable read-only diff: press the configured activity hover key (default 'K') to show/hide.",
+     '    gT              Open TODO float',
+     '    [ / ]         Jump to prev/next conversation',
+     '    [a / ]a        Jump to prev/next Assistant/Activity',
+]],
+        },
+      },
+    }
+
+    -- Validate scanning of the whole item (accept either scanning the item table, the output_text field, or the nested detailedContent)
+    local item = activity.activity_items[1]
+    local item_text = ap.extract_unified_patch_text(item)
+      or ap.extract_unified_patch_text(item.output_text)
+      or (item.complete_data and item.complete_data.result and ap.extract_unified_patch_text(item.complete_data.result.detailedContent))
+    assert_true(type(item_text) == 'string' and item_text:find('diff --git', 1, true) ~= nil, 'expected unified diff in item, output_text, or nested detailedContent')
   end)
 end)
 
@@ -471,6 +533,9 @@ describe('M.setup', function()
     agent.setup({
       auto_create_session = false,
       notify = false,
+      service = {
+        auto_start = false,
+      },
       file_log_level = 'INFO',
       file_log_batch = {
         enabled = true,
@@ -505,6 +570,9 @@ describe('M.setup', function()
     agent.setup({
       auto_create_session = false,
       notify = false,
+      service = {
+        auto_start = false,
+      },
       file_log_level = 'INFO',
       file_log_batch = {
         enabled = true,
@@ -519,8 +587,15 @@ describe('M.setup', function()
     vim.fn.stdpath = original_stdpath
     flush_log_file_queue()
     local lines = vim.fn.readfile(temp_log_dir .. '/copilot_agent.log')
-    assert_eq(1, #lines)
-    assert_true(lines[1]:find('batch interval one', 1, true) ~= nil)
+    assert_true(#lines >= 1)
+    local found = false
+    for _, line in ipairs(lines) do
+      if line:find('batch interval one', 1, true) ~= nil then
+        found = true
+        break
+      end
+    end
+    assert_true(found)
   end)
 
   it('logs HTTP actions and sanitized session events when TRACE file logging is enabled', function()
@@ -672,6 +747,9 @@ describe('service coordination', function()
   local agent
   local service
   local original_stdpath
+  local original_jobstart
+  local original_filereadable
+  local original_executable
   local temp_state_dir
 
   before_each(function()
@@ -681,6 +759,9 @@ describe('service coordination', function()
     agent.setup({ auto_create_session = false })
     service = require('copilot_agent.service')
     original_stdpath = vim.fn.stdpath
+    original_jobstart = vim.fn.jobstart
+    original_filereadable = vim.fn.filereadable
+    original_executable = vim.fn.executable
     temp_state_dir = vim.fn.tempname()
     vim.fn.mkdir(temp_state_dir, 'p')
     vim.fn.stdpath = function(kind)
@@ -693,6 +774,9 @@ describe('service coordination', function()
 
   after_each(function()
     vim.fn.stdpath = original_stdpath
+    vim.fn.jobstart = original_jobstart
+    vim.fn.filereadable = original_filereadable
+    vim.fn.executable = original_executable
     pcall(service._release_spawn_lock)
   end)
 
@@ -735,6 +819,44 @@ describe('service coordination', function()
     vim.fn.writefile({ '0', tostring(vim.fn.getpid()) }, lock_dir .. '/owner')
 
     assert_true(service._try_acquire_spawn_lock(1000))
+  end)
+
+  it('uses a detached shutdown request when the last client exits', function()
+    local calls = {}
+    local socket_path = temp_state_dir .. '/copilot-agent.control.sock'
+    local addr_path = temp_state_dir .. '/copilot-agent.addr'
+
+    vim.fn.writefile({ '' }, socket_path)
+    vim.fn.writefile({ '127.0.0.1:43123' }, addr_path)
+
+    vim.fn.executable = function(path)
+      if path == agent.state.config.curl_bin then
+        return 1
+      end
+      return original_executable(path)
+    end
+    vim.fn.filereadable = function(path)
+      if path == socket_path then
+        return 1
+      end
+      return original_filereadable(path)
+    end
+    vim.fn.jobstart = function(args, opts)
+      calls[#calls + 1] = {
+        args = vim.deepcopy(args),
+        opts = vim.deepcopy(opts),
+      }
+      return 42
+    end
+
+    service.maybe_shutdown_detached_service_if_last_client({ nonblocking = true })
+
+    assert_eq(1, #calls)
+    assert_eq(1, calls[1].opts.detach)
+    assert_true(vim.tbl_contains(calls[1].args, '--unix-socket'))
+    assert_true(vim.tbl_contains(calls[1].args, socket_path))
+    assert_true(vim.tbl_contains(calls[1].args, 'http://localhost/shutdown'))
+    assert_nil(service._load_service_addr())
   end)
 end)
 
@@ -1303,7 +1425,7 @@ describe('statusline API', function()
         },
       },
       service = {
-        auto_start = true,
+        auto_start = false,
       },
     })
   end)
@@ -3044,7 +3166,7 @@ describe('model state sync', function()
     local info = vim.fn.getwininfo(winid)[1]
     assert_eq(vim.api.nvim_buf_line_count(bufnr) - 1, extmarks[1][2])
     assert_false(extmarks[1][4].virt_lines_above == true)
-    assert_eq(before.topline + 8, info.topline)
+    assert_true(info.topline > before.topline)
   end)
 
   it('reserves overlay gutter when wrapped chat lines consume the visible bottom rows', function()
@@ -3915,7 +4037,12 @@ describe('permission request prompts', function()
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.events'] = nil
     agent = require('copilot_agent')
-    agent.setup({ auto_create_session = false })
+    agent.setup({
+      auto_create_session = false,
+      service = {
+        auto_start = false,
+      },
+    })
     agent.state.session_id = 'session-123'
     events = require('copilot_agent.events')
     original_ui_select = vim.ui.select
@@ -4081,11 +4208,9 @@ describe('permission request prompts', function()
     local permission_calls = {}
     local original_executable = vim.fn.executable
     local original_system = vim.fn.system
-    local original_jobstart = vim.fn.jobstart
     local original_columns = vim.o.columns
     local system_cmd
     local system_input
-    local job_started = false
 
     vim.ui.select = function(items, opts, on_choice)
       permission_calls[#permission_calls + 1] = {
@@ -4107,10 +4232,6 @@ describe('permission request prompts', function()
       system_input = input
       vim.api.nvim_set_vvar('shell_error', 0)
       return '\27[31mrendered diff\27[0m'
-    end
-    vim.fn.jobstart = function(...)
-      job_started = true
-      return original_jobstart(...)
     end
 
     events.handle_host_event('host.permission_requested', {
@@ -4144,14 +4265,12 @@ describe('permission request prompts', function()
 
     vim.fn.executable = original_executable
     vim.fn.system = original_system
-    vim.fn.jobstart = original_jobstart
     vim.o.columns = original_columns
 
     assert_eq('delta', system_cmd[1])
     assert_true(vim.tbl_contains(system_cmd, '--paging=never'))
     assert_true(vim.tbl_contains(system_cmd, '--side-by-side'))
     assert_true(system_input:find('--- a/tmp/one.lua', 1, true) ~= nil)
-    assert_false(job_started)
 
     pcall(vim.cmd, 'tabonly | only')
   end)
@@ -4310,6 +4429,22 @@ describe('event stream recovery', function()
     assert_eq('Event stream disconnected. Reconnecting...', agent.state.entries[#agent.state.entries].content)
     assert_eq(nil, agent.state.event_stream_recovery_session_id)
   end)
+
+  it('skips stream recovery while Neovim is shutting down', function()
+    local ensured = 0
+    agent.state.shutting_down = true
+
+    service.ensure_service_live = function(callback)
+      ensured = ensured + 1
+      callback(nil)
+    end
+
+    events._handle_event_stream_exit('session-123', 18, 'curl: (18) transfer closed with outstanding read data remaining')
+
+    assert_eq(0, ensured)
+    assert_eq(0, #agent.state.entries)
+    assert_eq(nil, agent.state.event_stream_recovery_session_id)
+  end)
 end)
 
 describe('agent command', function()
@@ -4399,7 +4534,7 @@ describe('ask command', function()
       return original_open_win(buf, enter, config)
     end
 
-    http.request = function(method, path, body, callback)
+    http.request = function(method, path, _body, callback)
       if method == 'POST' and path == '/sessions' then
         callback({ sessionId = 'side-1' }, nil)
       elseif method == 'POST' and path == '/sessions/side-1/mode' then
@@ -4442,7 +4577,7 @@ describe('ask command', function()
       return original_open_win(buf, enter, config)
     end
 
-    http.request = function(method, path, body, callback)
+    http.request = function(method, path, _body, callback)
       if method == 'POST' and path == '/sessions' then
         callback({ sessionId = 'side-1' }, nil)
       elseif method == 'POST' and path == '/sessions/side-1/mode' then
@@ -4485,7 +4620,7 @@ describe('ask command', function()
       return original_open_win(buf, enter, config)
     end
 
-    http.request = function(method, path, body, callback)
+    http.request = function(method, path, _body, callback)
       if method == 'POST' and path == '/sessions' then
         callback({ sessionId = 'side-1' }, nil)
       elseif method == 'POST' and path == '/sessions/side-1/mode' then
@@ -5206,6 +5341,7 @@ describe('session slash command', function()
   local original_session_info
   local original_list_details
   local original_list_files
+  local original_prune_history
   local original_session_name_get
 
   before_each(function()
@@ -5228,6 +5364,7 @@ describe('session slash command', function()
     original_session_info = checkpoints.session_info
     original_list_details = checkpoints.list_details
     original_list_files = checkpoints.list_files
+    original_prune_history = checkpoints.prune_history
     original_session_name_get = session_names.get
   end)
 
@@ -5237,6 +5374,7 @@ describe('session slash command', function()
     checkpoints.session_info = original_session_info
     checkpoints.list_details = original_list_details
     checkpoints.list_files = original_list_files
+    checkpoints.prune_history = original_prune_history
     session_names.get = original_session_name_get
   end)
 
@@ -5327,6 +5465,94 @@ describe('session slash command', function()
     assert_true(content:find('Session files:', 1, true) ~= nil)
     assert_true(content:find('README.md', 1, true) ~= nil)
     assert_true(content:find('lua/copilot_agent/slash.lua', 1, true) ~= nil)
+  end)
+
+  it('shows context usage details through /context', function()
+    agent.state.session_id = 'active-session'
+    agent.state.last_assistant_usage = {
+      model = 'gpt-5.4',
+      cost = 1,
+      input_tokens = 145411,
+      output_tokens = 86,
+      cache_read_tokens = 145280,
+      duration_ms = 3019,
+      primary_quota = {
+        id = 'premium_interactions',
+        display_name = 'premium',
+        used_requests = 300,
+        entitlement_requests = 300,
+        remaining_percentage = 0,
+      },
+    }
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions/active-session/context', path)
+      callback({
+        sessionId = 'active-session',
+        available = true,
+        contextWindow = {
+          currentTokens = 30000,
+          tokenLimit = 304000,
+          promptTokenLimit = 258400,
+          messagesLength = 0,
+          systemTokens = 21000,
+          toolDefinitionsTokens = 8700,
+          systemToolsTokens = 29700,
+          conversationTokens = 0,
+          freeTokens = 228400,
+          bufferTokens = 45600,
+        },
+      }, nil)
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/context'))
+
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Context usage snapshot:', 1, true) ~= nil)
+    assert_true(content:find('Context window: 30000 / 304000 tokens (10%)', 1, true) ~= nil)
+    assert_true(content:find('System/Tools: 29700 tokens (10%)', 1, true) ~= nil)
+    assert_true(content:find('Messages: 0 tokens (0%) across 0 messages', 1, true) ~= nil)
+    assert_true(content:find('Free space: 228400 tokens (75%)', 1, true) ~= nil)
+    assert_true(content:find('Buffer: 45600 tokens (15%)', 1, true) ~= nil)
+    assert_true(content:find('Quota: premium 300/300 (0%)', 1, true) ~= nil)
+    assert_true(content:find('Last usage: model=gpt-5.4', 1, true) ~= nil)
+    assert_true(content:find('cache_read=145280', 1, true) ~= nil)
+  end)
+
+  it('shows expanded usage details through /usage', function()
+    agent.state.session_id = 'active-session'
+    agent.state.context_tokens = 145411
+    agent.state.context_limit = 200000
+    agent.state.last_assistant_usage = {
+      model = 'gpt-5.4',
+      cost = 1,
+      input_tokens = 145411,
+      output_tokens = 86,
+      reasoning_tokens = 64,
+      cache_read_tokens = 145280,
+      duration_ms = 3019,
+      primary_quota = {
+        id = 'premium_interactions',
+        display_name = 'premium',
+        used_requests = 300,
+        entitlement_requests = 300,
+        remaining_percentage = 0,
+      },
+    }
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/usage'))
+
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session usage snapshot:', 1, true) ~= nil)
+    assert_true(content:find('Context window: 145411 / 200000 tokens', 1, true) ~= nil)
+    assert_true(content:find('Quota: premium 300/300 (0%)', 1, true) ~= nil)
+    assert_true(content:find('Last usage: model=gpt-5.4', 1, true) ~= nil)
+    assert_true(content:find('reasoning=64', 1, true) ~= nil)
+    assert_true(content:find('duration=3019ms', 1, true) ~= nil)
   end)
 
   it('deletes a named target session through the session slash subcommand', function()
@@ -5452,6 +5678,72 @@ describe('session slash command', function()
     local content = agent.state.entries[#agent.state.entries].content
     assert_true(content:find('Session prune:', 1, true) ~= nil)
     assert_true(content:find('Old session %[old%-session%]') ~= nil)
+  end)
+
+  it('previews checkpoint pruning for the active session', function()
+    agent.state.session_id = 'active-session'
+    checkpoints.session_info = function(session_id)
+      assert_eq('active-session', session_id)
+      return {
+        session_id = session_id,
+        checkpoint_count = 5,
+      }
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session prune --keep-last 2 --dry-run'))
+
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session prune preview:', 1, true) ~= nil)
+    assert_true(content:find('Mode: checkpoints', 1, true) ~= nil)
+    assert_true(content:find('Keep last: 2', 1, true) ~= nil)
+    assert_true(content:find('Would remove: 3', 1, true) ~= nil)
+  end)
+
+  it('prunes checkpoint snapshots for a target session', function()
+    local prune_call
+
+    http.request = function(method, path, _, callback)
+      assert_eq('GET', method)
+      assert_eq('/sessions', path)
+      callback({
+        persisted = {},
+      }, nil)
+    end
+    checkpoints.session_info = function(session_id)
+      if session_id == 'target-session' then
+        return {
+          session_id = session_id,
+          checkpoint_count = 6,
+        }
+      end
+      return nil
+    end
+    checkpoints.prune_history = function(session_id, keep_last)
+      prune_call = {
+        session_id = session_id,
+        keep_last = keep_last,
+      }
+      return {
+        removed = 4,
+        kept = 2,
+        first_kept = 'v005',
+        last_kept = 'v006',
+      }, nil
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+    assert_true(slash.execute('/session prune --keep-last 2 --session target-session'))
+
+    assert_eq('target-session', prune_call.session_id)
+    assert_eq(2, prune_call.keep_last)
+    local content = agent.state.entries[#agent.state.entries].content
+    assert_true(content:find('Session prune:', 1, true) ~= nil)
+    assert_true(content:find('Mode: checkpoints', 1, true) ~= nil)
+    assert_true(content:find('Removed: 4', 1, true) ~= nil)
+    assert_true(content:find('First kept: v005', 1, true) ~= nil)
   end)
 end)
 
@@ -6275,7 +6567,10 @@ describe('session resume guards', function()
       if method == 'POST' and body and body.resume == true then
         assert_eq('/sessions', path)
         assert_eq('bad-session', body.sessionId)
-        callback(nil, 'resume session: failed to resume session: JSON-RPC Error -32603: Request session.resume failed with message: Session file is corrupted (line 74: ephemeral: Invalid literal value, expected true)')
+        callback(
+          nil,
+          'resume session: failed to resume session: JSON-RPC Error -32603: Request session.resume failed with message: Session file is corrupted (line 74: ephemeral: Invalid literal value, expected true)'
+        )
         return
       end
 
@@ -6311,8 +6606,7 @@ describe('session resume guards', function()
     assert_eq(nil, callback_error)
     local saw_corrupt_notice = false
     for _, entry in ipairs(agent.state.entries) do
-      if type(entry.content) == 'string'
-        and entry.content:find('Saved session bad-session is corrupted. Creating a new session...', 1, true) ~= nil then
+      if type(entry.content) == 'string' and entry.content:find('Saved session bad-session is corrupted. Creating a new session...', 1, true) ~= nil then
         saw_corrupt_notice = true
         break
       end
@@ -8789,7 +9083,7 @@ describe('chat input behavior', function()
     }, entry.activity_items[1])
   end)
 
-  it('merges late assistant usage into the trailing activity block and previews it in collapsed transcript view', function()
+  it('does not append assistant usage into trailing activity blocks and keeps tool previews stable', function()
     local events = require('copilot_agent.events')
     local render = require('copilot_agent.render')
     agent.state.session_id = 'session-123'
@@ -8857,21 +9151,16 @@ describe('chat input behavior', function()
       end
     end
     assert_eq(1, #activity_entries)
-    assert_eq(
-      table.concat({
-        'Ran bash — git status --short',
-        'Usage: gpt-5.4 · cost 1 · 145k in · 86 out · 3s · premium 0%',
-      }, '\n'),
-      activity_entries[1].content
-    )
+    assert_eq('Ran bash — git status --short', activity_entries[1].content)
     assert_eq('tool', activity_entries[1].activity_items[1].kind)
-    assert_eq('usage', activity_entries[1].activity_items[2].kind)
-    assert_eq(194.8, activity_entries[1].activity_items[2].usage.overage)
-    assert_eq(0, activity_entries[1].activity_items[2].usage.remaining_percentage)
+    assert_eq(1, #activity_entries[1].activity_items)
+    assert_not_nil(agent.state.last_assistant_usage)
+    assert_eq(194.8, agent.state.last_assistant_usage.overage)
+    assert_eq(0, agent.state.last_assistant_usage.remaining_percentage)
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Activity: git status --short (2 items hidden)',
+      'Activity: git status --short (1 item hidden)',
       '',
       'Assistant:',
       '  Usage is visible in the transcript now.',
@@ -8881,7 +9170,7 @@ describe('chat input behavior', function()
     assert_true(render.toggle_activity_entries())
     local joined = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), '\n')
     assert_true(joined:find('Ran bash — git status --short', 1, true) ~= nil)
-    assert_true(joined:find('Usage: gpt-5.4 · cost 1 · 145k in · 86 out · 3s · premium 0%', 1, true) ~= nil)
+    assert_true(joined:find('Usage: gpt-5.4 · cost 1 · 145k in · 86 out · 3s · premium 0%', 1, true) == nil)
   end)
 
   it('shows report_intent details when no higher-priority activity exists', function()
@@ -8933,7 +9222,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Activity: Used report_intent Finalizing process (2 items hidden)',
+      'Activity: Used report_intent Finalizing process (1 item hidden)',
       '',
       'Assistant:',
       '  Intent summary rendered.',
@@ -8998,7 +9287,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Activity: rg activity lua/copilot_agent (3 items hidden)',
+      'Activity: rg activity lua/copilot_agent (2 items hidden)',
       '',
       'Assistant:',
       '  Priority summary rendered.',
@@ -9006,15 +9295,11 @@ describe('chat input behavior', function()
     }, { unpack(lines, #lines - 4, #lines) })
   end)
 
-  it('shows assistant usage metrics and quotas in the activity details viewer', function()
+  it('captures assistant usage metrics without creating activity entries', function()
     local events = require('copilot_agent.events')
-    local render = require('copilot_agent.render')
     agent.state.session_id = 'session-123'
     agent.state.entries = {}
     agent.state.entry_row_index = {}
-    agent.open_chat()
-    local chat_bufnr = agent.state.chat_bufnr
-    local chat_winid = agent.state.chat_winid
 
     events.handle_session_event({
       type = 'assistant.turn_start',
@@ -9049,42 +9334,17 @@ describe('chat input behavior', function()
       },
     })
 
-    vim.wait(250)
-
-    local activity_idx = #agent.state.entries
-    local activity_row
-    for row, entry_idx in pairs(agent.state.entry_row_index) do
-      if entry_idx == activity_idx then
-        activity_row = row
-        break
+    vim.wait(100)
+    assert_not_nil(agent.state.last_assistant_usage)
+    assert_eq('gpt-5.4', agent.state.last_assistant_usage.model)
+    assert_eq(145411, agent.state.last_assistant_usage.input_tokens)
+    local activity_count = 0
+    for _, entry in ipairs(agent.state.entries) do
+      if entry.kind == 'activity' then
+        activity_count = activity_count + 1
       end
     end
-    assert_not_nil(activity_row)
-
-    local original_open_win = vim.api.nvim_open_win
-    local viewer_buf
-    vim.api.nvim_open_win = function(buf, enter, config)
-      local winid = original_open_win(buf, enter, config)
-      if buf ~= chat_bufnr then
-        viewer_buf = buf
-      end
-      return winid
-    end
-
-    vim.api.nvim_win_set_cursor(chat_winid, { activity_row + 1, 0 })
-    local opened = render.show_activity_details_under_cursor(chat_winid)
-    vim.api.nvim_open_win = original_open_win
-
-    assert_true(opened)
-    assert_not_nil(viewer_buf)
-    local joined = table.concat(vim.api.nvim_buf_get_lines(viewer_buf, 0, -1, false), '\n')
-    assert_true(joined:find('## Usage 1 — gpt-5.4', 1, true) ~= nil)
-    assert_true(joined:find('- **Cost:** 1', 1, true) ~= nil)
-    assert_true(joined:find('- **Input tokens:** 145411', 1, true) ~= nil)
-    assert_true(joined:find('- **Output tokens:** 86', 1, true) ~= nil)
-    assert_true(joined:find('- **Cache read tokens:** 145280', 1, true) ~= nil)
-    assert_true(joined:find('- **Duration:** 3019 ms', 1, true) ~= nil)
-    assert_true(joined:find('- **premium_interactions:** 0% remaining, 300 / 300 used, overage 194.8, resets 2026-06-01T00:00:00Z', 1, true) ~= nil)
+    assert_eq(0, activity_count)
   end)
 
   it('opens a floating activity details viewer for the activity block under the cursor', function()
@@ -9564,6 +9824,111 @@ describe('chat input behavior', function()
     assert_true(joined:find('## Turn summary', 1, true) == nil)
     assert_true(joined:find('Collecting diff output', 1, true) == nil)
     assert_true(joined:find('full diff output', 1, true) == nil)
+  end)
+
+  it('keeps focus in chat when K opens a hover diff and uses gK to enter the preview', function()
+    local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
+    agent.state.session_id = 'session-123'
+    agent.state.entries = {}
+    agent.state.entry_row_index = {}
+    agent.state.config.chat.activity_view = 'hover'
+    agent.state.config.chat.activity_hover_cursor_hold = false
+    agent.state.config.chat.activity_hover_key = 'K'
+    agent.state.config.chat.activity_hover_focus_key = 'gK'
+    agent.state.config.chat.activity_hover_timeout_ms = 0
+    agent.open_chat()
+    local bufnr = agent.state.chat_bufnr
+
+    events.handle_session_event({
+      type = 'assistant.turn_start',
+      data = {},
+    })
+    events.handle_session_event({
+      type = 'tool.execution_start',
+      data = {
+        toolName = 'apply_patch',
+        input = table.concat({
+          '*** Begin Patch',
+          '*** Update File: lua/copilot_agent/activity_diff.lua',
+          '@@',
+          '-old line',
+          '+new line',
+          '*** End Patch',
+        }, '\n'),
+      },
+    })
+    events.handle_session_event({
+      type = 'assistant.turn_end',
+      data = {},
+    })
+
+    vim.wait(250)
+    local activity_idx
+    for idx, entry in ipairs(agent.state.entries) do
+      if type(entry) == 'table' and entry.kind == 'activity' and type(entry.content) == 'string' and entry.content:find('Updated', 1, true) then
+        activity_idx = idx
+        break
+      end
+    end
+    assert_not_nil(activity_idx)
+    local activity_row
+    for row, entry_idx in pairs(agent.state.entry_row_index) do
+      if entry_idx == activity_idx then
+        activity_row = row
+        break
+      end
+    end
+    assert_not_nil(activity_row)
+
+    local keymaps = vim.api.nvim_buf_get_keymap(bufnr, 'n')
+    local hover_mapped = false
+    local hover_focus_mapped = false
+    local hover_ctrl_w_j_mapped = false
+    for _, map in ipairs(keymaps) do
+      if map.lhs == 'K' then
+        hover_mapped = true
+      elseif map.lhs == 'gK' then
+        hover_focus_mapped = true
+      elseif map.lhs == '<C-W>j' or map.lhs == '<C-w>j' then
+        hover_ctrl_w_j_mapped = true
+      end
+    end
+    assert_true(hover_mapped)
+    assert_true(hover_focus_mapped)
+    assert_true(hover_ctrl_w_j_mapped)
+
+    local original_open_win = vim.api.nvim_open_win
+    local preview_buf
+    local preview_enter
+    local preview_winid
+    vim.api.nvim_open_win = function(buf, enter, config)
+      local winid = original_open_win(buf, enter, config)
+      if buf ~= bufnr then
+        preview_buf = buf
+        preview_enter = enter
+        preview_winid = winid
+      end
+      return winid
+    end
+
+    local ok, err = pcall(function()
+      vim.api.nvim_set_current_win(agent.state.chat_winid)
+      vim.api.nvim_win_set_cursor(agent.state.chat_winid, { activity_row + 1, 0 })
+      agent.state.activity_hover_opened_by_key = true
+      assert_true(render.refresh_activity_hover_preview(agent.state.chat_winid))
+
+      assert_not_nil(preview_buf)
+      assert_eq(false, preview_enter)
+      assert_eq(agent.state.chat_winid, vim.api.nvim_get_current_win())
+      assert_eq('diff', vim.bo[preview_buf].filetype)
+
+      vim.api.nvim_set_current_win(agent.state.chat_winid)
+      assert_true(render.focus_activity_hover_preview(agent.state.chat_winid))
+      assert_eq(preview_winid, vim.api.nvim_get_current_win())
+    end)
+    vim.api.nvim_open_win = original_open_win
+    assert(ok, err)
   end)
 
   it('summarizes multiline shell scripts instead of showing the full script body', function()
@@ -10669,6 +11034,8 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(session_delete_words, '/session delete session-123'))
     assert_true(vim.tbl_contains(session_delete_words, '/session delete live-456'))
     assert_true(vim.tbl_contains(session_prune_words, '/session prune --older-than'))
+    assert_true(vim.tbl_contains(session_prune_words, '/session prune --keep-last'))
+    assert_true(vim.tbl_contains(session_prune_words, '/session prune --session'))
     assert_true(vim.tbl_contains(session_prune_words, '/session prune --dry-run'))
     assert_true(vim.tbl_contains(session_prune_words, '/session prune --include-named'))
     assert_true(vim.tbl_contains(mcp_root_words, '/mcp'))

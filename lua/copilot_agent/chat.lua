@@ -28,6 +28,7 @@ local append_entry = render.append_entry
 local schedule_render = render.schedule_render
 local refresh_reasoning_overlay = render.refresh_reasoning_overlay
 local refresh_activity_hover_preview = render.refresh_activity_hover_preview
+local focus_activity_hover_preview = render.focus_activity_hover_preview
 local close_activity_hover_preview = render.close_activity_hover_preview
 
 local M = {}
@@ -101,7 +102,7 @@ local function help_lines()
     '    <C-c>           Cancel current turn',
     '    zA              Toggle Activity details',
     '    <CR>            Open the editable diff split on Activity lines',
-    "    Hover preview   Toggleable read-only diff: press the configured activity hover key (default 'K') to show/hide. Set activity_hover_cursor_hold=true to use CursorHold instead.",
+    "    Hover preview   Press the configured activity hover key (default 'K') to show/hide without leaving chat. Press the hover focus key (default 'gK') or <C-w>j to move into the preview.",
     '    gT              Open TODO float',
     '    [[ / ]]         Jump to prev/next conversation',
     '    [a / ]a         Jump to prev/next Assistant/Activity',
@@ -163,6 +164,13 @@ local function ensure_chat_keymaps(bufnr)
   vim.keymap.set('n', 'g?', function()
     render.show_help()
   end, { buffer = bufnr, silent = true, desc = 'Show help' })
+
+  vim.keymap.set('n', '<C-w>j', function()
+    local winid = state.chat_winid or bufnr
+    if not focus_activity_hover_preview(winid) then
+      vim.cmd('wincmd j')
+    end
+  end, { buffer = bufnr, silent = true, desc = 'Focus activity hover preview or move to lower window' })
 end
 
 local function ensure_chat_hover_autocmds(bufnr)
@@ -175,6 +183,7 @@ local function ensure_chat_hover_autocmds(bufnr)
   local chat_cfg = state.config and state.config.chat or {}
   local use_cursor_hold = chat_cfg.activity_hover_cursor_hold
   local hover_key = chat_cfg.activity_hover_key or ''
+  local hover_focus_key = chat_cfg.activity_hover_focus_key or ''
 
   if use_cursor_hold then
     vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
@@ -206,11 +215,24 @@ local function ensure_chat_hover_autocmds(bufnr)
     end
   end
 
+  if hover_focus_key and hover_focus_key ~= '' then
+    vim.keymap.set('n', hover_focus_key, function()
+      local winid = state.chat_winid or bufnr
+      state.activity_hover_opened_by_key = true
+      focus_activity_hover_preview(winid)
+    end, { buffer = bufnr, silent = true, desc = 'Focus activity hover preview' })
+  end
+
   -- Always close hover when the cursor moves or the buffer/window is left.
   vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI', 'BufLeave', 'WinLeave' }, {
     group = group,
     buffer = bufnr,
     callback = function()
+      if state.activity_hover_keep_on_next_chat_winleave then
+        state.activity_hover_keep_on_next_chat_winleave = false
+        return
+      end
+
       -- Allow focusing the activity hover float without closing it. Only close
       -- when the current window is not the hover window (or the hover no longer
       -- exists).

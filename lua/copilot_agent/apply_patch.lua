@@ -309,6 +309,14 @@ local function extract_unified_diff_text(value, visited)
       return found
     end
   end
+
+  -- Fallback: inspect the table to a string and search for embedded diff text.
+  if type(vim) == 'table' and type(vim.inspect) == 'function' then
+    local inspected = vim.inspect(value)
+    visited[value] = nil
+    return extract_unified_diff_text(inspected)
+  end
+
   visited[value] = nil
   return nil
 end

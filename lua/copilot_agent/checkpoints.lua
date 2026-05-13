@@ -529,6 +529,59 @@ function M.list_details(session_id)
     }
 end
 
+function M.prune_history(session_id, keep_last)
+  if type(session_id) ~= 'string' or session_id == '' then
+    return nil, 'session_id is required'
+  end
+
+  keep_last = math.floor(tonumber(keep_last) or 0)
+  if keep_last < 1 then
+    return nil, 'keep_last must be at least 1'
+  end
+
+  local index = load_index(session_id)
+  local checkpoints = index.checkpoints or {}
+  if #checkpoints <= keep_last then
+    return {
+      removed = 0,
+      kept = #checkpoints,
+      total = #checkpoints,
+      first_kept = checkpoints[1] and checkpoints[1].id or nil,
+      last_kept = checkpoints[#checkpoints] and checkpoints[#checkpoints].id or nil,
+    }
+  end
+
+  local keep_from = #checkpoints - keep_last + 1
+  local removed = {}
+  for idx = 1, keep_from - 1 do
+    local item = checkpoints[idx]
+    if type(item) == 'table' then
+      local path = metadata_path(session_id, item.metadata_key or item.id)
+      pcall(os.remove, path)
+      removed[#removed + 1] = item.id
+    end
+  end
+
+  local kept = {}
+  for idx = keep_from, #checkpoints do
+    kept[#kept + 1] = checkpoints[idx]
+  end
+  index.checkpoints = kept
+  index.next_checkpoint_number = math.max(tonumber(index.next_checkpoint_number) or 1, (#kept > 0 and (tonumber((kept[#kept].id or ''):match('^v(%d+)$')) or #kept) + 1) or 1)
+  local ok, err = save_index(session_id, index)
+  if not ok then
+    return nil, err
+  end
+
+  return {
+    removed = #removed,
+    kept = #kept,
+    total = #checkpoints,
+    first_kept = kept[1] and kept[1].id or nil,
+    last_kept = kept[#kept] and kept[#kept].id or nil,
+  }
+end
+
 -- Ensure an initial checkpoint exists for the session. Safe no-op if repo/index already present.
 function M.ensure_initial_checkpoint(session_id, workspace)
   workspace = workspace or checkpoint_workspace()

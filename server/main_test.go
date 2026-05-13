@@ -188,6 +188,56 @@ func TestResolveModelAliasLeavesUnknownModelUnresolved(t *testing.T) {
 	}
 }
 
+func TestBuildContextWindowSnapshotUsesModelPromptLimit(t *testing.T) {
+	t.Parallel()
+
+	maxPromptTokens := 258400
+	client := &fakeCopilotClient{
+		state: copilot.StateConnected,
+		listModelsResp: []copilot.ModelInfo{
+			{
+				ID: "gpt-5.4",
+				Capabilities: copilot.ModelCapabilities{
+					Limits: copilot.ModelLimits{
+						MaxPromptTokens:        &maxPromptTokens,
+						MaxContextWindowTokens: 304000,
+					},
+				},
+			},
+		},
+	}
+	svc := &service{client: client}
+	managed := &managedSession{model: "gpt-5.4"}
+	usage := &contextWindowUsage{
+		CurrentTokens:         30000,
+		TokenLimit:            304000,
+		MessagesLength:        0,
+		SystemTokens:          21000,
+		ToolDefinitionsTokens: 8700,
+		ConversationTokens:    0,
+	}
+
+	snapshot := svc.buildContextWindowSnapshot(context.Background(), managed, usage)
+	if snapshot == nil {
+		t.Fatal("expected context snapshot")
+	}
+	if snapshot.PromptTokenLimit != 258400 {
+		t.Fatalf("expected prompt token limit 258400, got %d", snapshot.PromptTokenLimit)
+	}
+	if snapshot.SystemToolsTokens != 29700 {
+		t.Fatalf("expected system/tools 29700, got %d", snapshot.SystemToolsTokens)
+	}
+	if snapshot.FreeTokens != 228400 {
+		t.Fatalf("expected free tokens 228400, got %d", snapshot.FreeTokens)
+	}
+	if snapshot.BufferTokens != 45600 {
+		t.Fatalf("expected buffer tokens 45600, got %d", snapshot.BufferTokens)
+	}
+	if client.listModelsCalls != 1 {
+		t.Fatalf("expected list models to be called once, got %d", client.listModelsCalls)
+	}
+}
+
 // ── boolOrDefault ─────────────────────────────────────────────────────────────
 
 func TestBoolOrDefaultNilUseFallback(t *testing.T) {
@@ -775,7 +825,7 @@ func TestMarshalReplaySessionEventsHydratesLiveSequenceState(t *testing.T) {
 				Content:   "second snapshot",
 			},
 		},
-	}, false)
+	}, false, 0, 0, 120)
 
 	if count != 2 {
 		t.Fatalf("expected 2 replay payloads, got %d", count)
@@ -809,6 +859,72 @@ func TestMarshalReplaySessionEventsHydratesLiveSequenceState(t *testing.T) {
 	}
 	if live.MessageChunkIndex == nil || *live.MessageChunkIndex != 3 {
 		t.Fatalf("expected live messageChunkIndex to continue at 3, got %+v", live.MessageChunkIndex)
+	}
+}
+
+func TestMarshalReplaySessionEventsKeepsFullAssistantMessages(t *testing.T) {
+	t.Parallel()
+
+	managed := &managedSession{
+		session:             &copilot.Session{SessionID: "session-123"},
+		subscribers:         make(map[chan sseMessage]struct{}),
+		pendingInputs:       make(map[string]*pendingUserInput),
+		pendingPermissions:  make(map[string]*pendingPermission),
+		messageChunkIndexes: make(map[string]uint64),
+	}
+
+	longContent := "No — **the first `K`** opens the hover **and moves focus into it**.\n\nSo the sequence is:\n\n1. Press **`K`** on an activity line\n2. The hover opens and keeps the full assistant text intact."
+	payloads, count := managed.marshalReplaySessionEvents([]copilot.SessionEvent{
+		{Type: "assistant.turn_start"},
+		{
+			Type: copilot.SessionEventTypeAssistantMessage,
+			Data: &copilot.AssistantMessageData{
+				MessageID: "message-1",
+				Content:   longContent,
+			},
+		},
+		{Type: "assistant.turn_end"},
+		{Type: "assistant.turn_start"},
+		{
+			Type: copilot.SessionEventTypeAssistantMessage,
+			Data: &copilot.AssistantMessageData{
+				MessageID: "message-2",
+				Content:   "latest reply",
+			},
+		},
+		{Type: "assistant.turn_end"},
+	}, false, 0, 1, 20)
+
+	if count == 0 || len(payloads) == 0 {
+		t.Fatal("expected replay payloads")
+	}
+
+	found := false
+	for _, payload := range payloads {
+		decoded := decodeSessionEventPayload(t, payload)
+		if decoded.Type != string(copilot.SessionEventTypeAssistantMessage) {
+			continue
+		}
+
+		var data struct {
+			MessageID string `json:"messageId"`
+			Content   string `json:"content"`
+		}
+		if err := json.Unmarshal(decoded.Data, &data); err != nil {
+			t.Fatalf("decode assistant message data: %v", err)
+		}
+		if data.MessageID != "message-1" {
+			continue
+		}
+
+		found = true
+		if data.Content != longContent {
+			t.Fatalf("expected full assistant content to be preserved, got %q", data.Content)
+		}
+	}
+
+	if !found {
+		t.Fatal("expected replay payload for the summarized assistant message")
 	}
 }
 

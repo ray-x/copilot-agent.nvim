@@ -1361,6 +1361,8 @@ local function slash_command_completion_items(completion_request)
     if action == 'prune' then
       local flag_items = {
         '--older-than',
+        '--keep-last',
+        '--session',
         '--dry-run',
         '--include-named',
       }

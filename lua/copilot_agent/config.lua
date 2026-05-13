@@ -23,15 +23,14 @@ local defaults = {
     max_entries = 20, -- Flush immediately once this many queued log lines accumulate.
   },
   service = {
-    auto_start = false,
+    auto_start = true,
     command = nil, -- nil = auto-detect installed binary, then fall back to 'go run .'
     cwd = nil, -- defaults to <plugin_root>/server
     env = nil,
     port_range = nil, -- e.g. '18000-19000'; appended as --port-range when set
     -- detach: run the Go service in a new process group (setsid) so it survives
-    -- Neovim exit. On the next launch the health check finds it still running and
-    -- skips the start-up delay. The bound address is persisted to a state file so
-    -- dynamic-port setups also reconnect correctly.
+    -- across Neovim instances and can be shared. Lifecycle cleanup logic stops
+    -- the detached service when the last Neovim instance exits.
     detach = true,
     healthcheck_path = '/healthz',
     startup_timeout_ms = 15000,
@@ -81,9 +80,19 @@ local defaults = {
     -- Key to toggle activity hover preview when cursor_hold is false. Set to
     -- empty string to disable key-based hover.
     activity_hover_key = 'K',
+    -- Key to move focus into the currently open hover preview. When a preview is
+    -- not open yet, this key opens it first and then focuses the preview window.
+    activity_hover_focus_key = 'gK',
     -- When true, use CursorHold/CursorHoldI autocmds to trigger hover previews
     -- and ignore the hover key. Default: false (prefer explicit key press).
     activity_hover_cursor_hold = false,
+    -- Replay only the most recent N completed turns when loading session history.
+    history_turn_limit = 256,
+    -- Keep full activity detail only for the most recent N turns in replay.
+    -- Older replayed turns are summarized and have large outputs truncated.
+    history_activity_turn_limit = 64,
+    -- Maximum characters kept from assistant/tool outputs when replay is summarized.
+    history_preview_chars = 120,
     -- 'raw' keeps the patch-text float.
     activity_view = 'hover',
     -- File-diff backend for activity_view = 'diff'.
@@ -170,6 +179,7 @@ local state = {
   input_statusline_managed = false, -- true when plugin populated the input window local statusline
   service_job_id = nil,
   service_starting = false,
+  shutting_down = false, -- true during VimLeavePre cleanup; suppress reconnect/recovery noise on intentional shutdown
   service_addr_known = false, -- set true when COPILOT_AGENT_ADDR= line received
   base_url_managed = true, -- true unless setup() was given an explicit base_url
   pending_service_callbacks = {},
@@ -216,6 +226,7 @@ local state = {
   overlay_gutter_restore_view = nil, -- saved manual chat view to restore after temporary overlay gutter scrolling
   pending_checkpoint_turn = nil, -- active turn waiting for a completed-turn checkpoint label
   history_loading = false, -- true while replaying SSE history; suppresses render until done
+  history_replay_turn_index = 0, -- 1-based turn counter used while replaying history
   history_checkpoint_ids = nil, -- replay mapping keyed by assistant message id for completed turns
   history_pending_user_entries = {}, -- replayed user entries waiting for their completed-turn checkpoint label
   pending_user_input = nil, -- last unanswered ask_user request (for retry on dismiss)

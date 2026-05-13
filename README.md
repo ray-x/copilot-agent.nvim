@@ -216,6 +216,9 @@ For most users, this minimal setup is enough:
         streaming = true,
         enable_config_discovery = true,  -- respects .github/copilot-instructions.md etc.
         replay_permission_history = false,  -- false (default) skips permission replay on resume for faster session loads
+        history_turn_limit = 256,       -- only replay the most recent N turns when opening a large session
+        history_activity_turn_limit = 64, -- keep detailed activity only for the most recent N turns (<= history_turn_limit)
+        history_preview_chars = 120,    -- truncation length for summarized historical activity/tool outputs
         auto_resume = "prompt",  -- "prompt" (default) | "auto" — when multiple sessions exist
       },
       service = {
@@ -239,7 +242,8 @@ For most users, this minimal setup is enough:
         activity_view = 'hover',         -- 'hover' (default) opens a read-only preview on cursor idle; 'diff' opens editable file diffs on <CR>; 'raw' keeps the patch-text viewer
         activity_diff_tool = 'native',   -- 'native', 'diffview', 'fugitive', or a custom Vim command name
         -- Hover & preview controls:
-        -- activity_hover_key: string (default: 'K') - key to toggle the read-only hover preview when activity_view='hover'.
+        -- activity_hover_key: string (default: 'K') - key to toggle the read-only hover preview when activity_view='hover' while keeping focus in chat.
+        -- activity_hover_focus_key: string (default: 'gK') - key to move focus into the current hover preview (opens it first if needed).
         -- activity_hover_cursor_hold: boolean (default: false) - when true, show hover on CursorHold/CursorHoldI instead of the hover key.
         -- activity_hover_timeout_ms: number (default: 2500) - auto-close timeout for hover preview in milliseconds (<=0 disables auto-close).
       },
@@ -306,7 +310,7 @@ service = { auto_start = true, command = { "/path/to/copilot-agent" }, port_rang
 
 **Global service vs isolated instances**
 
-By default, `auto_start = true` connects to the shared service if it is already running, otherwise it starts a single detached background service for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default.
+By default, `auto_start = true` connects to the shared service if it is already running, otherwise it starts a single detached background service for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default. On quit, the last Neovim instance now requests detached-service shutdown in the background so exit does not wait on a slow control socket.
 
 The helper LSP reuses that same shared service; it does not spawn a separate Copilot backend.
 
@@ -402,7 +406,9 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `<C-c>` (output)                  | Cancel current turn                                                                                     |
 | `zA` (output)                     | Toggle collapsed `Activity:` transcript blocks                                                          |
 | `<CR>` (output)                   | On Activity lines, open the editable diff split; otherwise open input                                   |
-| `CursorHold` / `CursorHoldI`      | On Activity lines, show the concise read-only hover preview (auto-closes after 2.5s by default)         |
+| `K` (output)                      | Toggle the read-only Activity hover preview while keeping focus in chat                                  |
+| `gK` / `<C-w>j` (output)          | Move focus into the current Activity hover preview (opens it first if needed)                            |
+| `CursorHold` / `CursorHoldI`      | When `activity_hover_cursor_hold=true`, show the concise read-only hover preview on Activity lines       |
 | `[[` / `]]` (output)              | Jump to previous/next conversation (`User:` block)                                                      |
 | `[a` / `]a` (output)              | Jump to previous/next `Assistant:` or `Activity:` block                                                 |
 | `gT` (normal)                     | Open TODO float for the current turn                                                                    |
@@ -425,7 +431,7 @@ The input buffer supports built-in slash commands handled by the plugin before t
 | `/ask`                 | `[question]`                                                           | Ask a side question in a temporary read-only session and show the answer separately                                                                                                                         |
 | `/clear`               | —                                                                      | Clear the current conversation and start a fresh session                                                                                                                                                    |
 | `/compact`             | —                                                                      | Compact session history and refresh context usage                                                                                                                                                           |
-| `/context`             | —                                                                      | Show current context-window token usage                                                                                                                                                                     |
+| `/context`             | —                                                                      | Show current context-window token usage plus the latest quota and usage snapshot                                                                                                                           |
 | `/cwd`                 | `[path]`                                                               | Show or change the working directory used for future session actions                                                                                                                                        |
 | `/diff`                | `[vNNN\|from to\|from..to] [--difftool [name]]`                        | Show a checkpoint diff summary (default shows latest checkpoint changes), or open a visual diff via `--difftool` (`CodeDiff`, `Fugitive`, or native vim diff when no name is provided)                      |
 | `/env`                 | —                                                                      | Show the current environment, service, session, model, and mode snapshot                                                                                                                                    |
@@ -447,12 +453,12 @@ The input buffer supports built-in slash commands handled by the plugin before t
 | `/review`              | `[focus]`                                                              | Ask Copilot to review the current changes, optionally with extra focus text                                                                                                                                 |
 | `/rewind`              | `[checkpoint]`                                                         | Rewind the session to a checkpoint such as `v003`, then queue the target git hash and reverted checkpoint summaries into the next Copilot prompt                                                            |
 | `/search`              | `[text]`                                                               | Search the current transcript and jump to a matching entry                                                                                                                                                  |
-| `/session`             | `[info\|checkpoints\|files\|plan\|rename\|cleanup\|prune\|delete] ...` | Inspect and manage sessions; bare `/session` still opens the switch picker, while `/session prune --older-than <days> [--dry-run] [--include-named]` cleans up older saved sessions                         |
+| `/session`             | `[info\|checkpoints\|files\|plan\|rename\|cleanup\|prune\|delete] ...` | Inspect and manage sessions; bare `/session` still opens the switch picker. `/session prune --older-than <days> [--dry-run] [--include-named]` prunes old saved sessions, and `/session prune --keep-last <count> [--session <id>] [--dry-run]` trims old checkpoint snapshots for a session |
 | `/share`               | `[markdown\|html] [path]`                                              | Export the current transcript as Markdown or HTML                                                                                                                                                           |
 | `/skills`              | `[name]`                                                               | Open a discovered skill from the repository                                                                                                                                                                 |
 | `/tasks`               | `[filter]`                                                             | Show background task and sub-agent activity                                                                                                                                                                 |
 | `/undo`                | —                                                                      | Restore the latest checkpoint for the current session, then queue the restore git hash/context into the next Copilot prompt                                                                                 |
-| `/usage`               | —                                                                      | Show session usage, discovery counts, and context-window stats                                                                                                                                              |
+| `/usage`               | —                                                                      | Show detailed session usage, quota snapshot, discovery counts, and context-window stats                                                                                                                    |
 
 </details>
 
@@ -537,6 +543,8 @@ Cycled with `<C-t>` in the chat/input buffer. The mode is shown in the statuslin
 - **render-markdown.nvim** integrates automatically when installed. On very long responses it can cause visible lag. Disable with `chat = { render_markdown = false }` to use treesitter highlighting only (much faster).
 - **Streaming** is enabled by default (`session.streaming = true`). The chat buffer updates incrementally as tokens arrive.
 - **Permission history replay** is filtered by default (`session.replay_permission_history = false`) so large sessions resume faster. Set it to `true` if you want to review historical permission requests/completions in the restored chat transcript.
+- **Large-session replay window** defaults to the latest 256 turns (`session.history_turn_limit`) and keeps full activity detail only for the latest 64 turns (`session.history_activity_turn_limit`). Older replayed turns keep full assistant messages, while activity/tool outputs are summarized with previews capped by `session.history_preview_chars` (default 120).
+- **Usage telemetry** (`assistant.usage`) updates statusline/context snapshots silently instead of adding extra `Activity:` transcript blocks. Use `/context` or `/usage` for full usage details.
 - **Session resume**: with 1 matching session it resumes silently; with multiple sessions `auto_resume = "prompt"` (default) shows a picker titled with the current project name and path so you can choose which session to continue.
 
 ### Permission Modes

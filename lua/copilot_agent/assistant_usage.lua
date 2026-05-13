@@ -241,7 +241,9 @@ local function factory(deps)
     return true
   end
 
-  function M.capture(data)
+  function M.capture(data, opts)
+    opts = type(opts) == 'table' and opts or {}
+    local record_activity = opts.record_activity ~= false
     local usage = M.normalize(data)
     if not usage then
       return nil
@@ -249,7 +251,7 @@ local function factory(deps)
     state.last_assistant_usage = vim.deepcopy(usage)
     state.last_assistant_usage_snapshot = vim.deepcopy(usage)
     local summary = M.summarize(usage)
-    if not summary then
+    if not summary or not record_activity then
       return usage
     end
     local item = {

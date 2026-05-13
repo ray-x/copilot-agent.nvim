@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -76,6 +77,25 @@ type sendMessageRequest struct {
 
 type fleetStartRequest struct {
 	Prompt string `json:"prompt,omitempty"`
+}
+
+type contextWindowSnapshot struct {
+	CurrentTokens         int64 `json:"currentTokens"`
+	TokenLimit            int64 `json:"tokenLimit"`
+	PromptTokenLimit      int64 `json:"promptTokenLimit"`
+	MessagesLength        int64 `json:"messagesLength"`
+	SystemTokens          int64 `json:"systemTokens"`
+	ToolDefinitionsTokens int64 `json:"toolDefinitionsTokens"`
+	SystemToolsTokens     int64 `json:"systemToolsTokens"`
+	ConversationTokens    int64 `json:"conversationTokens"`
+	FreeTokens            int64 `json:"freeTokens"`
+	BufferTokens          int64 `json:"bufferTokens"`
+}
+
+type contextWindowResponse struct {
+	SessionID     string                 `json:"sessionId"`
+	Available     bool                   `json:"available"`
+	ContextWindow *contextWindowSnapshot `json:"contextWindow,omitempty"`
 }
 
 type compactHistoryRequest struct{}
@@ -213,8 +233,19 @@ type managedSession struct {
 	eventSequenceMu      sync.Mutex
 	nextEventSequence    uint64
 	messageChunkIndexes  map[string]uint64
+	contextUsage         *contextWindowUsage
+	contextUsageMu       sync.RWMutex
 	eventUnsubscribe     func()
 	inputResponseGrace   time.Duration
+}
+
+type contextWindowUsage struct {
+	CurrentTokens         int64
+	TokenLimit            int64
+	MessagesLength        int64
+	SystemTokens          int64
+	ToolDefinitionsTokens int64
+	ConversationTokens    int64
 }
 
 type copilotClient interface {
@@ -238,6 +269,7 @@ type service struct {
 	clientCtx               context.Context
 	defaultModel            string
 	defaultWorkingDirectory string
+	shutdownHTTP            func(context.Context) error
 	sessions                map[string]*managedSession
 	sessionsMu              sync.RWMutex
 }
@@ -245,6 +277,7 @@ type service struct {
 func main() {
 	addr := flag.String("addr", "", "HTTP listen address (host:port). Leave empty or use port 0 to let the OS assign a free port (default).")
 	portRange := flag.String("port-range", "", "Port range to try when -addr is not set, e.g. 18000-19000. The first available port in the range is used.")
+	controlSocket := flag.String("control-socket", "", "Unix socket path for local control API (GET /service-addr, GET /healthz, POST /shutdown)")
 	cliPath := flag.String("cli-path", defaultCLIPath(), "path to Copilot CLI binary or JS entrypoint")
 	cliURL := flag.String("cli-url", "", "URL for an already-running Copilot CLI server")
 	model := flag.String("model", defaultModel, "default model for new sessions; empty uses the Copilot CLI account default")
@@ -307,6 +340,7 @@ func main() {
 	mux.HandleFunc("GET /sessions", svc.handleListSessions)
 	mux.HandleFunc("POST /sessions", svc.handleCreateSession)
 	mux.HandleFunc("GET /sessions/{id}", svc.handleGetSession)
+	mux.HandleFunc("GET /sessions/{id}/context", svc.handleGetContext)
 	mux.HandleFunc("DELETE /sessions/{id}", svc.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/model", svc.handleSetModel)
 	mux.HandleFunc("POST /sessions/{id}/mode", svc.handleSetAgentMode)
@@ -321,6 +355,7 @@ func main() {
 	mux.HandleFunc("POST /sessions/{id}/permission-mode", svc.handleSetPermissionMode)
 	mux.HandleFunc("POST /sessions/{id}/abort", svc.handleAbortSession)
 	mux.HandleFunc("POST /sessions/{id}/tools", svc.handleSetTools)
+	mux.HandleFunc("POST /shutdown", svc.handleShutdown)
 
 	// Resolve listen address. When -addr is not set, honour -port-range if
 	// provided, otherwise let the OS assign a free port (127.0.0.1:0).
@@ -347,6 +382,16 @@ func main() {
 	server := &http.Server{
 		Handler:           withCORS(loggingMiddleware(mux)),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
+	}
+	svc.shutdownHTTP = server.Shutdown
+	controlCleanup := func() {}
+	if socketPath := strings.TrimSpace(*controlSocket); socketPath != "" {
+		cleanup, controlErr := startControlServer(ctx, svc, socketPath, boundAddr)
+		if controlErr != nil {
+			log.Fatalf("start control socket %s: %v", socketPath, controlErr)
+		}
+		controlCleanup = cleanup
+		defer controlCleanup()
 	}
 
 	go func() {
@@ -384,6 +429,76 @@ func main() {
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func startControlServer(ctx context.Context, svc *service, socketPath string, serviceAddr string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	if chmodErr := os.Chmod(socketPath, 0o600); chmodErr != nil {
+		ln.Close()
+		_ = os.Remove(socketPath)
+		return nil, chmodErr
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /service-addr", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"serviceAddr": serviceAddr,
+			"serviceURL":  "http://" + serviceAddr,
+		})
+	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":          true,
+			"serviceAddr": serviceAddr,
+		})
+	})
+	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		if svc.shutdownHTTP == nil {
+			return
+		}
+		go func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+			defer cancel()
+			if err := svc.shutdownHTTP(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("shutdown via control socket: %v", err)
+			}
+		}()
+	})
+
+	controlServer := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+		defer cancel()
+		_ = controlServer.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		if serveErr := controlServer.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			log.Printf("control socket server: %v", serveErr)
+		}
+	}()
+
+	return func() {
+		_ = controlServer.Close()
+		_ = ln.Close()
+		_ = os.Remove(socketPath)
+	}, nil
 }
 
 func (s *service) currentClient() copilotClient {
@@ -740,6 +855,30 @@ func (s *service) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, managed.summary())
 }
 
+func (s *service) handleGetContext(w http.ResponseWriter, r *http.Request) {
+	managed, ok := s.getManagedSession(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session is not attached to this service")
+		return
+	}
+
+	usage := managed.getContextUsage()
+	if usage == nil {
+		writeJSON(w, http.StatusOK, contextWindowResponse{
+			SessionID: managed.session.SessionID,
+			Available: false,
+		})
+		return
+	}
+
+	breakdown := s.buildContextWindowSnapshot(r.Context(), managed, usage)
+	writeJSON(w, http.StatusOK, contextWindowResponse{
+		SessionID:     managed.session.SessionID,
+		Available:     true,
+		ContextWindow: breakdown,
+	})
+}
+
 func (s *service) refreshManagedSessionSummary(ctx context.Context, managed *managedSession) {
 	if managed == nil || managed.session == nil {
 		return
@@ -932,6 +1071,9 @@ func (s *service) handleCompactHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("compact history: %v", err))
 		return
 	}
+	if result != nil && result.ContextWindow != nil {
+		managed.setContextUsage(contextWindowUsageFromCompact(result.ContextWindow))
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sessionId": managed.session.SessionID,
@@ -1006,12 +1148,15 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	if queryBool(r, "history") {
 		replayPermissionHistory := queryBool(r, "replay_permission_history")
+		replayTurnLimit := historyReplayTurnLimit(r)
+		replayActivityLimit := historyReplayActivityTurnLimit(r)
+		replayPreviewChars := historyReplayPreviewChars(r)
 		events, err := managed.session.GetMessages(r.Context())
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("get history: %v", err))
 			return
 		}
-		payloads, replayedCount := managed.marshalReplaySessionEvents(events, replayPermissionHistory)
+		payloads, replayedCount := managed.marshalReplaySessionEvents(events, replayPermissionHistory, replayTurnLimit, replayActivityLimit, replayPreviewChars)
 		for _, payload := range payloads {
 			if err := writeSSE(w, "session.event", payload); err != nil {
 				return
@@ -1083,6 +1228,130 @@ func shouldReplayHistoryEvent(event copilot.SessionEvent, replayPermissionHistor
 		return true
 	}
 	return strings.TrimSpace(data.Content) != "" || len(data.ToolRequests) > 0
+}
+
+func historyReplayTurnLimit(r *http.Request) int {
+	return queryInt(r, "history_turn_limit")
+}
+
+func historyReplayActivityTurnLimit(r *http.Request) int {
+	return queryInt(r, "history_activity_turn_limit")
+}
+
+func historyReplayPreviewChars(r *http.Request) int {
+	value := queryInt(r, "history_preview_chars")
+	if value > 0 {
+		return value
+	}
+	return 120
+}
+
+func selectReplayWindow(events []copilot.SessionEvent, turnLimit int) []copilot.SessionEvent {
+	if turnLimit <= 0 {
+		return events
+	}
+
+	turnCount := 0
+	for _, event := range events {
+		if event.Type == "assistant.turn_start" {
+			turnCount++
+		}
+	}
+	if turnCount <= turnLimit {
+		return events
+	}
+
+	keepTurns := turnLimit
+	cutoffTurns := turnCount - keepTurns
+	seenTurns := 0
+	startIndex := 0
+	for idx, event := range events {
+		if event.Type != "assistant.turn_start" {
+			continue
+		}
+		seenTurns++
+		if seenTurns > cutoffTurns {
+			startIndex = idx
+			break
+		}
+	}
+	if startIndex <= 0 {
+		return events
+	}
+	return events[startIndex:]
+}
+
+func truncateRunes(text string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxChars {
+		return text
+	}
+	if maxChars <= 3 {
+		return string(runes[:maxChars])
+	}
+	return string(runes[:maxChars-3]) + "..."
+}
+
+func previewString(value any, maxChars int) string {
+	switch v := value.(type) {
+	case string:
+		return truncateRunes(strings.TrimSpace(v), maxChars)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if preview := previewString(item, maxChars); preview != "" {
+				parts = append(parts, preview)
+			}
+		}
+		return truncateRunes(strings.Join(parts, "\n\n"), maxChars)
+	case map[string]any:
+		for _, key := range []string{"detailedContent", "content", "text", "output", "message", "value"} {
+			if s, ok := v[key].(string); ok && strings.TrimSpace(s) != "" {
+				return truncateRunes(strings.TrimSpace(s), maxChars)
+			}
+		}
+		if nested, ok := v["contents"]; ok {
+			return previewString(nested, maxChars)
+		}
+	}
+	return ""
+}
+
+func trimReplayPayload(payload []byte, eventType string, summaryMode bool, previewChars int) ([]byte, bool, error) {
+	var envelope map[string]any
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return payload, false, err
+	}
+
+	data, _ := envelope["data"].(map[string]any)
+	if data == nil {
+		return payload, false, nil
+	}
+
+	switch eventType {
+	case "assistant.message_delta", "assistant.streaming_delta", "assistant.reasoning_delta", "tool.execution_partial_result", "tool.execution_progress":
+		if summaryMode {
+			return nil, true, nil
+		}
+	case "tool.execution_complete":
+		if result, ok := data["result"].(map[string]any); ok {
+			preview := previewString(result, previewChars)
+			if preview != "" {
+				result = map[string]any{"content": truncateRunes(preview, previewChars)}
+				data["result"] = result
+			}
+		}
+	}
+
+	envelope["data"] = data
+	trimmed, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, false, err
+	}
+	return trimmed, false, nil
 }
 
 func (s *service) handleAnswerUserInput(w http.ResponseWriter, r *http.Request) {
@@ -1239,6 +1508,20 @@ func (s *service) handleSetTools(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *service) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if s.shutdownHTTP == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+		defer cancel()
+		if err := s.shutdownHTTP(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("shutdown via endpoint: %v", err)
+		}
+	}()
+}
+
 func (s *service) liveSessionSummaries() []sessionSummary {
 	s.sessionsMu.RLock()
 	defer s.sessionsMu.RUnlock()
@@ -1332,6 +1615,12 @@ func (s *service) closeManagedSessions(reason error) {
 }
 
 func (m *managedSession) handleSessionEvent(event copilot.SessionEvent) {
+	if event.Type == copilot.SessionEventTypeSessionUsageInfo {
+		if data, ok := event.Data.(*copilot.SessionUsageInfoData); ok {
+			m.setContextUsage(contextWindowUsageFromEvent(data))
+		}
+	}
+
 	// Drop assistant.message events with empty or whitespace-only content
 	// so the client never sees bare "Assistant:" entries.
 	if event.Type == copilot.SessionEventTypeAssistantMessage {
@@ -1349,17 +1638,160 @@ func (m *managedSession) handleSessionEvent(event copilot.SessionEvent) {
 	m.broadcast(sseMessage{Event: "session.event", Data: payload})
 }
 
-func (m *managedSession) marshalReplaySessionEvents(events []copilot.SessionEvent, replayPermissionHistory bool) ([][]byte, int) {
+func (m *managedSession) setContextUsage(usage *contextWindowUsage) {
+	m.contextUsageMu.Lock()
+	defer m.contextUsageMu.Unlock()
+	if usage == nil {
+		m.contextUsage = nil
+		return
+	}
+	copy := *usage
+	m.contextUsage = &copy
+}
+
+func (m *managedSession) getContextUsage() *contextWindowUsage {
+	m.contextUsageMu.RLock()
+	defer m.contextUsageMu.RUnlock()
+	if m.contextUsage == nil {
+		return nil
+	}
+	copy := *m.contextUsage
+	return &copy
+}
+
+func int64FromFloat64(value *float64) int64 {
+	if value == nil {
+		return 0
+	}
+	return int64(math.Round(*value))
+}
+
+func contextWindowUsageFromEvent(data *copilot.SessionUsageInfoData) *contextWindowUsage {
+	if data == nil {
+		return nil
+	}
+	return &contextWindowUsage{
+		CurrentTokens:         int64(math.Round(data.CurrentTokens)),
+		TokenLimit:            int64(math.Round(data.TokenLimit)),
+		MessagesLength:        int64(math.Round(data.MessagesLength)),
+		SystemTokens:          int64FromFloat64(data.SystemTokens),
+		ToolDefinitionsTokens: int64FromFloat64(data.ToolDefinitionsTokens),
+		ConversationTokens:    int64FromFloat64(data.ConversationTokens),
+	}
+}
+
+func contextWindowUsageFromCompact(data *rpc.HistoryCompactContextWindow) *contextWindowUsage {
+	if data == nil {
+		return nil
+	}
+	return &contextWindowUsage{
+		CurrentTokens:         data.CurrentTokens,
+		TokenLimit:            data.TokenLimit,
+		MessagesLength:        data.MessagesLength,
+		SystemTokens:          int64Value(data.SystemTokens),
+		ToolDefinitionsTokens: int64Value(data.ToolDefinitionsTokens),
+		ConversationTokens:    int64Value(data.ConversationTokens),
+	}
+}
+
+func int64Value(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func clampInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *service) buildContextWindowSnapshot(ctx context.Context, managed *managedSession, usage *contextWindowUsage) *contextWindowSnapshot {
+	if managed == nil || usage == nil {
+		return nil
+	}
+
+	promptTokenLimit := usage.TokenLimit
+	modelID := strings.TrimSpace(managed.model)
+	if modelID != "" {
+		models, err := withCopilotClientRetry(s, "list models", func(client copilotClient) ([]copilot.ModelInfo, error) {
+			return client.ListModels(ctx)
+		})
+		if err == nil {
+			for _, model := range models {
+				if model.ID == modelID || strings.EqualFold(model.Name, modelID) {
+					if model.Capabilities.Limits.MaxPromptTokens != nil && *model.Capabilities.Limits.MaxPromptTokens > 0 {
+						promptTokenLimit = int64(*model.Capabilities.Limits.MaxPromptTokens)
+					}
+					break
+				}
+			}
+		}
+	}
+
+	if promptTokenLimit <= 0 || promptTokenLimit > usage.TokenLimit {
+		promptTokenLimit = usage.TokenLimit
+	}
+
+	systemToolsTokens := clampInt64(usage.SystemTokens + usage.ToolDefinitionsTokens)
+	freeTokens := clampInt64(promptTokenLimit - usage.CurrentTokens)
+	bufferTokens := clampInt64(usage.TokenLimit - maxInt64(usage.CurrentTokens, promptTokenLimit))
+
+	return &contextWindowSnapshot{
+		CurrentTokens:         usage.CurrentTokens,
+		TokenLimit:            usage.TokenLimit,
+		PromptTokenLimit:      promptTokenLimit,
+		MessagesLength:        usage.MessagesLength,
+		SystemTokens:          usage.SystemTokens,
+		ToolDefinitionsTokens: usage.ToolDefinitionsTokens,
+		SystemToolsTokens:     systemToolsTokens,
+		ConversationTokens:    usage.ConversationTokens,
+		FreeTokens:            freeTokens,
+		BufferTokens:          bufferTokens,
+	}
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (m *managedSession) marshalReplaySessionEvents(events []copilot.SessionEvent, replayPermissionHistory bool, turnLimit, activityLimit, previewChars int) ([][]byte, int) {
+	events = selectReplayWindow(events, turnLimit)
+	if activityLimit > 0 && activityLimit > turnLimit && turnLimit > 0 {
+		activityLimit = turnLimit
+	}
+
 	payloads := make([][]byte, 0, len(events))
 	nextSequence := uint64(0)
 	messageChunkIndexes := make(map[string]uint64)
+	totalTurns := 0
+	for _, event := range events {
+		if event.Type == "assistant.turn_start" {
+			totalTurns++
+		}
+	}
+	summaryCutoff := totalTurns - activityLimit
 
+	currentTurn := 0
 	for _, event := range events {
 		if !shouldReplayHistoryEvent(event, replayPermissionHistory) {
 			continue
 		}
+		if event.Type == "assistant.turn_start" {
+			currentTurn++
+		}
+		summaryMode := activityLimit > 0 && currentTurn > 0 && currentTurn <= summaryCutoff
 		rawPayload, messageID, err := marshalSessionEventPayload(event)
 		if err != nil {
+			continue
+		}
+		rawPayload, skip, err := trimReplayPayload(rawPayload, string(event.Type), summaryMode, previewChars)
+		if err != nil || skip {
 			continue
 		}
 
@@ -2266,6 +2698,18 @@ func mustJSON(payload any) []byte {
 func queryBool(r *http.Request, name string) bool {
 	value := strings.TrimSpace(strings.ToLower(r.URL.Query().Get(name)))
 	return value == "1" || value == "true" || value == "yes"
+}
+
+func queryInt(r *http.Request, name string) int {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 func boolOrDefault(value *bool, fallback bool) bool {

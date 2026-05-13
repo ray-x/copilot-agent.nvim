@@ -83,9 +83,18 @@ function M.close_dashboard()
 end
 
 function M.setup(opts)
-  state.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
+  local normalized_opts = vim.deepcopy(opts or {})
+  -- Back-compat: allow top-level auto_start to mirror service.auto_start.
+  if normalized_opts.auto_start ~= nil and (type(normalized_opts.service) ~= 'table' or normalized_opts.service.auto_start == nil) then
+    normalized_opts.service = vim.tbl_deep_extend('force', normalized_opts.service or {}, {
+      auto_start = normalized_opts.auto_start,
+    })
+  end
+
+  state.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), normalized_opts)
   state.config.base_url = normalize_base_url(state.config.base_url)
-  state.base_url_managed = opts == nil or opts.base_url == nil
+  state.base_url_managed = normalized_opts.base_url == nil
+  state.shutting_down = false
   -- Initialize runtime permission mode from config.
   state.permission_mode = state.config.permission_mode or 'interactive'
   -- Reset transient live activity / overlay state when setup is rerun.
@@ -204,15 +213,21 @@ function M.setup(opts)
     end,
   })
   events.remember_open_buffer_disk_state()
+  service.register_client_lease()
   -- Clean up clipboard temp files if Neovim exits before they were sent.
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = vim.api.nvim_create_augroup('CopilotAgentCleanup', { clear = true }),
     callback = function()
+      state.shutting_down = true
+      events.stop_event_stream()
       local ok, logger = pcall(require, 'copilot_agent.log')
       if ok and type(logger.flush_pending) == 'function' then
         logger.flush_pending()
       end
       session.discard_pending_attachments()
+      service.unregister_client_lease()
+      service.maybe_shutdown_detached_service_if_last_client({ nonblocking = true })
+      service.stop_service()
     end,
   })
   vim.schedule(function()

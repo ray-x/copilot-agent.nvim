@@ -1403,7 +1403,7 @@ local function capture_turn_activity_summary(event_type, data)
   end
 
   if event_type == 'assistant.usage' then
-    assistant_usage.capture(data)
+    assistant_usage.capture(data, { record_activity = false })
     return
   end
 
@@ -1718,6 +1718,9 @@ local function format_stream_exit_message(code, stderr_message)
 end
 
 local function neovim_is_exiting()
+  if state.shutting_down then
+    return true
+  end
   local exiting = vim.v.exiting
   if exiting == vim.NIL or exiting == nil then
     return false
@@ -1755,6 +1758,10 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
   append_entry('system', 'Event stream disconnected. Reconnecting...')
 
   service.ensure_service_live(function(service_err)
+    if neovim_is_exiting() then
+      state.event_stream_recovery_session_id = nil
+      return
+    end
     if state.session_id ~= session_id then
       state.event_stream_recovery_session_id = nil
       return
@@ -1770,12 +1777,20 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
     state.creating_session = true
     local session = require('copilot_agent.session')
     session.resume_session(session_id, function(_, resume_err)
+      if neovim_is_exiting() then
+        state.event_stream_recovery_session_id = nil
+        return
+      end
       if state.session_id ~= session_id then
         state.event_stream_recovery_session_id = nil
         return
       end
       if resume_err and session.is_missing_session_error(resume_err) then
         session.recover_after_service_restart(session_id, function(_, recovery_err)
+          if neovim_is_exiting() then
+            state.event_stream_recovery_session_id = nil
+            return
+          end
           state.event_stream_recovery_session_id = nil
           if recovery_err then
             append_entry('error', 'Failed to recover event stream: ' .. recovery_err)
@@ -2344,6 +2359,7 @@ local function handle_host_event(event_name, payload)
     refresh_statuslines()
   elseif event_name == 'host.history_done' then
     state.history_loading = false
+    state.history_replay_turn_index = 0
     state.history_checkpoint_ids = nil
     state.history_pending_user_entries = {}
     refresh_statuslines()
@@ -3161,6 +3177,9 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.turn_start' then
+    if state.history_loading then
+      state.history_replay_turn_index = (tonumber(state.history_replay_turn_index) or 0) + 1
+    end
     local preserve_reasoning = preserve_reasoning_preview_on_late_turn_start()
     if not preserve_reasoning then
       clear_reasoning_preview('turn start')
@@ -3291,7 +3310,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'assistant.usage' then
-    local usage = state.last_assistant_usage or assistant_usage.capture(data)
+    local usage = state.last_assistant_usage or assistant_usage.capture(data, { record_activity = false })
     local primary_quota = usage and usage.primary_quota or nil
     log(
       string.format(
@@ -3485,6 +3504,17 @@ local function handle_sse_chunk(data)
   end
 end
 
+local function history_replay_limits()
+  local session_cfg = ((state.config or {}).session or {})
+  local turn_limit = math.max(0, math.floor(tonumber(session_cfg.history_turn_limit) or 0))
+  local activity_limit = math.max(0, math.floor(tonumber(session_cfg.history_activity_turn_limit) or 0))
+  local preview_chars = math.max(0, math.floor(tonumber(session_cfg.history_preview_chars) or 0))
+  if turn_limit > 0 and activity_limit > turn_limit then
+    activity_limit = turn_limit
+  end
+  return turn_limit, activity_limit, preview_chars
+end
+
 function M.stop_event_stream()
   if state.events_job_id then
     log(string.format('sse.stream stop job_id=%s', tostring(state.events_job_id)), vim.log.levels.DEBUG)
@@ -3502,6 +3532,7 @@ function M.start_event_stream(session_id)
   state.sse_partial = ''
   reset_live_activity_state()
   state.history_loading = true -- suppress rendering until host.history_done arrives
+  state.history_replay_turn_index = 0
   state.history_pending_user_entries = {}
   preload_history_checkpoint_ids(session_id)
   refresh_statuslines()
@@ -3514,6 +3545,7 @@ function M.start_event_stream(session_id)
     if state.history_loading and state.session_id == history_timeout_session then
       log(string.format('history_loading safety timeout fired after %dms session_id=%s', HISTORY_TIMEOUT_MS, tostring(session_id)), vim.log.levels.WARN)
       state.history_loading = false
+      state.history_replay_turn_index = 0
       state.history_checkpoint_ids = nil
       state.history_pending_user_entries = {}
       refresh_statuslines()
@@ -3525,6 +3557,16 @@ function M.start_event_stream(session_id)
 
   local replay_permission_history = state.config.session and state.config.session.replay_permission_history == true
   local history_query = string.format('/sessions/%s/events?history=true', session_id)
+  local history_turn_limit, history_activity_limit, history_preview_chars = history_replay_limits()
+  if history_turn_limit > 0 then
+    history_query = history_query .. '&history_turn_limit=' .. tostring(history_turn_limit)
+  end
+  if history_activity_limit > 0 then
+    history_query = history_query .. '&history_activity_turn_limit=' .. tostring(history_activity_limit)
+  end
+  if history_preview_chars > 0 then
+    history_query = history_query .. '&history_preview_chars=' .. tostring(history_preview_chars)
+  end
   if replay_permission_history then
     history_query = history_query .. '&replay_permission_history=true'
   end
@@ -3636,6 +3678,7 @@ function M.reload_session_history(session_id, callback)
     if err then
       log(string.format('session.history reload failed session_id=%s error=%s', tostring(session_id), serialize_log_value(err, { max_len = ERROR_LOG_MAX_CHARS })), vim.log.levels.WARN)
       state.history_loading = false
+      state.history_replay_turn_index = 0
       state.history_checkpoint_ids = nil
       state.history_pending_user_entries = {}
       callback(err)
@@ -3649,6 +3692,7 @@ function M.reload_session_history(session_id, callback)
     log(string.format('session.history reloaded session_id=%s event_count=%d', tostring(session_id), #((response and response.events) or {})), vim.log.levels.DEBUG)
 
     state.history_loading = false
+    state.history_replay_turn_index = 0
     state.history_checkpoint_ids = nil
     state.history_pending_user_entries = {}
     reset_frozen_render()

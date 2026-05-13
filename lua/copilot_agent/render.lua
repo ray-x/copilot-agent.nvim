@@ -448,7 +448,7 @@ local function hover_float_geometry(anchor_winid, lines)
   return width, height, 1, 0
 end
 
-local function open_activity_hover_float(entry, entry_idx, anchor_winid)
+local function open_activity_hover_float(entry, entry_idx, anchor_winid, opts)
   close_activity_hover_preview()
   local lines = build_activity_hover_lines(entry)
   if type(lines) ~= 'table' then
@@ -469,6 +469,7 @@ local function open_activity_hover_float(entry, entry_idx, anchor_winid)
     row = 1,
     col = 0,
     style = 'minimal',
+    focusable = true,
     border = 'rounded',
     title = ' Activity preview ',
     title_pos = 'center',
@@ -489,7 +490,7 @@ local function open_activity_hover_float(entry, entry_idx, anchor_winid)
     win_config.col = 0
   end
 
-  local enter = state.activity_hover_opened_by_key == true
+  local enter = type(opts) == 'table' and opts.enter == true
   local winid = vim.api.nvim_open_win(buf, enter, win_config)
   state.activity_hover_winid = winid
   state.activity_hover_entry_idx = entry_idx
@@ -539,7 +540,7 @@ local function hover_entry_at_cursor(winid)
   return entry, entry_idx, entry_file_changes(entry)
 end
 
-local function open_activity_hover_preview_under_cursor(winid)
+local function open_activity_hover_preview_under_cursor(winid, opts)
   if activity_view_mode() ~= 'hover' then
     close_activity_hover_preview()
     return false
@@ -554,26 +555,30 @@ local function open_activity_hover_preview_under_cursor(winid)
   local patch_text = entry_patch_text(entry)
   -- If we can extract a full patch/unified-diff text, prefer showing it directly in the hover.
   if type(patch_text) == 'string' and patch_text ~= '' then
-    close_activity_hover_preview()
     return activity_diff.open_preview_patch_text(patch_text, {
       anchor_winid = winid,
       entry_index = entry_idx,
       code_change = entry_code_change(entry),
+      enter = type(opts) == 'table' and opts.enter == true,
     })
   end
 
   if type(file_changes) == 'table' and #file_changes > 1 then
     if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) and state.activity_hover_entry_idx == entry_idx then
-      return true
+      if not (type(opts) == 'table' and opts.enter == true) then
+        return true
+      end
     end
-    return open_activity_hover_float(entry, entry_idx, winid)
+    return open_activity_hover_float(entry, entry_idx, winid, opts)
   end
 
   if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) and state.activity_hover_entry_idx == entry_idx then
-    return true
+    if not (type(opts) == 'table' and opts.enter == true) then
+      return true
+    end
   end
 
-  return open_activity_hover_float(entry, entry_idx, winid)
+  return open_activity_hover_float(entry, entry_idx, winid, opts)
 end
 
 local function reasoning_config()
@@ -3180,6 +3185,19 @@ end
 
 function M.refresh_activity_hover_preview(winid)
   return open_activity_hover_preview_under_cursor(winid)
+end
+
+function M.focus_activity_hover_preview(winid)
+  if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) then
+    state.activity_hover_keep_on_next_chat_winleave = true
+    local ok = pcall(vim.api.nvim_set_current_win, state.activity_hover_winid)
+    if ok and vim.api.nvim_get_current_win() == state.activity_hover_winid then
+      return true
+    end
+    state.activity_hover_keep_on_next_chat_winleave = false
+  end
+
+  return open_activity_hover_preview_under_cursor(winid, { enter = true })
 end
 
 function M.close_activity_hover_preview()

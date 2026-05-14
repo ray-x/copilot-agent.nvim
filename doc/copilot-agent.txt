@@ -69,7 +69,9 @@ Optional:
   • delta                  — rich diff viewer for permission "Show diff"
   • snacks.picker, telescope, fzf-lua, or mini.pick — fuzzy file picker
 
-Run |:checkhealth| copilot_agent to verify all requirements.
+Run |:checkhealth| copilot_agent to verify all requirements. The service
+probe is advisory; double-check the same MCP server in Copilot CLI if the
+result looks unexpected.
 If startup fails even though `copilot-agent` exists, verify the Copilot CLI
 runtime is resolvable (`-cli-path`, env vars, or PATH). GUI Neovim launches
 can have a different PATH than terminal shells.

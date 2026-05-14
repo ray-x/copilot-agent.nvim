@@ -948,6 +948,22 @@ describe('service coordination', function()
     assert_true(vim.tbl_contains(calls[1].args, 'http://127.0.0.1:43123/shutdown'))
     assert_false(vim.tbl_contains(calls[1].args, '--unix-socket'))
   end)
+
+  it('does not hard-stop a detached service job during VimLeavePre cleanup', function()
+    local calls = {}
+    local original_jobstop = vim.fn.jobstop
+
+    vim.fn.jobstop = function(job_id)
+      calls[#calls + 1] = job_id
+      return 1
+    end
+
+    service.stop_service()
+
+    vim.fn.jobstop = original_jobstop
+
+    assert_eq(0, #calls)
+  end)
 end)
 
 describe('compaction activity events', function()
@@ -6308,12 +6324,14 @@ describe('mcp slash command', function()
       assert_true(slash.execute('/mcp show'))
       vim.wait(20)
       local show_message = agent.state.entries[#agent.state.entries].content
-      assert_true(show_message:find('MCP server health:', 1, true) ~= nil)
+      assert_true(show_message:find('MCP server check:', 1, true) ~= nil)
       assert_true(show_message:find('local', 1, true) ~= nil)
       assert_true(show_message:find('docs', 1, true) ~= nil)
       assert_true(show_message:find('browser', 1, true) ~= nil)
-      assert_true(show_message:find('health: healthy', 1, true) ~= nil)
-      assert_true(show_message:find('health: unhealthy', 1, true) ~= nil)
+      assert_true(show_message:find('check: initialize responded', 1, true) ~= nil)
+      assert_true(show_message:find('check: spawn docs-mcp ENOENT', 1, true) ~= nil)
+      assert_true(show_message:find('check: http 200', 1, true) ~= nil)
+      assert_true(show_message:lower():find('double-check the same mcp server in copilot cli', 1, true) ~= nil)
 
       assert_true(slash.execute('/mcp show local'))
       vim.wait(20)
@@ -6321,7 +6339,7 @@ describe('mcp slash command', function()
       assert_true(local_message:find('local', 1, true) ~= nil)
       assert_true(local_message:find('docs', 1, true) == nil)
       assert_true(local_message:find('browser', 1, true) == nil)
-      assert_true(local_message:find('health: healthy', 1, true) ~= nil)
+      assert_true(local_message:find('check: initialize responded', 1, true) ~= nil)
 
       assert_true(slash.execute('/mcp add docs docs-mcp --stdio'))
       local added = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))

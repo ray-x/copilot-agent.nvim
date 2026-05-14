@@ -49,6 +49,11 @@ configures its HTTP client automatically — no manual `base_url` needed.
 Service log lines are prefixed with `[INFO]`, `[WARN]`, or `[ERROR]` when
 `-log-file` is set.
 
+When `-client-lease-dir` is configured, detached-service shutdown is delayed by
+the lease watcher grace window. Current defaults (from `server/main.go`) are:
+`clientLeasePollInterval = 500ms` and `clientLeaseEmptyGrace = 30s` (i.e. the
+lease directory must stay empty for 30 seconds before shutdown).
+
 ---
 
 ## HTTP API Reference

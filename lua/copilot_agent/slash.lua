@@ -2776,21 +2776,14 @@ local function mcp_show_command(target_name)
     return true
   end
 
-  local lines = { 'MCP server health:' }
+  local lines = { 'MCP server check:' }
   for _, entry in ipairs(selected) do
-    local healthy, health_status, health_detail = probe_mcp_health(entry)
-    local symbol = healthy and '✓' or (health_status == 'unknown' and '?' or '✗')
-    lines[#lines + 1] = string.format(
-      '  %s %-18s %-12s %-30s health: %s%s',
-      symbol,
-      tostring(entry.name),
-      mcp_entry_display_kind(entry),
-      mcp_entry_display_detail(entry),
-      health_status,
-      health_detail ~= '' and (' (' .. health_detail .. ')') or ''
-    )
+    local _, _, health_detail = probe_mcp_health(entry)
+    local check_detail = health_detail ~= '' and health_detail or 'no probe detail'
+    lines[#lines + 1] = string.format('  %-18s %-12s %-30s check: %s', tostring(entry.name), mcp_entry_display_kind(entry), mcp_entry_display_detail(entry), check_detail)
   end
 
+  lines[#lines + 1] = 'Double-check the same MCP server in Copilot CLI; this check is advisory only.'
   append_entry('system', table.concat(lines, '\n'))
   return true
 end

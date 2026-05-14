@@ -110,17 +110,11 @@ local function check_service()
     vim.health.info('service port is dynamic (auto_start=true) — reachability checked after first :CopilotAgentChat')
   else
     local healthz = base_url:gsub('/$', '') .. (config.service and config.service.healthcheck_path or '/healthz')
-    vim.fn.system({ 'curl', '-sf', '--max-time', '2', healthz })
+    vim.fn.system({ 'curl', '-sS', '--max-time', '2', healthz })
     local code = vim.v.shell_error
-    if code == 0 then
-      vim.health.ok('service reachable at ' .. healthz)
-    else
-      if auto then
-        vim.health.warn('service not reachable at ' .. healthz .. ' (will be started automatically)')
-      else
-        vim.health.warn('service not reachable at ' .. healthz .. ' — start it manually or set service.auto_start = true')
-      end
-    end
+    vim.health.info('service probe: ' .. healthz)
+    vim.health.info('curl exit code: ' .. tostring(code))
+    vim.health.info('Double-check the same MCP server in Copilot CLI; this probe is advisory only.')
   end
 end
 

@@ -765,14 +765,17 @@ function M.remember_service_output(data)
 end
 
 function M.stop_service()
+  if state.config.service.detach == true then
+    return
+  end
+
   if state.service_job_id and state.service_job_id > 0 then
     pcall(vim.fn.jobstop, state.service_job_id)
     state.service_job_id = nil
   end
-  if state.config.service.detach ~= true then
-    M.forget_service_addr()
-    clear_control_addr()
-  end
+
+  M.forget_service_addr()
+  clear_control_addr()
 end
 
 function M.last_service_output()

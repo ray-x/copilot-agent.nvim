@@ -45,6 +45,7 @@ const (
 	httpShutdownTimeout        = 5 * time.Second  // Allow in-flight HTTP requests a brief grace period during service shutdown.
 	sseKeepAliveInterval       = 15 * time.Second // Keep reverse proxies and clients from treating idle event streams as dead.
 	clientLeasePollInterval    = 500 * time.Millisecond
+	clientLeaseEmptyGrace      = 30 * time.Second
 	sseSubscriberBufferSize    = 256 // Absorb bursts of session events (tool calls can produce 100+ events rapidly).
 	asyncResultChannelSize     = 1   // Each pending prompt/permission only needs to hold a single terminal response.
 	permissionRequestIDPrefix  = "perm"
@@ -577,7 +578,10 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 	// This prevents transient filesystem glitches (momentary empty
 	// directory during lease renewal, NFS caching, etc.) from killing
 	// the service while a client is still connected.
-	const emptyThreshold = 6 // 6 × 500ms = 3 seconds of consecutive empty
+	emptyThreshold := int(clientLeaseEmptyGrace / clientLeasePollInterval)
+	if emptyThreshold < 1 {
+		emptyThreshold = 1
+	}
 
 	go func() {
 		ticker := time.NewTicker(clientLeasePollInterval)

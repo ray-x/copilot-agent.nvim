@@ -40,6 +40,8 @@ local RESULT_FLOAT_BORDER_LINES = 2 -- Reserve vertical space for the float bord
 local RESULT_FLOAT_HEIGHT_RATIO = 0.8 -- Leave editor context visible above and below slash-command result windows.
 local SIDE_QUESTION_TIMEOUT_MS = 120000 -- Side-question sessions should fail fast rather than polling forever.
 local SIDE_QUESTION_POLL_INTERVAL_MS = 400 -- Poll often enough to feel responsive without hammering the local service.
+local MCP_HEALTH_TIMEOUT_MS = 1500 -- Keep /mcp show responsive even when one server is unhealthy.
+local MCP_INITIALIZE_PROTOCOL_VERSION = '2024-11-05'
 local working_directory = service.working_directory
 local mode_permission = {
   ask = 'interactive',
@@ -61,21 +63,56 @@ local function parse(text)
   return command:lower(), vim.trim(args or '')
 end
 
-local function run_command(args, cwd)
+local function run_command_capture(args, opts)
+  opts = opts or {}
   if vim.system then
-    local result = vim.system(args, { text = true, cwd = cwd }):wait()
-    local output = vim.trim((result.stdout or '') ~= '' and result.stdout or (result.stderr or ''))
-    if result.code ~= 0 then
-      return nil, output ~= '' and output or table.concat(args, ' ')
-    end
-    return output, nil
+    local command_opts = {
+      text = true,
+      cwd = opts.cwd,
+      stdin = opts.stdin,
+      timeout = opts.timeout,
+      env = opts.env,
+    }
+    local result = vim.system(args, command_opts):wait()
+    return {
+      code = tonumber(result.code) or 1,
+      stdout = result.stdout or '',
+      stderr = result.stderr or '',
+    }
+  end
+
+  if opts.stdin ~= nil then
+    return {
+      code = 1,
+      stdout = '',
+      stderr = 'stdin probes require Neovim vim.system support',
+    }
   end
 
   local output = vim.fn.systemlist(args)
-  if vim.v.shell_error ~= 0 then
-    return nil, vim.trim(table.concat(output, '\n'))
+  local code = tonumber(vim.v.shell_error) or 0
+  local joined = table.concat(output, '\n')
+  if code == 0 then
+    return {
+      code = 0,
+      stdout = joined,
+      stderr = '',
+    }
   end
-  return vim.trim(table.concat(output, '\n')), nil
+  return {
+    code = code,
+    stdout = '',
+    stderr = joined,
+  }
+end
+
+local function run_command(args, cwd)
+  local result = run_command_capture(args, { cwd = cwd })
+  local output = vim.trim((result.stdout or '') ~= '' and result.stdout or (result.stderr or ''))
+  if result.code ~= 0 then
+    return nil, output ~= '' and output or table.concat(args, ' ')
+  end
+  return output, nil
 end
 
 local function shell_command_text(args)
@@ -93,6 +130,13 @@ local function open_path(path)
   local _, err = window.open_path_safely(path)
   if err then
     notify('Opened with a fallback buffer after :edit failed: ' .. tostring(err), vim.log.levels.WARN)
+  end
+end
+
+local function invalidate_mcp_completion_cache()
+  local input_mod = package.loaded['copilot_agent.input']
+  if input_mod and type(input_mod.invalidate_mcp_completion_cache) == 'function' then
+    input_mod.invalidate_mcp_completion_cache()
   end
 end
 
@@ -2286,11 +2330,27 @@ local function collect_mcp_entries(sources)
           for index, entry in ipairs(servers) do
             local name = nil
             local disabled = false
+            local command = nil
+            local args = nil
+            local url = nil
+            local cwd = nil
+            local entry_type = nil
+            local entry_source = nil
+            local source_path = nil
+            local env = nil
             if type(entry) == 'string' then
               name = entry
             elseif type(entry) == 'table' then
               name = entry.name or entry.id
               disabled = entry.disabled == true
+              command = entry.command
+              args = entry.args
+              url = entry.url
+              cwd = entry.cwd
+              entry_type = entry.type
+              entry_source = entry.source
+              source_path = entry.sourcePath
+              env = entry.env
             end
             if type(name) == 'string' and name ~= '' then
               entries[#entries + 1] = {
@@ -2300,12 +2360,38 @@ local function collect_mcp_entries(sources)
                 list = true,
                 index = index,
                 disabled = disabled,
+                command = command,
+                args = args,
+                url = url,
+                cwd = cwd,
+                type = entry_type,
+                source = entry_source,
+                sourcePath = source_path,
+                env = env,
               }
             end
           end
         else
           for name, entry in pairs(servers) do
             if type(name) == 'string' and name ~= '' then
+              local command = nil
+              local args = nil
+              local url = nil
+              local cwd = nil
+              local entry_type = nil
+              local entry_source = nil
+              local source_path = nil
+              local env = nil
+              if type(entry) == 'table' then
+                command = entry.command
+                args = entry.args
+                url = entry.url
+                cwd = entry.cwd
+                entry_type = entry.type
+                entry_source = entry.source
+                source_path = entry.sourcePath
+                env = entry.env
+              end
               entries[#entries + 1] = {
                 name = name,
                 path = source.path,
@@ -2313,6 +2399,14 @@ local function collect_mcp_entries(sources)
                 list = false,
                 key = name,
                 disabled = type(entry) == 'table' and entry.disabled == true,
+                command = command,
+                args = args,
+                url = url,
+                cwd = cwd,
+                type = entry_type,
+                source = entry_source,
+                sourcePath = source_path,
+                env = env,
               }
             end
           end
@@ -2374,34 +2468,327 @@ local function ensure_root_mcp_config()
   return path, payload or {}, nil
 end
 
-local function mcp_show_command(target_name)
+local function mcp_entry_disabled_from_config(name, path)
+  if type(name) ~= 'string' or name == '' or type(path) ~= 'string' or path == '' then
+    return false
+  end
+
+  local decoded = read_mcp_config(path)
+  if type(decoded) ~= 'table' then
+    return false
+  end
+
+  local function entry_disabled(value)
+    return type(value) == 'table' and value.disabled == true
+  end
+
+  for _, container in ipairs({ 'mcpServers', 'servers' }) do
+    local servers = decoded[container]
+    if type(servers) == 'table' then
+      if is_list and is_list(servers) then
+        for _, entry in ipairs(servers) do
+          if type(entry) == 'string' and entry == name then
+            return false
+          elseif type(entry) == 'table' then
+            local entry_name = entry.name or entry.id
+            if entry_name == name then
+              return entry_disabled(entry)
+            end
+          end
+        end
+      else
+        local entry = servers[name]
+        if entry ~= nil then
+          return entry_disabled(entry)
+        end
+      end
+    end
+  end
+
+  return false
+end
+
+local function normalize_mcp_source_path(entry)
+  if type(entry.sourcePath) == 'string' and entry.sourcePath ~= '' then
+    return entry.sourcePath
+  end
+  if type(entry.source) == 'string' and entry.source:lower() == 'user' then
+    return vim.fn.expand('~/.copilot/mcp-config.json')
+  end
+  return nil
+end
+
+local function mcp_entries_from_cli()
+  local output, err = run_command({ 'copilot', 'mcp', 'list', '--json' }, working_directory())
+  if err then
+    return nil, err
+  end
+
+  local decoded, decode_err = http.decode_json(output or '', { log = false })
+  if type(decoded) ~= 'table' then
+    return nil, 'Failed to decode `copilot mcp list --json`: ' .. tostring(decode_err)
+  end
+
+  local servers = decoded.mcpServers
+  if type(servers) ~= 'table' then
+    return {}, nil
+  end
+
+  local entries = {}
+  for name, entry in pairs(servers) do
+    if type(name) == 'string' and name ~= '' and type(entry) == 'table' then
+      local source_path = normalize_mcp_source_path(entry)
+      entries[#entries + 1] = {
+        name = name,
+        type = entry.type,
+        source = entry.source,
+        sourcePath = source_path,
+        command = entry.command,
+        args = entry.args,
+        cwd = entry.cwd,
+        url = entry.url,
+        env = entry.env,
+        disabled = entry.disabled == true or mcp_entry_disabled_from_config(name, source_path),
+      }
+    end
+  end
+
+  table.sort(entries, function(left, right)
+    if left.name ~= right.name then
+      return left.name < right.name
+    end
+    local left_kind = first_non_empty_string(left.type, left.source) or ''
+    local right_kind = first_non_empty_string(right.type, right.source) or ''
+    if left_kind ~= right_kind then
+      return left_kind < right_kind
+    end
+    local left_detail = first_non_empty_string(left.command, left.url, left.sourcePath, left.cwd) or ''
+    local right_detail = first_non_empty_string(right.command, right.url, right.sourcePath, right.cwd) or ''
+    return left_detail < right_detail
+  end)
+
+  return entries, nil
+end
+
+local function mcp_entries_from_sources()
   local sources, source_err = load_mcp_sources()
   if source_err then
-    append_entry('error', source_err)
-    return true
+    return nil, source_err
   end
-
   local entries = collect_mcp_entries(sources)
+  for _, entry in ipairs(entries) do
+    if type(entry.sourcePath) ~= 'string' or entry.sourcePath == '' then
+      entry.sourcePath = entry.path
+    end
+    if type(entry.source) ~= 'string' or entry.source == '' then
+      entry.source = 'workspace'
+    end
+  end
+  return entries, nil
+end
+
+local function expand_mcp_template(value)
+  if type(value) ~= 'string' then
+    return value
+  end
+  local wd = working_directory()
+  local home = vim.fn.expand('~')
+  local basename = wd ~= '' and vim.fn.fnamemodify(wd, ':t') or ''
+  return (value:gsub('%${workspaceFolder}', wd):gsub('%${workspaceRoot}', wd):gsub('%${workspaceFolderBasename}', basename):gsub('%${userHome}', home))
+end
+
+local function mcp_probe_line_detail(text)
+  if type(text) ~= 'string' then
+    return ''
+  end
+  local trimmed = vim.trim(text)
+  if trimmed == '' then
+    return ''
+  end
+  local lines = split_lines(trimmed)
+  local first = vim.trim(lines[1] or '')
+  return first
+end
+
+local function mcp_initialize_probe_payload()
+  local payload = http.encode_json({
+    jsonrpc = '2.0',
+    id = 1,
+    method = 'initialize',
+    params = {
+      protocolVersion = MCP_INITIALIZE_PROTOCOL_VERSION,
+      capabilities = {},
+      clientInfo = {
+        name = 'copilot-agent.nvim',
+        version = '0.0.0',
+      },
+    },
+  })
+  return string.format('Content-Length: %d\r\n\r\n%s', #payload, payload)
+end
+
+local function mcp_probe_stdio(entry)
+  local command = expand_mcp_template(entry.command)
+  if type(command) ~= 'string' or command == '' then
+    return false, 'unhealthy', 'missing command'
+  end
+
+  local command_args = { command }
+  if type(entry.args) == 'table' then
+    for _, value in ipairs(entry.args) do
+      command_args[#command_args + 1] = tostring(expand_mcp_template(value))
+    end
+  end
+
+  local probe_cwd = expand_mcp_template(entry.cwd)
+  if type(probe_cwd) ~= 'string' or probe_cwd == '' then
+    probe_cwd = working_directory()
+  end
+
+  local result = run_command_capture(command_args, {
+    cwd = probe_cwd,
+    stdin = mcp_initialize_probe_payload(),
+    timeout = MCP_HEALTH_TIMEOUT_MS,
+    env = type(entry.env) == 'table' and entry.env or nil,
+  })
+  local output = (result.stdout or '') .. '\n' .. (result.stderr or '')
+  if result.code == 124 then
+    return false, 'timeout', 'probe timed out'
+  end
+  if output:find('"jsonrpc"%s*:%s*"2.0"') and output:find('"id"%s*:%s*1') and output:find('"result"%s*:') then
+    return true, 'healthy', 'initialize responded'
+  end
+  if result.code ~= 0 then
+    return false, 'unhealthy', mcp_probe_line_detail(output ~= '' and output or ('exit code ' .. tostring(result.code)))
+  end
+  return false, 'unhealthy', 'no initialize response'
+end
+
+local function mcp_probe_http(entry)
+  local url = expand_mcp_template(entry.url)
+  if type(url) ~= 'string' or url == '' then
+    return false, 'unhealthy', 'missing url'
+  end
+
+  local timeout_seconds = string.format('%.1f', MCP_HEALTH_TIMEOUT_MS / 1000)
+  local result = run_command_capture({
+    'curl',
+    '--silent',
+    '--show-error',
+    '--location',
+    '--max-time',
+    timeout_seconds,
+    '-o',
+    '/dev/null',
+    '-w',
+    '%{http_code}',
+    url,
+  }, {
+    timeout = MCP_HEALTH_TIMEOUT_MS,
+  })
+
+  local http_code = vim.trim(result.stdout or '')
+  if result.code == 124 then
+    return false, 'timeout', 'probe timed out'
+  end
+  if http_code ~= '' and http_code ~= '000' then
+    return true, 'healthy', 'http ' .. http_code
+  end
+  if result.code ~= 0 then
+    local detail = mcp_probe_line_detail((result.stderr or '') ~= '' and result.stderr or ('exit code ' .. tostring(result.code)))
+    if detail:lower():find('timed out', 1, true) then
+      return false, 'timeout', detail
+    end
+    return false, 'unhealthy', detail
+  end
+  return false, 'unhealthy', 'connection failed'
+end
+
+local function probe_mcp_health(entry)
+  if entry.disabled == true then
+    return false, 'disabled', 'disabled in config'
+  end
+
+  local entry_type = type(entry.type) == 'string' and entry.type:lower() or ''
+  local has_command = type(entry.command) == 'string' and entry.command ~= ''
+  local has_url = type(entry.url) == 'string' and entry.url ~= ''
+  if has_command or entry_type:find('stdio', 1, true) then
+    return mcp_probe_stdio(entry)
+  end
+  if has_url or entry_type:find('http', 1, true) or entry_type:find('sse', 1, true) then
+    return mcp_probe_http(entry)
+  end
+  return false, 'unknown', 'no probe method for type ' .. (entry.type or 'unknown')
+end
+
+local function mcp_entry_display_detail(entry)
+  if type(entry.command) == 'string' and entry.command ~= '' then
+    local detail = entry.command
+    if type(entry.args) == 'table' and not vim.tbl_isempty(entry.args) then
+      local args = {}
+      for _, value in ipairs(entry.args) do
+        args[#args + 1] = tostring(value)
+      end
+      detail = detail .. ' ' .. table.concat(args, ' ')
+    end
+    return detail
+  end
+  return first_non_empty_string(entry.url, entry.sourcePath, entry.cwd) or '-'
+end
+
+local function mcp_entry_display_kind(entry)
+  return first_non_empty_string(entry.type, entry.source) or 'unknown'
+end
+
+local function filter_mcp_health_entries(entries, target_name)
+  local needle = vim.trim(target_name or '')
+  if needle == '' then
+    return entries
+  end
+
+  needle = needle:lower()
+  local matches = {}
+  for _, entry in ipairs(entries or {}) do
+    if type(entry.name) == 'string' and entry.name:lower() == needle then
+      matches[#matches + 1] = entry
+    end
+  end
+  return matches
+end
+
+local function mcp_show_command(target_name)
+  local entries, err = mcp_entries_from_cli()
+  if err then
+    entries, err = mcp_entries_from_sources()
+  end
+  if err then
+    append_entry('error', 'Unable to read MCP status: ' .. err)
+    return true
+  end
   if vim.tbl_isempty(entries) then
-    append_entry('system', 'No MCP servers configured in .mcp.json, .vscode/mcp.json, or ~/.copilot/mcp-config.json')
+    append_entry('system', 'No MCP status available')
     return true
   end
 
-  local selected = find_mcp_entries(entries, target_name)
+  local selected = filter_mcp_health_entries(entries, target_name)
   if vim.tbl_isempty(selected) then
     append_entry('error', 'Unknown MCP server: ' .. target_name)
     return true
   end
 
-  local lines = {}
-  if vim.trim(target_name or '') == '' then
-    lines[#lines + 1] = 'Discovered MCP servers:'
-  else
-    lines[#lines + 1] = 'MCP server "' .. target_name .. '":'
-  end
-
+  local lines = { 'MCP server health:' }
   for _, entry in ipairs(selected) do
-    lines[#lines + 1] = '  - ' .. mcp_entry_label(entry)
+    local healthy, health_status, health_detail = probe_mcp_health(entry)
+    local symbol = healthy and '✓' or (health_status == 'unknown' and '?' or '✗')
+    lines[#lines + 1] = string.format(
+      '  %s %-18s %-12s %-30s health: %s%s',
+      symbol,
+      tostring(entry.name),
+      mcp_entry_display_kind(entry),
+      mcp_entry_display_detail(entry),
+      health_status,
+      health_detail ~= '' and (' (' .. health_detail .. ')') or ''
+    )
   end
 
   append_entry('system', table.concat(lines, '\n'))
@@ -2545,6 +2932,7 @@ local function mcp_add_command(args)
 
   open_path(path)
   append_entry('system', 'Added MCP server "' .. name .. '" to ' .. vim.fn.fnamemodify(path, ':~:.'))
+  invalidate_mcp_completion_cache()
   return true
 end
 
@@ -2611,6 +2999,7 @@ local function mcp_delete_command(target_name)
   end
 
   append_entry('system', string.format('Deleted MCP server "%s" from %d entr%s', target_name, #entries, #entries == 1 and 'y' or 'ies'))
+  invalidate_mcp_completion_cache()
   return true
 end
 
@@ -2673,6 +3062,7 @@ local function mcp_set_disabled(target_name, disabled)
   end
 
   append_entry('system', string.format('%s MCP server "%s" in %d entr%s', disabled and 'Disabled' or 'Enabled', target_name, #entries, #entries == 1 and 'y' or 'ies'))
+  invalidate_mcp_completion_cache()
   return true
 end
 
@@ -2710,6 +3100,7 @@ local function mcp_reload_command(args)
         append_entry('error', 'MCP reload failed: ' .. resume_err)
         return
       end
+      invalidate_mcp_completion_cache()
       append_entry('system', 'Reloaded MCP config for session ' .. session_id)
     end)
   end)

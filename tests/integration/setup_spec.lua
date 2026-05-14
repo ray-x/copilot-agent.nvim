@@ -6247,38 +6247,112 @@ describe('mcp slash command', function()
   end)
 
   it('supports show, add, disable, enable, delete, and edit actions', function()
-    assert_true(slash.execute('/mcp show'))
-    vim.wait(20)
-    local show_message = agent.state.entries[#agent.state.entries].content
-    assert_true(show_message:find('local', 1, true) ~= nil)
-    assert_true(show_message:find('browser', 1, true) ~= nil)
+    local original_system = vim.system
+    local mcp_list_output = [[
+{
+  "mcpServers": {
+    "local": {
+      "type": "stdio",
+      "command": "/Users/rayxu/.local/bin/local-mcp",
+      "args": ["--stdio"],
+      "source": "workspace"
+    },
+    "docs": {
+      "type": "stdio",
+      "command": "docs-mcp",
+      "source": "workspace"
+    },
+    "browser": {
+      "type": "sse",
+      "url": "https://mcp.browser.example/v1/mcp",
+      "source": "plugin:ravi"
+    }
+  }
+}
+]]
 
-    assert_true(slash.execute('/mcp add docs docs-mcp --stdio'))
-    local added = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
-    assert_eq('docs-mcp', added.mcpServers.docs.command)
-    assert.same({ '--stdio' }, added.mcpServers.docs.args)
-
-    assert_true(slash.execute('/mcp disable docs'))
-    local disabled = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
-    assert_true(disabled.mcpServers.docs.disabled == true)
-
-    assert_true(slash.execute('/mcp enable docs'))
-    local enabled = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
-    assert_false(enabled.mcpServers.docs.disabled == true)
-
-    local original_cmd = vim.cmd
-    local edit_command = nil
-    vim.cmd = function(command)
-      edit_command = command
+    vim.system = function(args, opts)
+      if args[1] == 'copilot' and args[2] == 'mcp' and args[3] == 'list' and args[4] == '--json' then
+        return {
+          wait = function()
+            return { code = 0, stdout = mcp_list_output, stderr = '' }
+          end,
+        }
+      end
+      if args[1] == '/Users/rayxu/.local/bin/local-mcp' then
+        return {
+          wait = function()
+            assert_true(type(opts) == 'table' and type(opts.stdin) == 'string' and opts.stdin:find('"method":"initialize"', 1, true) ~= nil)
+            return { code = 0, stdout = '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}', stderr = '' }
+          end,
+        }
+      end
+      if args[1] == 'docs-mcp' then
+        return {
+          wait = function()
+            return { code = 1, stdout = '', stderr = 'spawn docs-mcp ENOENT' }
+          end,
+        }
+      end
+      if args[1] == 'curl' and args[#args] == 'https://mcp.browser.example/v1/mcp' then
+        return {
+          wait = function()
+            return { code = 0, stdout = '200', stderr = '' }
+          end,
+        }
+      end
+      return original_system(args, opts)
     end
-    assert_true(slash.execute('/mcp edit docs'))
-    vim.cmd = original_cmd
-    assert_true(type(edit_command) == 'string' and edit_command:find('edit ', 1, true) == 1)
-    assert_true(edit_command:find(vim.fn.fnameescape(root_mcp), 1, true) ~= nil)
 
-    assert_true(slash.execute('/mcp delete docs'))
-    local deleted = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
-    assert_eq(nil, deleted.mcpServers.docs)
+    local ok, err = pcall(function()
+      assert_true(slash.execute('/mcp show'))
+      vim.wait(20)
+      local show_message = agent.state.entries[#agent.state.entries].content
+      assert_true(show_message:find('MCP server health:', 1, true) ~= nil)
+      assert_true(show_message:find('local', 1, true) ~= nil)
+      assert_true(show_message:find('docs', 1, true) ~= nil)
+      assert_true(show_message:find('browser', 1, true) ~= nil)
+      assert_true(show_message:find('health: healthy', 1, true) ~= nil)
+      assert_true(show_message:find('health: unhealthy', 1, true) ~= nil)
+
+      assert_true(slash.execute('/mcp show local'))
+      vim.wait(20)
+      local local_message = agent.state.entries[#agent.state.entries].content
+      assert_true(local_message:find('local', 1, true) ~= nil)
+      assert_true(local_message:find('docs', 1, true) == nil)
+      assert_true(local_message:find('browser', 1, true) == nil)
+      assert_true(local_message:find('health: healthy', 1, true) ~= nil)
+
+      assert_true(slash.execute('/mcp add docs docs-mcp --stdio'))
+      local added = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+      assert_eq('docs-mcp', added.mcpServers.docs.command)
+      assert.same({ '--stdio' }, added.mcpServers.docs.args)
+
+      assert_true(slash.execute('/mcp disable docs'))
+      local disabled = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+      assert_true(disabled.mcpServers.docs.disabled == true)
+
+      assert_true(slash.execute('/mcp enable docs'))
+      local enabled = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+      assert_false(enabled.mcpServers.docs.disabled == true)
+
+      local original_cmd = vim.cmd
+      local edit_command = nil
+      vim.cmd = function(command)
+        edit_command = command
+      end
+      assert_true(slash.execute('/mcp edit docs'))
+      vim.cmd = original_cmd
+      assert_true(type(edit_command) == 'string' and edit_command:find('edit ', 1, true) == 1)
+      assert_true(edit_command:find(vim.fn.fnameescape(root_mcp), 1, true) ~= nil)
+
+      assert_true(slash.execute('/mcp delete docs'))
+      local deleted = vim.json.decode(table.concat(vim.fn.readfile(root_mcp), '\n'))
+      assert_eq(nil, deleted.mcpServers.docs)
+    end)
+
+    vim.system = original_system
+    assert_true(ok, err)
   end)
 
   it('reconnects the current session for /mcp reload', function()
@@ -7674,6 +7748,31 @@ describe('chat session activation', function()
     assert_true(type(captured_opts[2]) == 'table')
     assert_true(captured_opts[2].open_input_on_session_ready)
     assert_true(not (agent.state.input_winid and vim.api.nvim_win_is_valid(agent.state.input_winid)))
+  end)
+
+  it('reuses an existing chat buffer when naming a freshly created one collides', function()
+    local original_list_bufs = vim.api.nvim_list_bufs
+    local hidden_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(hidden_buf, 'CopilotAgentChat')
+
+    local list_calls = 0
+    vim.api.nvim_list_bufs = function()
+      list_calls = list_calls + 1
+      if list_calls == 1 then
+        return {}
+      end
+      return original_list_bufs()
+    end
+
+    local ok, err = pcall(agent.open_chat)
+    vim.api.nvim_list_bufs = original_list_bufs
+    if not ok then
+      error(err)
+    end
+
+    assert_eq(hidden_buf, agent.state.chat_bufnr)
+    assert_true(vim.api.nvim_buf_is_valid(agent.state.chat_bufnr))
+    pcall(vim.api.nvim_buf_delete, hidden_buf, { force = true })
   end)
 
   it('opens chat from a floating current window by splitting a normal window instead', function()
@@ -11343,6 +11442,71 @@ describe('chat input behavior', function()
     assert_true(vim.tbl_contains(mcp_show_words, '/mcp show docs'))
     assert_true(vim.tbl_contains(mcp_show_words, '/mcp show browser'))
     assert_true(vim.tbl_contains(instruction_words, '/instructions .github/copilot-instructions.md'))
+  end)
+
+  it('shows mcp status details in slash completion labels', function()
+    ensure_dev_input_module()
+
+    local original_system = vim.system
+    local original_executable = vim.fn.executable
+    local sample_json = [[
+{
+  "mcpServers": {
+    "fff finder": {
+      "type": "stdio",
+      "command": "/Users/rayxu/.local/bin/fff-mcp",
+      "args": [],
+      "source": "user"
+    }
+  }
+}
+]]
+
+    vim.fn.executable = function(name)
+      if name == 'copilot' then
+        return 1
+      end
+      return original_executable(name)
+    end
+
+    vim.system = function(args, opts)
+      if args[1] == 'copilot' and args[2] == 'mcp' and args[3] == 'list' and args[4] == '--json' then
+        return {
+          wait = function()
+            return { code = 0, stdout = sample_json, stderr = '' }
+          end,
+        }
+      end
+      return original_system(args, opts)
+    end
+
+    local ok, items = pcall(function()
+      agent.open_chat()
+      input.open_input_window()
+
+      local prefix = input._input_prompt_prefix(agent.state.input_bufnr)
+      local line = prefix .. '/mcp show '
+      vim.api.nvim_set_current_win(agent.state.input_winid)
+      vim.api.nvim_buf_set_lines(agent.state.input_bufnr, 0, -1, false, { line })
+      vim.api.nvim_win_set_cursor(agent.state.input_winid, { 1, #line })
+      return input._input_omnifunc(0, '')
+    end)
+
+    vim.system = original_system
+    vim.fn.executable = original_executable
+    input.invalidate_mcp_completion_cache()
+
+    assert_true(ok)
+    local by_word = {}
+    for _, item in ipairs(items) do
+      by_word[item.word] = item
+    end
+
+    local item = by_word['/mcp show fff finder']
+    assert_not_nil(item)
+    assert_true(item.abbr:find('^✓ fff finder') ~= nil)
+    assert_true(item.menu:find('stdio', 1, true) ~= nil)
+    assert_true(item.menu:find('fff-mcp', 1, true) ~= nil)
   end)
 
   it('treats a single trailing space as a trigger character for sub-command completion', function()

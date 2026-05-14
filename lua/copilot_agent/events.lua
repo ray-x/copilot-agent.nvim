@@ -1950,8 +1950,14 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
   append_entry('system', 'Event stream disconnected. Reconnecting...')
 
   if debug_reconnect then
-    local detail =
-      string.format('SSE exit code=%s stderr=%s session=%s base_url=%s', tostring(code), tostring(stderr_message or ''):sub(1, 200), tostring(session_id), tostring(state.config.base_url or ''))
+    local detail = string.format(
+      '[%s] SSE exit code=%s stderr=%s session=%s base_url=%s',
+      os.date('%H:%M:%S'),
+      tostring(code),
+      tostring(stderr_message or ''):sub(1, 200),
+      tostring(session_id),
+      tostring(state.config.base_url or '')
+    )
     notify(detail, vim.log.levels.DEBUG)
   end
 
@@ -1973,7 +1979,7 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
     end
 
     if debug_reconnect then
-      notify(string.format('Service alive at %s, resuming session %s', tostring(state.config.base_url or ''), tostring(session_id)), vim.log.levels.DEBUG)
+      notify(string.format('[%s] Service alive at %s, resuming session %s', os.date('%H:%M:%S'), tostring(state.config.base_url or ''), tostring(session_id)), vim.log.levels.DEBUG)
     end
 
     state.creating_session = true
@@ -1989,7 +1995,7 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
       end
       if resume_err and session.is_missing_session_error(resume_err) then
         if debug_reconnect then
-          notify(string.format('Session %s missing on server, recovering after restart', tostring(session_id)), vim.log.levels.DEBUG)
+          notify(string.format('[%s] Session %s missing on server, recovering after restart', os.date('%H:%M:%S'), tostring(session_id)), vim.log.levels.DEBUG)
         end
         session.recover_after_service_restart(session_id, function(_, recovery_err)
           if neovim_is_exiting() then
@@ -2000,7 +2006,7 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
           if recovery_err then
             append_entry('error', 'Failed to recover event stream: ' .. recovery_err)
           elseif debug_reconnect then
-            notify('Session recovered after service restart', vim.log.levels.DEBUG)
+            notify(string.format('[%s] Session recovered after service restart', os.date('%H:%M:%S')), vim.log.levels.DEBUG)
           end
         end)
         return
@@ -2009,7 +2015,7 @@ function M._handle_event_stream_exit(session_id, code, stderr_message, opts)
       if resume_err then
         append_entry('error', 'Failed to recover event stream: ' .. resume_err)
       elseif debug_reconnect then
-        notify(string.format('SSE reconnected session=%s url=%s', tostring(session_id), tostring(state.config.base_url or '')), vim.log.levels.DEBUG)
+        notify(string.format('[%s] SSE reconnected session=%s url=%s', os.date('%H:%M:%S'), tostring(session_id), tostring(state.config.base_url or '')), vim.log.levels.DEBUG)
       end
     end, {
       guard_current_session_id = session_id,
@@ -2568,7 +2574,7 @@ local function handle_host_event(event_name, payload)
     refresh_statuslines()
   elseif event_name == 'host.history_done' then
     if should_log(vim.log.levels.DEBUG) then
-      notify(string.format('History replay finished session=%s entries=%d', tostring(state.session_id), #state.entries), vim.log.levels.DEBUG)
+      notify(string.format('[%s] History replay finished session=%s entries=%d', os.date('%H:%M:%S'), tostring(state.session_id), #state.entries), vim.log.levels.DEBUG)
     end
     state.history_loading = false
     state.history_replay_turn_index = 0
@@ -3758,7 +3764,7 @@ function M.start_event_stream(session_id)
   state.history_pending_user_entries = {}
 
   if should_log(vim.log.levels.DEBUG) then
-    notify(string.format('Starting SSE stream session=%s history=true', tostring(session_id)), vim.log.levels.DEBUG)
+    notify(string.format('[%s] Starting SSE stream session=%s history=true', os.date('%H:%M:%S'), tostring(session_id)), vim.log.levels.DEBUG)
   end
 
   preload_history_checkpoint_ids(session_id)

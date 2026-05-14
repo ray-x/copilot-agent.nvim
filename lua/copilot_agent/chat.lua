@@ -261,6 +261,11 @@ local function ensure_chat_hover_autocmds(bufnr)
     group = group,
     buffer = bufnr,
     callback = function()
+      -- Don't close hover when cursor movement is caused by buffer writes
+      -- during stream updates (nvim_buf_set_lines triggers CursorMoved).
+      if state.stream_updating then
+        return
+      end
       if state.activity_hover_keep_on_next_chat_winleave then
         state.activity_hover_keep_on_next_chat_winleave = false
         return
@@ -319,6 +324,36 @@ local function find_chat_buffer_by_name(buf_name)
     end
   end
   return nil
+end
+
+local function configure_chat_buffer(bufnr)
+  vim.bo[bufnr].buftype = 'nofile'
+  vim.bo[bufnr].buflisted = true
+  vim.bo[bufnr].bufhidden = 'hide'
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].filetype = 'markdown'
+  vim.bo[bufnr].modifiable = false
+  vim.bo[bufnr].readonly = true
+end
+
+local function claim_chat_buffer_name(bufnr, buf_name)
+  local ok, err = pcall(vim.api.nvim_buf_set_name, bufnr, buf_name)
+  if ok then
+    return bufnr
+  end
+
+  if type(err) == 'string' and err:find('Buffer with this name already exists', 1, true) then
+    local existing_bufnr = vim.fn.bufnr(buf_name)
+    if existing_bufnr <= 0 then
+      existing_bufnr = find_chat_buffer_by_name(buf_name)
+    end
+    if existing_bufnr and existing_bufnr ~= bufnr then
+      pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+      return existing_bufnr
+    end
+  end
+
+  error(err)
 end
 
 local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
@@ -595,6 +630,7 @@ function M.ensure_chat_window(opts)
   local buf_name = (state.config.chat and state.config.chat.buf_name) or 'CopilotAgentChat'
 
   if state.chat_bufnr and vim.api.nvim_buf_is_valid(state.chat_bufnr) then
+    configure_chat_buffer(state.chat_bufnr)
     local chat_winid = M.find_chat_window()
     if chat_winid then
       state.chat_winid = chat_winid
@@ -624,6 +660,7 @@ function M.ensure_chat_window(opts)
   local existing_bufnr = find_chat_buffer_by_name(buf_name)
   if existing_bufnr then
     state.chat_bufnr = existing_bufnr
+    configure_chat_buffer(existing_bufnr)
     local chat_winid = M.find_chat_window()
     if chat_winid then
       attach_chat_markdown(chat_winid)
@@ -650,15 +687,9 @@ function M.ensure_chat_window(opts)
 
   -- Create the chat buffer; set options once here, not on every render.
   state.chat_bufnr = vim.api.nvim_create_buf(false, true)
-  local bufnr = state.chat_bufnr
-  vim.bo[bufnr].buftype = 'nofile'
-  vim.bo[bufnr].buflisted = true
-  vim.bo[bufnr].bufhidden = 'hide'
-  vim.bo[bufnr].swapfile = false
-  vim.bo[bufnr].filetype = 'markdown'
-  vim.bo[bufnr].modifiable = false
-  vim.bo[bufnr].readonly = true
-  vim.api.nvim_buf_set_name(bufnr, buf_name)
+  local bufnr = claim_chat_buffer_name(state.chat_bufnr, buf_name)
+  state.chat_bufnr = bufnr
+  configure_chat_buffer(bufnr)
 
   open_chat_win(bufnr, opts)
   refresh_chat_statusline()

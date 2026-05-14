@@ -3370,6 +3370,7 @@ function M.render_chat()
   state._rendered_line_count = total_lines
   state.chat_tail_spacer_lines = tail_spacer_lines
 
+  state.stream_updating = true
   vim.bo[bufnr].modifiable = true
   vim.bo[bufnr].readonly = false
   vim.api.nvim_buf_set_lines(bufnr, frozen_lines, -1, false, lines)
@@ -3386,6 +3387,7 @@ function M.render_chat()
   if not followed and at_bottom then
     M.scroll_to_bottom()
   end
+  state.stream_updating = false
   M.notify_render_plugins(bufnr)
   M.refresh_reasoning_overlay()
 
@@ -3493,6 +3495,7 @@ function M.stream_update(entry, idx)
         )
       end
       window.sync_chat_markdown_conceal(state.chat_winid)
+      state.stream_updating = true
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
       vim.api.nvim_buf_set_lines(bufnr, state.stream_line_start, content_end, false, new_lines)
@@ -3505,6 +3508,7 @@ function M.stream_update(entry, idx)
       if not followed and at_bottom then
         M.scroll_to_bottom()
       end
+      state.stream_updating = false
       M.refresh_reasoning_overlay()
     end)
   )
@@ -3575,6 +3579,7 @@ function M.append_entry(kind, content, attachments, opts)
         insert_start = merged_assistant_replace_start(bufnr, content_end)
       end
       state.entry_row_index[insert_start] = idx
+      state.stream_updating = true
       vim.bo[bufnr].modifiable = true
       vim.bo[bufnr].readonly = false
       vim.api.nvim_buf_set_lines(bufnr, insert_start, content_end, false, new_lines)
@@ -3591,6 +3596,7 @@ function M.append_entry(kind, content, attachments, opts)
           M.scroll_to_bottom()
         end
       end
+      state.stream_updating = false
     end
   else
     M.schedule_render()

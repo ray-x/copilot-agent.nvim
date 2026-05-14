@@ -117,6 +117,26 @@ end
 local shared_service_url = string.format('http://127.0.0.1:%d', shared_service_port)
 local shared_service_socket = vim.fn.stdpath('state') .. '/copilot-agent.sock'
 
+-- Kill any stale copilot-agent processes left over from prior test runs that
+-- are using the same control socket path.
+local function cleanup_stale_services()
+  local pgrep = vim.fn.system({ 'pgrep', '-f', 'copilot-agent.*' .. vim.fn.fnamemodify(shared_service_socket, ':t') })
+  if vim.v.shell_error == 0 and type(pgrep) == 'string' then
+    for pid_str in pgrep:gmatch('%d+') do
+      local pid = tonumber(pid_str)
+      if pid and pid ~= vim.fn.getpid() then
+        vim.fn.system({ 'kill', tostring(pid) })
+      end
+    end
+    -- Give processes a moment to terminate
+    vim.wait(500, function() return false end, 50)
+  end
+end
+
+cleanup_stale_services()
+
+local shared_service_job_id
+
 local function start_shared_service()
   local binary = dev_root .. '/bin/copilot-agent'
   local args
@@ -126,11 +146,10 @@ local function start_shared_service()
     args = { 'go', 'run', '.', '-addr', '127.0.0.1:' .. tostring(shared_service_port), '-control-socket', shared_service_socket, '-lsp=false' }
   end
 
-  local job_id = vim.fn.jobstart(args, {
+  shared_service_job_id = vim.fn.jobstart(args, {
     cwd = dev_root .. '/server',
-    detach = 1,
   })
-  if job_id <= 0 then
+  if shared_service_job_id <= 0 then
     error('failed to start shared Copilot service')
   end
 
@@ -196,14 +215,21 @@ vim.cmd('silent! packadd plenary.nvim')
 
 vim.api.nvim_create_autocmd('VimLeavePre', {
   callback = function()
+    -- Graceful shutdown via HTTP
     if type(shared_service_url) == 'string' and shared_service_url ~= '' then
       pcall(vim.fn.system, {
         'curl',
         '-sS',
         '-X',
         'POST',
+        '--max-time',
+        '2',
         shared_service_url .. '/shutdown',
       })
+    end
+    -- Force-stop the job if it's still alive (kills process tree)
+    if shared_service_job_id and shared_service_job_id > 0 then
+      pcall(vim.fn.jobstop, shared_service_job_id)
     end
   end,
 })

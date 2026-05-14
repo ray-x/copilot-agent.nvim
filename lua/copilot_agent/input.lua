@@ -60,6 +60,53 @@ local mcp_name_action_lookup = {
   disable = true,
   enable = true,
 }
+local MCP_COMPLETION_CACHE_TTL_MS = 5000
+local mcp_completion_cache = {
+  cwd = nil,
+  fetched_at = 0,
+  items = nil,
+}
+local discovered_mcp_completion_items
+
+local function now_ms()
+  local uv = vim.uv or vim.loop
+  return uv and uv.now and uv.now() or math.floor(vim.fn.reltimefloat(vim.fn.reltime()) * 1000)
+end
+
+local function run_command(args, cwd)
+  if vim.system then
+    local result = vim.system(args, { text = true, cwd = cwd }):wait()
+    local output = vim.trim((result.stdout or '') ~= '' and result.stdout or (result.stderr or ''))
+    if result.code ~= 0 then
+      return nil, output ~= '' and output or table.concat(args, ' ')
+    end
+    return output, nil
+  end
+
+  local output = vim.fn.systemlist(args)
+  if vim.v.shell_error ~= 0 then
+    return nil, vim.trim(table.concat(output, '\n'))
+  end
+  return vim.trim(table.concat(output, '\n')), nil
+end
+
+local function read_json_file(path)
+  if vim.fn.filereadable(path) ~= 1 then
+    return nil
+  end
+  return http.decode_json(table.concat(vim.fn.readfile(path), '\n'))
+end
+
+local function first_non_empty_string(...)
+  for i = 1, select('#', ...) do
+    local value = select(i, ...)
+    if type(value) == 'string' and value ~= '' then
+      return value
+    end
+  end
+  return nil
+end
+
 local session_action_items = {
   'info',
   'checkpoints',
@@ -1127,54 +1174,173 @@ local function discovered_instruction_names()
 end
 
 local function discovered_mcp_names()
-  local wd = working_directory()
-  local items = {}
+  local items = discovered_mcp_completion_items()
+  local names = {}
   local seen = {}
-
-  local function add(name)
-    if type(name) ~= 'string' or name == '' or seen[name] then
-      return
+  for _, item in ipairs(items or {}) do
+    if type(item.name) == 'string' and item.name ~= '' and not seen[item.name] then
+      seen[item.name] = true
+      names[#names + 1] = item.name
     end
-    seen[name] = true
-    table.insert(items, name)
+  end
+  table.sort(names)
+  return names
+end
+
+local function mcp_completion_display_columns(entry)
+  local status = entry.disabled == true and '✗' or '✓'
+  local name = type(entry.name) == 'string' and entry.name or ''
+  local kind = first_non_empty_string(entry.type, entry.source) or ''
+  local detail = first_non_empty_string(entry.command, entry.url, entry.sourcePath, entry.cwd) or ''
+  local abbr = status .. ' ' .. name
+  local menu = kind
+  if detail ~= '' then
+    menu = menu ~= '' and (menu .. '  ' .. detail) or detail
+  end
+  return abbr, menu
+end
+
+local function mcp_entry_disabled_from_config(name, path)
+  if type(name) ~= 'string' or name == '' or type(path) ~= 'string' or path == '' then
+    return false
   end
 
-  local function add_from_value(value)
-    if type(value) == 'table' then
-      if islist(value) then
-        for _, entry in ipairs(value) do
-          if type(entry) == 'string' then
-            add(entry)
+  local decoded = read_json_file(path)
+  if type(decoded) ~= 'table' then
+    return false
+  end
+
+  local function entry_disabled(value)
+    return type(value) == 'table' and value.disabled == true
+  end
+
+  for _, container in ipairs({ 'mcpServers', 'servers' }) do
+    local servers = decoded[container]
+    if type(servers) == 'table' then
+      if islist and islist(servers) then
+        for _, entry in ipairs(servers) do
+          if type(entry) == 'string' and entry == name then
+            return false
           elseif type(entry) == 'table' then
-            add(entry.name or entry.id)
+            local entry_name = entry.name or entry.id
+            if entry_name == name then
+              return entry_disabled(entry)
+            end
           end
         end
       else
-        for name in pairs(value) do
-          add(name)
+        local entry = servers[name]
+        if entry ~= nil then
+          return entry_disabled(entry)
         end
       end
     end
   end
 
-  local function read_config(path)
-    if vim.fn.filereadable(path) ~= 1 then
-      return
-    end
-    local decoded = http.decode_json(table.concat(vim.fn.readfile(path), '\n'))
-    if type(decoded) ~= 'table' then
-      return
-    end
-    add_from_value(decoded.mcpServers)
-    add_from_value(decoded.servers)
+  return false
+end
+
+discovered_mcp_completion_items = function()
+  local cwd = working_directory()
+  local now = now_ms()
+  if mcp_completion_cache.cwd == cwd and type(mcp_completion_cache.items) == 'table' and (now - (mcp_completion_cache.fetched_at or 0)) < MCP_COMPLETION_CACHE_TTL_MS then
+    return mcp_completion_cache.items
   end
 
-  read_config(wd .. '/.mcp.json')
-  read_config(wd .. '/.vscode/mcp.json')
-  read_config(vim.fn.expand('~/.copilot/mcp-config.json'))
+  local output, err = run_command({ 'copilot', 'mcp', 'list', '--json' }, cwd)
+  local items = {}
+  if output and output ~= '' then
+    local decoded = http.decode_json(output, { log = false })
+    local servers = type(decoded) == 'table' and decoded.mcpServers or nil
+    if type(servers) == 'table' then
+      for name, entry in pairs(servers) do
+        if type(name) == 'string' and name ~= '' and type(entry) == 'table' then
+          local source_path = entry.sourcePath
+          if type(source_path) ~= 'string' or source_path == '' then
+            if entry.source == 'user' then
+              source_path = vim.fn.expand('~/.copilot/mcp-config.json')
+            end
+          end
 
-  table.sort(items)
+          items[#items + 1] = {
+            name = name,
+            type = entry.type,
+            source = entry.source,
+            sourcePath = source_path,
+            command = entry.command,
+            cwd = entry.cwd,
+            url = entry.url,
+            disabled = entry.disabled == true or mcp_entry_disabled_from_config(name, source_path),
+          }
+        end
+      end
+    end
+  end
+
+  local seen_names = {}
+  for _, entry in ipairs(items) do
+    if type(entry.name) == 'string' and entry.name ~= '' then
+      seen_names[entry.name] = true
+    end
+  end
+
+  for _, item in ipairs(require('copilot_agent.discovery').mcp_items()) do
+    if type(item.name) == 'string' and item.name ~= '' and not seen_names[item.name] then
+      items[#items + 1] = {
+        name = item.name,
+        type = 'config',
+        source = 'workspace',
+        sourcePath = item.path,
+        command = item.path,
+        disabled = false,
+      }
+      seen_names[item.name] = true
+    end
+  end
+
+  table.sort(items, function(left, right)
+    if left.name ~= right.name then
+      return left.name < right.name
+    end
+    local left_kind = first_non_empty_string(left.type, left.source) or ''
+    local right_kind = first_non_empty_string(right.type, right.source) or ''
+    if left_kind ~= right_kind then
+      return left_kind < right_kind
+    end
+    local left_detail = first_non_empty_string(left.command, left.url, left.sourcePath, left.cwd) or ''
+    local right_detail = first_non_empty_string(right.command, right.url, right.sourcePath, right.cwd) or ''
+    return left_detail < right_detail
+  end)
+
+  mcp_completion_cache.cwd = cwd
+  mcp_completion_cache.fetched_at = now
+  mcp_completion_cache.items = items
+  mcp_completion_cache.error = err
   return items
+end
+
+local function mcp_completion_items_for_query(query, prefix)
+  local lowered = vim.trim(query or ''):lower()
+  local items = {}
+  for _, entry in ipairs(discovered_mcp_completion_items()) do
+    if lowered == '' or vim.startswith(entry.name:lower(), lowered) then
+      local abbr, menu = mcp_completion_display_columns(entry)
+      items[#items + 1] = {
+        name = entry.name,
+        word = (type(prefix) == 'string' and prefix ~= '' and (prefix .. entry.name)) or entry.name,
+        abbr = abbr,
+        menu = menu,
+      }
+    end
+  end
+  return items
+end
+
+function M.invalidate_mcp_completion_cache()
+  mcp_completion_cache.cwd = nil
+  mcp_completion_cache.fetched_at = 0
+  mcp_completion_cache.items = nil
+  mcp_completion_cache.error = nil
 end
 
 local function discovered_model_ids()
@@ -1427,17 +1593,7 @@ local function slash_command_completion_items(completion_request)
       if #tokens > 1 and not has_trailing_space then
         name_query = tokens[#tokens]:lower()
       end
-      for _, name in ipairs(discovered_mcp_names()) do
-        if name_query == '' or vim.startswith(name:lower(), name_query) then
-          local full_word = '/mcp ' .. action .. ' ' .. name
-          items[#items + 1] = {
-            word = full_word,
-            abbr = full_word,
-            menu = '[mcp]',
-          }
-        end
-      end
-      return items
+      return mcp_completion_items_for_query(name_query, '/mcp ' .. action .. ' ')
     end
 
     if query == '' then
@@ -1461,15 +1617,7 @@ local function slash_command_completion_items(completion_request)
 
     if #tokens == 0 or not mcp_action_lookup[action] then
       local name_query = (#tokens > 0 and action or ''):lower()
-      for _, name in ipairs(discovered_mcp_names()) do
-        if name_query == '' or vim.startswith(name:lower(), name_query) then
-          items[#items + 1] = {
-            word = name,
-            abbr = name,
-            menu = '[mcp]',
-          }
-        end
-      end
+      vim.list_extend(items, mcp_completion_items_for_query(name_query))
     end
     return items
   end

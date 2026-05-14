@@ -660,7 +660,8 @@ local function lsp_only_command(service_url)
   if type(cmd) ~= 'table' or vim.tbl_isempty(cmd) then
     return nil
   end
-  return vim.list_extend(cmd, { '-lsp-only', '--service-url', service_url })
+  vim.list_extend(cmd, { '-lsp-only', '--service-url', service_url })
+  return cmd
 end
 
 function M.paste_clipboard_image()

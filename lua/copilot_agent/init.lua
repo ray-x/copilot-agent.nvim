@@ -25,6 +25,7 @@ local cfg = require('copilot_agent.config')
 local defaults = cfg.defaults
 local state = cfg.state
 local notify = cfg.notify
+local log = cfg.log
 local normalize_base_url = cfg.normalize_base_url
 
 local service = require('copilot_agent.service')
@@ -144,6 +145,14 @@ function M.setup(opts)
   end
   state.config.base_url = normalize_base_url(state.config.base_url)
   state.service_launch_info = describe_service_launch()
+  state.service_job_id = nil
+  state.service_process_pid = nil
+  state.client_registered_base_url = nil
+  state.service_starting = false
+  state.service_addr_known = false
+  state.pending_service_callbacks = {}
+  state.service_output = {}
+  state.lsp_client_id = nil
   state.shutting_down = false
   -- Initialize runtime permission mode from config.
   state.permission_mode = state.config.permission_mode or 'interactive'
@@ -263,21 +272,46 @@ function M.setup(opts)
     end,
   })
   events.remember_open_buffer_disk_state()
-  service.register_client_lease()
   -- Clean up clipboard temp files if Neovim exits before they were sent.
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = vim.api.nvim_create_augroup('CopilotAgentCleanup', { clear = true }),
     callback = function()
+      log(string.format('VimLeavePre cleanup start pid=%d', vim.fn.getpid()), vim.log.levels.DEBUG)
       state.shutting_down = true
-      events.stop_event_stream()
-      local ok, logger = pcall(require, 'copilot_agent.log')
-      if ok and type(logger.flush_pending) == 'function' then
-        logger.flush_pending()
+      local ok, err = pcall(events.stop_event_stream)
+      if ok then
+        log('VimLeavePre stopped event stream', vim.log.levels.DEBUG)
+      else
+        log('VimLeavePre stop_event_stream failed: ' .. tostring(err), vim.log.levels.WARN)
       end
-      session.discard_pending_attachments()
-      service.unregister_client_lease()
-      service.maybe_shutdown_detached_service_if_last_client({ nonblocking = true })
-      service.stop_service()
+      local logger_ok, logger = pcall(require, 'copilot_agent.log')
+      local attachments_ok, attachments_err = pcall(session.discard_pending_attachments)
+      if attachments_ok then
+        log('VimLeavePre discarded pending attachments', vim.log.levels.DEBUG)
+      else
+        log('VimLeavePre discard_pending_attachments failed: ' .. tostring(attachments_err), vim.log.levels.WARN)
+      end
+      local unregister_ok, unregister_err = pcall(service.unregister_client)
+      if unregister_ok then
+        log('VimLeavePre unregistered client', vim.log.levels.DEBUG)
+      else
+        log('VimLeavePre unregister_client failed: ' .. tostring(unregister_err), vim.log.levels.WARN)
+      end
+      local stop_ok, stop_err = pcall(service.stop_service)
+      if stop_ok then
+        log('VimLeavePre stop_service completed', vim.log.levels.DEBUG)
+      else
+        log('VimLeavePre stop_service failed: ' .. tostring(stop_err), vim.log.levels.WARN)
+      end
+      if logger_ok and type(logger.flush_pending) == 'function' then
+        local flush_ok, flush_err = pcall(logger.flush_pending)
+        if flush_ok then
+          log('VimLeavePre flushed pending logs', vim.log.levels.DEBUG)
+          pcall(logger.flush_pending)
+        else
+          log('VimLeavePre flush_pending failed: ' .. tostring(flush_err), vim.log.levels.WARN)
+        end
+      end
     end,
   })
   vim.schedule(function()
@@ -465,6 +499,7 @@ function M.statusline_reasoning(max_len)
 end
 
 function M.status()
+  service.refresh_managed_base_url()
   local snapshot = service.debug_snapshot()
   local lines = {
     'service: ' .. normalize_base_url(state.config.base_url),
@@ -489,6 +524,7 @@ function M.status()
 end
 
 function M.debug_service()
+  service.refresh_managed_base_url()
   local snapshot = service.debug_snapshot()
   local lines = {
     'Service debug:',

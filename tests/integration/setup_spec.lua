@@ -744,12 +744,17 @@ describe('service coordination', function()
   local original_executable
   local original_system
   local original_os_uname
+  local original_new_pipe
+  local original_new_tcp
+  local original_uv_kill
+  local original_nvim_list_uis
   local temp_state_dir
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.service'] = nil
     package.loaded['copilot_agent.http'] = nil
+    package.loaded['copilot_agent.lsp'] = nil
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false })
     service = require('copilot_agent.service')
@@ -759,6 +764,10 @@ describe('service coordination', function()
     original_executable = vim.fn.executable
     original_system = vim.fn.system
     original_os_uname = vim.uv.os_uname
+    original_new_pipe = vim.uv.new_pipe
+    original_new_tcp = vim.uv.new_tcp
+    original_uv_kill = vim.uv.kill
+    original_nvim_list_uis = vim.api.nvim_list_uis
     temp_state_dir = vim.fn.tempname()
     vim.fn.mkdir(temp_state_dir, 'p')
     vim.fn.stdpath = function(kind)
@@ -776,6 +785,10 @@ describe('service coordination', function()
     vim.fn.executable = original_executable
     vim.fn.system = original_system
     vim.uv.os_uname = original_os_uname
+    vim.uv.new_pipe = original_new_pipe
+    vim.uv.new_tcp = original_new_tcp
+    vim.uv.kill = original_uv_kill
+    vim.api.nvim_list_uis = original_nvim_list_uis
     pcall(service._release_spawn_lock)
   end)
 
@@ -816,6 +829,179 @@ describe('service coordination', function()
     assert_eq('', agent.state.config.base_url)
   end)
 
+  it('ignores a stale control socket file when the control endpoint is dead', function()
+    local stale_socket = temp_state_dir .. '/copilot-agent.sock'
+
+    agent.state.base_url_managed = true
+    agent.state.config.base_url = ''
+    service._save_service_pid(vim.fn.getpid())
+    service._save_service_addr('127.0.0.1:2222')
+    vim.fn.filereadable = function(path)
+      if path == stale_socket then
+        return 1
+      end
+      return original_filereadable(path)
+    end
+    vim.fn.system = function()
+      return '{"error":"dead"}\n500'
+    end
+
+    assert_false(service._refresh_service_addr_from_state())
+    assert_eq('', agent.state.config.base_url)
+  end)
+
+  it('starts the service instead of using a stale managed addr', function()
+    local http = require('copilot_agent.http')
+    local original_ensure_service_running = service.ensure_service_running
+    local original_raw_request = http.raw_request
+    local ensure_calls = 0
+    local raw_calls = 0
+
+    agent.state.base_url_managed = true
+    agent.state.config.base_url = 'http://127.0.0.1:62290'
+    service._save_service_addr('127.0.0.1:62290')
+
+    service.ensure_service_running = function(callback)
+      ensure_calls = ensure_calls + 1
+      assert_eq('', agent.state.config.base_url)
+      callback(nil)
+    end
+    http.raw_request = function(_, _, _, callback)
+      raw_calls = raw_calls + 1
+      if raw_calls == 1 then
+        callback(nil, "curl: (7) Failed to connect to 127.0.0.1 port 62290 after 0 ms: Couldn't connect to server", nil)
+      else
+        callback({ ok = true }, nil, 200)
+      end
+    end
+
+    http.request('GET', '/sessions', nil, function() end)
+
+    service.ensure_service_running = original_ensure_service_running
+    http.raw_request = original_raw_request
+
+    assert_eq(1, ensure_calls)
+    assert_eq(1, raw_calls)
+  end)
+
+  it('updates the shared addr file from service startup output', function()
+    agent.state.service_output = {}
+    agent.state.service_addr_known = false
+    agent.state.config.service.detach = true
+
+    service.remember_service_output({
+      'COPILOT_AGENT_ADDR=127.0.0.1:50123',
+      'COPILOT_AGENT_CONTROL_ADDR=/tmp/copilot-agent.sock',
+    })
+
+    assert_eq('http://127.0.0.1:50123', agent.state.config.base_url)
+    assert_eq('127.0.0.1:50123', service._load_service_addr())
+    assert_eq('/tmp/copilot-agent.sock', service._load_control_addr())
+  end)
+
+  it('registers and unregisters a stable client id against the current base url', function()
+    local http = require('copilot_agent.http')
+    local original_sync_request = http.sync_request
+    local calls = {}
+    local ok, err = pcall(function()
+      agent.state.config.base_url = 'http://127.0.0.1:8088'
+      agent.state.client_id = 'client-123'
+      agent.state.client_registered_base_url = nil
+
+      http.sync_request = function(method, path, body, opts)
+        calls[#calls + 1] = {
+          method = method,
+          path = path,
+          body = body,
+          opts = opts,
+        }
+        return { ok = true }, nil, 200
+      end
+
+      local registered, register_err = service.register_client()
+      assert_true(registered == true, register_err)
+      assert_eq(1, #calls)
+      assert_eq('POST', calls[1].method)
+      assert_eq('/clients/client-123', calls[1].path)
+      assert_eq('http://127.0.0.1:8088', calls[1].opts.base_url)
+      assert_eq('client-123', calls[1].body.clientId)
+
+      registered, register_err = service.register_client()
+      assert_true(registered == true, register_err)
+      assert_eq(1, #calls)
+      assert_eq('http://127.0.0.1:8088', agent.state.client_registered_base_url)
+
+      local unregistered, unregister_err = service.unregister_client()
+      assert_true(unregistered == true, unregister_err)
+      assert_eq(2, #calls)
+      assert_eq('DELETE', calls[2].method)
+      assert_eq('/clients/client-123', calls[2].path)
+      assert_eq('http://127.0.0.1:8088', calls[2].opts.base_url)
+      assert_eq(nil, agent.state.client_registered_base_url)
+    end)
+
+    http.sync_request = original_sync_request
+    if not ok then
+      error(err)
+    end
+  end)
+
+  it('ignores embedded helper leases when deciding whether to shut down', function()
+    local helper_pid = 55311
+    local socket_path = temp_state_dir .. '/copilot-agent.sock'
+    local lease_path = temp_state_dir .. '/copilot-agent.clients/' .. tostring(helper_pid)
+    local shutdown_calls = {}
+
+    vim.fn.mkdir(temp_state_dir .. '/copilot-agent.clients', 'p')
+    vim.fn.writefile({ '1' }, lease_path)
+    vim.fn.writefile({ '' }, socket_path)
+    vim.fn.filereadable = function(path)
+      if path == socket_path then
+        return 1
+      end
+      return original_filereadable(path)
+    end
+    vim.uv.kill = function(pid, sig)
+      if pid == helper_pid and sig == 0 then
+        return true
+      end
+      return false
+    end
+    vim.fn.system = function(args)
+      local command = type(args) == 'table' and table.concat(args, ' ') or tostring(args)
+      if command:find('ps -p 55311 -o command=', 1, true) ~= nil then
+        return 'nvim-nightly --embed\n'
+      end
+      return original_system(args)
+    end
+    vim.uv.new_pipe = function(ipc)
+      shutdown_calls.ipc = ipc
+      return {
+        connect = function(_, path, callback)
+          shutdown_calls.connect_path = path
+          callback(nil)
+        end,
+        write = function(_, payload, callback)
+          shutdown_calls.payload = payload
+          callback(nil)
+        end,
+        read_start = function(_, callback)
+          shutdown_calls.read_started = type(callback) == 'function'
+        end,
+        close = function()
+          shutdown_calls.close_count = (shutdown_calls.close_count or 0) + 1
+        end,
+      }
+    end
+
+    service.maybe_shutdown_detached_service_if_last_client({ nonblocking = false })
+
+    assert_eq(socket_path, shutdown_calls.connect_path)
+    assert_true(type(shutdown_calls.payload) == 'string')
+    assert_true(shutdown_calls.payload:find('POST /shutdown HTTP/1.1', 1, true) ~= nil)
+    assert_false(vim.fn.filereadable(lease_path) == 1)
+  end)
+
   it('uses a startup lock to serialize service spawns', function()
     local acquired1 = service._try_acquire_spawn_lock(1000)
     local acquired2 = service._try_acquire_spawn_lock(1000)
@@ -837,41 +1023,57 @@ describe('service coordination', function()
     assert_true(service._try_acquire_spawn_lock(1000))
   end)
 
-  it('uses a detached shutdown request when the last client exits', function()
-    local calls = {}
+  it('uses a uv pipe shutdown request when the last client exits', function()
+    local pipe_calls = {
+      close_count = 0,
+    }
     local socket_path = temp_state_dir .. '/copilot-agent.sock'
     local addr_path = temp_state_dir .. '/copilot-agent.addr'
+    local original_wait = vim.wait
 
     vim.fn.writefile({ '' }, socket_path)
     vim.fn.writefile({ '127.0.0.1:43123' }, addr_path)
 
-    vim.fn.executable = function(path)
-      if path == agent.state.config.curl_bin then
-        return 1
-      end
-      return original_executable(path)
-    end
     vim.fn.filereadable = function(path)
       if path == socket_path then
         return 1
       end
       return original_filereadable(path)
     end
-    vim.fn.jobstart = function(args, opts)
-      calls[#calls + 1] = {
-        args = vim.deepcopy(args),
-        opts = vim.deepcopy(opts),
+
+    vim.uv.new_pipe = function(ipc)
+      pipe_calls.ipc = ipc
+      return {
+        connect = function(_, path, callback)
+          pipe_calls.connect_path = path
+          callback(nil)
+        end,
+        write = function(_, payload, callback)
+          pipe_calls.payload = payload
+          callback(nil)
+        end,
+        read_start = function(_, callback)
+          pipe_calls.read_started = type(callback) == 'function'
+        end,
+        close = function()
+          pipe_calls.close_count = pipe_calls.close_count + 1
+        end,
       }
-      return 42
+    end
+    vim.wait = function(_, condition)
+      return condition()
     end
 
-    service.maybe_shutdown_detached_service_if_last_client({ nonblocking = true })
+    service.maybe_shutdown_detached_service_if_last_client({ nonblocking = false })
+    vim.wait = original_wait
 
-    assert_eq(1, #calls)
-    assert_eq(1, calls[1].opts.detach)
-    assert_true(vim.tbl_contains(calls[1].args, '--unix-socket'))
-    assert_true(vim.tbl_contains(calls[1].args, socket_path))
-    assert_true(vim.tbl_contains(calls[1].args, 'http://localhost/shutdown'))
+    assert_eq(false, pipe_calls.ipc)
+    assert_eq(socket_path, pipe_calls.connect_path)
+    assert_true(type(pipe_calls.payload) == 'string')
+    assert_true(pipe_calls.payload:find('POST /shutdown HTTP/1.1', 1, true) ~= nil)
+    assert_true(pipe_calls.payload:find('Host: localhost', 1, true) ~= nil)
+    assert_true(pipe_calls.read_started == true)
+    assert_true(pipe_calls.close_count >= 1)
     assert_eq('127.0.0.1:43123', service._load_service_addr())
   end)
 
@@ -881,10 +1083,16 @@ describe('service coordination', function()
     local original_start = vim.lsp.start
     local original_stop_client = vim.lsp.stop_client
     local original_check_service_health = service.check_service_health
+    local original_service_command = service.service_command
     local stopped = {}
     local started_config = nil
 
     agent.state.config.base_url = 'http://127.0.0.1:50123'
+    agent.state.service_starting = false
+    agent.state.lsp_client_id = nil
+    service.service_command = function()
+      return { '/path/to/copilot-agent' }
+    end
 
     vim.lsp.get_clients = function(opts)
       if opts and opts.name == 'copilot-agent' then
@@ -916,11 +1124,15 @@ describe('service coordination', function()
     end
 
     local client_id = lsp.start_lsp({ root_dir = temp_state_dir })
+    assert_true(vim.wait(1000, function()
+      return started_config ~= nil
+    end, 10))
 
     vim.lsp.get_clients = original_get_clients
     vim.lsp.start = original_start
     vim.lsp.stop_client = original_stop_client
     service.check_service_health = original_check_service_health
+    service.service_command = original_service_command
 
     assert_eq(1, #stopped)
     assert_eq(99, stopped[1].client_id)
@@ -1001,28 +1213,44 @@ describe('service coordination', function()
       return { sysname = 'Windows_NT' }
     end
 
-    local calls = {}
-    vim.fn.executable = function(path)
-      if path == agent.state.config.curl_bin then
-        return 1
-      end
-      return original_executable(path)
-    end
-    vim.fn.jobstart = function(args, opts)
-      calls[#calls + 1] = {
-        args = vim.deepcopy(args),
-        opts = vim.deepcopy(opts),
+    local tcp_calls = {
+      close_count = 0,
+    }
+    local original_wait = vim.wait
+    vim.uv.new_tcp = function()
+      return {
+        connect = function(_, host, port, callback)
+          tcp_calls.host = host
+          tcp_calls.port = port
+          callback(nil)
+        end,
+        write = function(_, payload, callback)
+          tcp_calls.payload = payload
+          callback(nil)
+        end,
+        read_start = function(_, callback)
+          tcp_calls.read_started = type(callback) == 'function'
+        end,
+        close = function()
+          tcp_calls.close_count = tcp_calls.close_count + 1
+        end,
       }
-      return 77
+    end
+    vim.wait = function(_, condition)
+      return condition()
     end
 
     service._save_control_addr('127.0.0.1:43123')
-    service.maybe_shutdown_detached_service_if_last_client({ nonblocking = true })
+    service.maybe_shutdown_detached_service_if_last_client({ nonblocking = false })
+    vim.wait = original_wait
 
-    assert_eq(1, #calls)
-    assert_eq(1, calls[1].opts.detach)
-    assert_true(vim.tbl_contains(calls[1].args, 'http://127.0.0.1:43123/shutdown'))
-    assert_false(vim.tbl_contains(calls[1].args, '--unix-socket'))
+    assert_eq('127.0.0.1', tcp_calls.host)
+    assert_eq(43123, tcp_calls.port)
+    assert_true(type(tcp_calls.payload) == 'string')
+    assert_true(tcp_calls.payload:find('POST /shutdown HTTP/1.1', 1, true) ~= nil)
+    assert_true(tcp_calls.payload:find('Host: 127.0.0.1', 1, true) ~= nil)
+    assert_true(tcp_calls.read_started == true)
+    assert_true(tcp_calls.close_count >= 1)
   end)
 
   it('does not hard-stop a detached service job during VimLeavePre cleanup', function()

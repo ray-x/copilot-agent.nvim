@@ -6,9 +6,11 @@
 
 local uv = vim.uv or vim.loop
 local cfg = require('copilot_agent.config')
+local http = require('copilot_agent.http')
 local state = cfg.state
 local defaults = cfg.defaults
 local normalize_base_url = cfg.normalize_base_url
+local log = cfg.log
 
 local M = {}
 local NANOSECONDS_PER_MILLISECOND = 1e6 -- uv.hrtime() and libuv timespec values are reported in nanoseconds.
@@ -18,7 +20,9 @@ local LOCK_WAIT_PID_ENTROPY_PRIME = 131 -- Mix in a small prime so different PID
 local SERVICE_OUTPUT_HISTORY_LIMIT = 20 -- Keep only the most recent startup lines for diagnostics without unbounded memory growth.
 local CONTROL_REQUEST_TIMEOUT_SECONDS = '2' -- Bound local control-socket curl calls so stale sockets cannot hang startup or exit indefinitely.
 local SAVED_ADDR_PROBE_TIMEOUT_SECONDS = '1' -- Quick probe timeout when validating persisted service addresses.
+local STALE_ADDR_FAILURE_THRESHOLD = 3 -- After this many consecutive health-check failures on the same discovered address, force a fresh restart.
 local DEFAULT_SERVICE_LOG_PATH = vim.fn.stdpath('state') .. '/copilot-agent-service.log'
+local DEFAULT_CLIENT_ID_LENGTH = 32
 
 local _root_markers = { '.git', 'go.mod', 'package.json', 'Cargo.toml', 'pyproject.toml', '.hg', '.svn' }
 
@@ -43,6 +47,24 @@ end
 local function is_windows()
   local uname = uv.os_uname()
   return type(uname) == 'table' and type(uname.sysname) == 'string' and uname.sysname:find('Windows', 1, true) ~= nil
+end
+
+local function generate_client_id()
+  local entropy = table.concat({
+    tostring(vim.fn.getpid()),
+    tostring((uv and uv.hrtime and uv.hrtime()) or 0),
+    tostring(os.time()),
+    tostring(math.random()),
+  }, ':')
+  return vim.fn.sha256(entropy):sub(1, DEFAULT_CLIENT_ID_LENGTH)
+end
+
+function M.client_id()
+  if type(state.client_id) == 'string' and state.client_id ~= '' then
+    return state.client_id
+  end
+  state.client_id = generate_client_id()
+  return state.client_id
 end
 
 function M.cwd()
@@ -324,14 +346,6 @@ build_http_request_args = function(method, path, body, opts)
   return args
 end
 
-local function spawn_detached_request(args)
-  if type(args) ~= 'table' or vim.tbl_isempty(args) then
-    return false
-  end
-  local ok, job_id = pcall(vim.fn.jobstart, args, { detach = 1 })
-  return ok and type(job_id) == 'number' and job_id > 0
-end
-
 local function control_request_sync(method, path, body)
   local endpoint = control_endpoint()
   if not endpoint then
@@ -356,7 +370,7 @@ local function control_request_sync(method, path, body)
     response_body = raw_stdout
   end
 
-  if exit_code ~= 0 and (status == nil or status < 400) then
+  if exit_code ~= 0 and status == nil then
     local message = vim.trim(stderr_text ~= '' and stderr_text or response_body)
     return nil, message ~= '' and message or 'control socket request failed', status
   end
@@ -380,26 +394,180 @@ local function control_request_sync(method, path, body)
   return payload, nil, status
 end
 
-local function request_shutdown_nonblocking()
-  if vim.fn.executable(state.config.curl_bin) ~= 1 then
+-- Send POST /shutdown over a Unix-domain socket without spawning any process.
+-- When wait_ms is nil, this is fire-and-forget; otherwise it blocks until the
+-- request has been written or the timeout expires.
+local function shutdown_request_payload(host)
+  return 'POST /shutdown HTTP/1.1\r\nHost: ' .. host .. '\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+end
+
+local function shutdown_via_unix_socket(socket_path, wait_ms)
+  local pipe = uv.new_pipe(false)
+  if not pipe then
     return false
   end
+  log(string.format('shutdown_via_unix_socket start path=%s wait_ms=%s', socket_path, tostring(wait_ms or 'async')), vim.log.levels.DEBUG)
+  local done = false
+  local success = false
+  local function finish(value)
+    if done then
+      return
+    end
+    done = true
+    success = value == true
+  end
+  pipe:connect(socket_path, function(err)
+    if err then
+      finish(false)
+      log(string.format('shutdown_via_unix_socket connect failed path=%s err=%s', socket_path, tostring(err)), vim.log.levels.WARN)
+      pipe:close()
+      return
+    end
+    pipe:write(shutdown_request_payload('localhost'), function(werr)
+      if werr then
+        log(string.format('shutdown_via_unix_socket write failed path=%s err=%s', socket_path, tostring(werr)), vim.log.levels.WARN)
+      else
+        log(string.format('shutdown_via_unix_socket wrote request path=%s', socket_path), vim.log.levels.DEBUG)
+      end
+      if not werr then
+        pipe:read_start(function() end) -- drain the response so the server flushes cleanly
+      end
+      finish(not werr)
+      pipe:close()
+    end)
+  end)
+  if not wait_ms then
+    return true
+  end
+  if not vim.wait(wait_ms, function()
+    return done
+  end, 10) then
+    pipe:close()
+    return false
+  end
+  return success
+end
 
+local function shutdown_via_tcp(host, port, wait_ms)
+  local tcp = uv.new_tcp()
+  if not tcp then
+    return false
+  end
+  log(string.format('shutdown_via_tcp start host=%s port=%s wait_ms=%s', host, tostring(port), tostring(wait_ms or 'async')), vim.log.levels.DEBUG)
+  local done = false
+  local success = false
+  local function finish(value)
+    if done then
+      return
+    end
+    done = true
+    success = value == true
+  end
+  tcp:connect(host, tonumber(port), function(err)
+    if err then
+      finish(false)
+      log(string.format('shutdown_via_tcp connect failed host=%s port=%s err=%s', host, tostring(port), tostring(err)), vim.log.levels.WARN)
+      tcp:close()
+      return
+    end
+    tcp:write(shutdown_request_payload(host), function(werr)
+      if werr then
+        log(string.format('shutdown_via_tcp write failed host=%s port=%s err=%s', host, tostring(port), tostring(werr)), vim.log.levels.WARN)
+      else
+        log(string.format('shutdown_via_tcp wrote request host=%s port=%s', host, tostring(port)), vim.log.levels.DEBUG)
+      end
+      if not werr then
+        tcp:read_start(function() end)
+      end
+      finish(not werr)
+      tcp:close()
+    end)
+  end)
+  if not wait_ms then
+    return true
+  end
+  if not vim.wait(wait_ms, function()
+    return done
+  end, 10) then
+    tcp:close()
+    return false
+  end
+  return success
+end
+
+local function request_shutdown_blocking()
+  local wait_ms = (tonumber(CONTROL_REQUEST_TIMEOUT_SECONDS) or 2) * 1000
+  log(string.format('request_shutdown_blocking start wait_ms=%d', wait_ms), vim.log.levels.DEBUG)
   local endpoint = control_endpoint()
   if endpoint then
-    local control_args = build_control_request_args(endpoint, 'POST', '/shutdown', {}, { capture_response = false })
-    if spawn_detached_request(control_args) then
-      return true
+    if endpoint.kind == 'unix' then
+      log(string.format('request_shutdown_blocking using control socket path=%s', endpoint.socket or control_socket_file()), vim.log.levels.DEBUG)
+      if shutdown_via_unix_socket(endpoint.socket, wait_ms) then
+        return true
+      end
+    elseif endpoint.kind == 'tcp' then
+      local host, port = endpoint.addr:match('^(.+):(%d+)$')
+      log(string.format('request_shutdown_blocking using control addr=%s', tostring(endpoint.addr)), vim.log.levels.DEBUG)
+      if host and port and shutdown_via_tcp(host, port, wait_ms) then
+        return true
+      end
     end
   end
 
   if refresh_service_addr_from_state() then
-    local http_args = build_http_request_args('POST', '/shutdown', {}, { capture_response = false })
-    if spawn_detached_request(http_args) then
+    local base_url = normalize_base_url(state.config.base_url)
+    if type(base_url) == 'string' and base_url ~= '' then
+      local host, port = base_url:match('^https?://([^:/]+):(%d+)')
+      log(string.format('request_shutdown_blocking using saved base_url=%s', base_url), vim.log.levels.DEBUG)
+      if host and port and shutdown_via_tcp(host, port, wait_ms) then
+        return true
+      end
+    end
+  end
+
+  local pid = load_service_pid()
+  if pid and signal_service_pid(pid, 0) then
+    if signal_service_pid(pid, 15) then
       return true
     end
   end
 
+  return false
+end
+
+-- Nonblocking variant used when the caller does not need to wait for the write.
+local function request_shutdown_nonblocking()
+  -- Prefer the control socket/addr so we don't need to know the main HTTP port.
+  log('request_shutdown_nonblocking start', vim.log.levels.DEBUG)
+  local endpoint = control_endpoint()
+  if endpoint then
+    if endpoint.kind == 'unix' then
+      log(string.format('request_shutdown_nonblocking using control socket path=%s', endpoint.socket or control_socket_file()), vim.log.levels.DEBUG)
+      if shutdown_via_unix_socket(endpoint.socket) then
+        return true
+      end
+    elseif endpoint.kind == 'tcp' then
+      local host, port = endpoint.addr:match('^(.+):(%d+)$')
+      log(string.format('request_shutdown_nonblocking using control addr=%s', tostring(endpoint.addr)), vim.log.levels.DEBUG)
+      if host and port and shutdown_via_tcp(host, port) then
+        return true
+      end
+    end
+  end
+
+  -- Fall back to the saved main HTTP address.
+  if refresh_service_addr_from_state() then
+    local base_url = normalize_base_url(state.config.base_url)
+    if type(base_url) == 'string' and base_url ~= '' then
+      local host, port = base_url:match('^https?://([^:/]+):(%d+)')
+      log(string.format('request_shutdown_nonblocking using saved base_url=%s', base_url), vim.log.levels.DEBUG)
+      if host and port and shutdown_via_tcp(host, port) then
+        return true
+      end
+    end
+  end
+
+  -- Last resort: SIGTERM the service process directly.
   local pid = load_service_pid()
   if pid and signal_service_pid(pid, 0) then
     if signal_service_pid(pid, 15) then
@@ -436,6 +604,31 @@ end
 
 local function client_lease_file(pid)
   return client_lease_dir() .. '/' .. tostring(pid)
+end
+
+local function has_attached_ui()
+  if type(vim.api.nvim_list_uis) ~= 'function' then
+    return false
+  end
+  local ok, uis = pcall(vim.api.nvim_list_uis)
+  return ok and type(uis) == 'table' and #uis > 0
+end
+
+local function client_lease_command(pid)
+  if is_windows() then
+    return nil
+  end
+  local output = vim.fn.system({ 'ps', '-p', tostring(pid), '-o', 'command=' })
+  output = vim.trim(output or '')
+  if output == '' then
+    return nil
+  end
+  return output
+end
+
+local function client_lease_is_helper(pid)
+  local command = client_lease_command(pid)
+  return type(command) == 'string' and command:find('--embed', 1, true) ~= nil
 end
 
 local function service_pid_file()
@@ -592,30 +785,47 @@ local function saved_addr_healthy(addr)
 
   local _, status_text = raw_stdout:match('^(.*)\n(%d%d%d)%s*$')
   local status = tonumber(status_text)
-  return exit_code == 0 and status and status < 400
+  return (status ~= nil and status < 400) or (status == nil and exit_code == 0)
 end
 
 local function shared_service_pid_alive()
   local pid = load_service_pid()
   if pid and process_exists(pid) then
-    local has_control_socket = not is_windows() and vim.fn.filereadable(control_socket_file()) == 1
-    local has_control_addr = is_windows() and vim.fn.filereadable(control_addr_file()) == 1
+    -- If this PID is the one WE just started, don't probe and clear it —
+    -- the service hasn't had time to bind its control socket yet.
+    if pid == state.service_process_pid then
+      return nil
+    end
+
     local saved_addr = load_service_addr()
+    local control_ok = false
+    local control_payload, control_err = control_request_sync('GET', '/healthz', nil)
+    if type(control_payload) == 'table' then
+      control_ok = true
+    elseif not control_err then
+      control_ok = true
+    end
     local has_saved_addr = saved_addr_healthy(saved_addr)
-    if has_control_socket or has_control_addr or has_saved_addr then
+    if control_ok or has_saved_addr then
       return pid
     end
 
-    -- A live PID without discoverable control/address artifacts is stale for
-    -- managed-mode startup; clear it so this instance can spawn a fresh service.
+    -- A live PID without a healthy control endpoint or address probe is stale
+    -- for managed-mode startup; clear it so this instance can spawn fresh.
     pcall(uv.fs_unlink, service_pid_file())
     pcall(uv.fs_unlink, addr_state_file())
+    pcall(uv.fs_unlink, control_socket_file())
     clear_control_addr()
     return nil
   end
   if pid then
     pcall(uv.fs_unlink, service_pid_file())
   end
+  -- Also clear the persisted address and stale socket file so subsequent
+  -- iterations don't rediscover a dead address or waste time probing a
+  -- dead socket.
+  pcall(uv.fs_unlink, addr_state_file())
+  pcall(uv.fs_unlink, control_socket_file())
   clear_control_addr()
   return nil
 end
@@ -624,57 +834,177 @@ local function prune_stale_client_leases()
   local files = vim.fn.glob(client_lease_dir() .. '/*', false, true)
   for _, path in ipairs(files) do
     local pid = tonumber(vim.fn.fnamemodify(path, ':t'))
-    if not process_exists(pid) then
+    if not process_exists(pid) or client_lease_is_helper(pid) then
       pcall(uv.fs_unlink, path)
     end
   end
 end
 
-local function has_live_client_leases()
+local function live_client_lease_count()
   prune_stale_client_leases()
   local files = vim.fn.glob(client_lease_dir() .. '/*', false, true)
-  return type(files) == 'table' and #files > 0
+  if type(files) ~= 'table' then
+    return 0
+  end
+  return #files
 end
 
 function M.register_client_lease()
+  local pid = vim.fn.getpid()
+  local path = client_lease_file(pid)
+  if not has_attached_ui() or client_lease_is_helper(pid) then
+    state.client_lease_registered = false
+    return
+  end
   vim.fn.mkdir(client_lease_dir(), 'p')
-  write_text_file(client_lease_file(vim.fn.getpid()), string.format('%d\n', now_ms()))
+  state.client_lease_registered = true
+  write_text_file(path, string.format('%d\n', now_ms()))
 end
 
 function M.unregister_client_lease()
-  pcall(uv.fs_unlink, client_lease_file(vim.fn.getpid()))
+  if state.client_lease_registered ~= true then
+    log('unregister_client_lease skipped: no registered lease', vim.log.levels.DEBUG)
+    return
+  end
+  local pid = vim.fn.getpid()
+  local path = client_lease_file(pid)
+  log(string.format('unregister_client_lease pid=%d path=%s', pid, path), vim.log.levels.DEBUG)
+  local ok, err = uv.fs_unlink(path)
+  if ok then
+    state.client_lease_registered = false
+    log(string.format('unregister_client_lease removed path=%s', path), vim.log.levels.DEBUG)
+  else
+    log(string.format('unregister_client_lease failed path=%s err=%s', path, tostring(err)), vim.log.levels.WARN)
+  end
 end
 
 function M.maybe_shutdown_detached_service_if_last_client(opts)
   opts = opts or {}
   if state.config.service.detach ~= true then
+    log('maybe_shutdown_detached_service_if_last_client skipped: service.detach=false', vim.log.levels.DEBUG)
     return
   end
 
-  if has_live_client_leases() then
+  local live_count = live_client_lease_count()
+  log(string.format('maybe_shutdown_detached_service_if_last_client detach=true live_leases=%d nonblocking=%s', live_count, tostring(opts.nonblocking ~= false)), vim.log.levels.DEBUG)
+
+  if live_count > 0 then
+    log(string.format('detached service still shared by %d live lease(s); not shutting down', live_count), vim.log.levels.DEBUG)
     return
   end
 
   if opts.nonblocking ~= false then
     if request_shutdown_nonblocking() then
+      log('queued nonblocking detached-service shutdown request', vim.log.levels.DEBUG)
       return
     end
+    log('failed to queue nonblocking detached-service shutdown request', vim.log.levels.WARN)
     return
   end
 
+  if request_shutdown_blocking() then
+    log('blocking detached-service shutdown request completed', vim.log.levels.DEBUG)
+    return
+  end
+
+  log('blocking detached-service shutdown request failed; trying sync control request fallback', vim.log.levels.WARN)
   local _, err = control_request_sync('POST', '/shutdown', {})
   if not err then
-    M.forget_service_addr()
+    log('sync control request for detached-service shutdown succeeded', vim.log.levels.DEBUG)
     return
   end
+  log('sync control request for detached-service shutdown failed: ' .. tostring(err), vim.log.levels.WARN)
 
   if refresh_service_addr_from_state() then
-    local http = require('copilot_agent.http')
-    http.raw_request('POST', '/shutdown', {}, function()
-      M.forget_service_addr()
-    end)
+    local http_mod = require('copilot_agent.http')
+    log('falling back to async HTTP shutdown request for detached service', vim.log.levels.WARN)
+    http_mod.raw_request('POST', '/shutdown', {}, function() end)
   end
 end
+
+local function current_service_base_url()
+  local base_url = normalize_base_url(state.config.base_url)
+  if type(base_url) == 'string' and base_url ~= '' then
+    return base_url
+  end
+  local registered = state.client_registered_base_url
+  if type(registered) == 'string' and registered ~= '' then
+    return registered
+  end
+  return ''
+end
+
+local function client_registration_path()
+  return '/clients/' .. M.client_id()
+end
+
+function M.register_client()
+  local base_url = current_service_base_url()
+  if base_url == '' then
+    return nil, 'service address not discovered yet'
+  end
+
+  if state.client_registered_base_url == base_url then
+    log(string.format('client already registered client_id=%s base_url=%s', M.client_id(), base_url), vim.log.levels.DEBUG)
+    return true
+  end
+
+  if type(state.client_registered_base_url) == 'string' and state.client_registered_base_url ~= '' and state.client_registered_base_url ~= base_url then
+    log(string.format('client re-registering client_id=%s old_base_url=%s new_base_url=%s', M.client_id(), state.client_registered_base_url, base_url), vim.log.levels.DEBUG)
+    local _, unregister_err, unregister_status = http.sync_request('DELETE', client_registration_path(), nil, { base_url = state.client_registered_base_url })
+    if unregister_err or (unregister_status and unregister_status >= 400) then
+      log(
+        string.format(
+          'client unregister before re-register failed client_id=%s base_url=%s err=%s',
+          M.client_id(),
+          state.client_registered_base_url,
+          tostring(unregister_err or ('unexpected status ' .. tostring(unregister_status)))
+        ),
+        vim.log.levels.WARN
+      )
+    end
+  end
+
+  local payload = {
+    clientId = M.client_id(),
+    clientName = state.config.client_name,
+  }
+  log(string.format('registering client client_id=%s base_url=%s', M.client_id(), base_url), vim.log.levels.DEBUG)
+  local _, err, status = http.sync_request('POST', client_registration_path(), payload, { base_url = base_url })
+  if err or (status and status >= 400) then
+    local message = err or ('unexpected client registration status ' .. tostring(status))
+    log(string.format('registering client failed client_id=%s base_url=%s err=%s', M.client_id(), base_url, tostring(message)), vim.log.levels.WARN)
+    return nil, message, status
+  end
+
+  state.client_registered_base_url = base_url
+  log(string.format('registering client succeeded client_id=%s base_url=%s', M.client_id(), base_url), vim.log.levels.DEBUG)
+  return true
+end
+
+function M.unregister_client()
+  local base_url = type(state.client_registered_base_url) == 'string' and state.client_registered_base_url or current_service_base_url()
+  if base_url == '' then
+    log('unregister_client skipped: no registered base_url', vim.log.levels.DEBUG)
+    return true
+  end
+
+  local client_id = M.client_id()
+  log(string.format('unregistering client client_id=%s base_url=%s', client_id, base_url), vim.log.levels.DEBUG)
+  local _, err, status = http.sync_request('DELETE', client_registration_path(), nil, { base_url = base_url })
+  if err or (status and status >= 400) then
+    local message = err or ('unexpected client unregister status ' .. tostring(status))
+    log(string.format('unregister_client failed client_id=%s base_url=%s err=%s', client_id, base_url, tostring(message)), vim.log.levels.WARN)
+    return nil, message, status
+  end
+
+  state.client_registered_base_url = nil
+  log(string.format('unregister_client succeeded client_id=%s base_url=%s', client_id, base_url), vim.log.levels.DEBUG)
+  return true
+end
+
+M.register_client_lease = M.register_client
+M.unregister_client_lease = M.unregister_client
 
 refresh_service_addr_from_state = function()
   if state.base_url_managed == false then
@@ -772,10 +1102,12 @@ end
 
 function M.stop_service()
   if state.config.service.detach == true then
+    log('stop_service skipped because service.detach=true', vim.log.levels.DEBUG)
     return
   end
 
   if state.service_job_id and state.service_job_id > 0 then
+    log(string.format('stop_service stopping job_id=%d', state.service_job_id), vim.log.levels.DEBUG)
     pcall(vim.fn.jobstop, state.service_job_id)
     state.service_job_id = nil
   end
@@ -791,12 +1123,37 @@ end
 function M.check_service_health(callback)
   local discovered = M.refresh_managed_base_url()
   if state.base_url_managed ~= false and not discovered then
+    M.forget_service_addr()
+    state._health_fail_count = 0
+    state._health_fail_addr = nil
     callback(false, 'service address not discovered yet', nil)
     return
   end
-  local http = require('copilot_agent.http')
-  http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
-    callback(err == nil and status and status < 400, err, status)
+  local current_addr = state.config.base_url or ''
+  local http_mod = require('copilot_agent.http')
+  http_mod.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
+    local healthy = err == nil and status and status < 400
+    if healthy then
+      state._health_fail_count = 0
+      state._health_fail_addr = nil
+    else
+      -- Track consecutive failures on the same address. If we keep failing,
+      -- the discovered address is stale — nuke it so the next poll starts
+      -- fresh service discovery or spawns a new instance.
+      if current_addr == (state._health_fail_addr or '') then
+        state._health_fail_count = (state._health_fail_count or 0) + 1
+      else
+        state._health_fail_count = 1
+        state._health_fail_addr = current_addr
+      end
+      if state._health_fail_count >= STALE_ADDR_FAILURE_THRESHOLD and state.base_url_managed ~= false then
+        M.forget_service_addr()
+        pcall(uv.fs_unlink, control_socket_file())
+        state._health_fail_count = 0
+        state._health_fail_addr = nil
+      end
+    end
+    callback(healthy, err, status)
   end)
 end
 
@@ -819,6 +1176,7 @@ function M.ensure_service_live(callback)
 
   M.check_service_health(function(healthy, err, status)
     if healthy then
+      pcall(M.register_client)
       callback(nil)
       return
     end
@@ -847,6 +1205,10 @@ function M.ensure_service_running(callback)
   if state.config.service.auto_start ~= true then
     M.check_service_health(function(healthy, err, status)
       if healthy then
+        local registered, register_err = M.register_client()
+        if not registered and register_err then
+          log('client registration failed after health check: ' .. tostring(register_err), vim.log.levels.WARN)
+        end
         callback(nil)
         return
       end
@@ -884,10 +1246,18 @@ function M.ensure_service_running(callback)
     end
   end
 
+  local function finish_ready()
+    local registered, register_err = M.register_client()
+    if not registered and register_err then
+      log('client registration failed after service startup: ' .. tostring(register_err), vim.log.levels.WARN)
+    end
+    finish(nil)
+  end
+
   local function poll_service_health(attempts_left)
     M.check_service_health(function(healthy)
       if healthy then
-        finish(nil)
+        finish_ready()
         return
       end
       if attempts_left <= 0 then
@@ -908,7 +1278,7 @@ function M.ensure_service_running(callback)
   local function start_service_with_lock()
     M.check_service_health(function(healthy)
       if healthy then
-        finish(nil)
+        finish_ready()
         return
       end
 
@@ -994,7 +1364,15 @@ function M.ensure_service_running(callback)
   local function wait_for_service_start()
     M.check_service_health(function(healthy)
       if healthy then
-        finish(nil)
+        finish_ready()
+        return
+      end
+
+      -- Always enforce the startup deadline — even when the external PID
+      -- appears alive, it may be serving a stale control socket with a
+      -- dead HTTP address.
+      if now_ms() >= deadline_ms then
+        finish('timed out waiting for another Neovim instance to start the service')
         return
       end
 
@@ -1014,11 +1392,6 @@ function M.ensure_service_running(callback)
         return
       end
 
-      if now_ms() >= deadline_ms then
-        finish('timed out waiting for another Neovim instance to start the service')
-        return
-      end
-
       vim.defer_fn(wait_for_service_start, lock_wait_delay_ms(interval_ms))
     end)
   end
@@ -1031,7 +1404,7 @@ function M.ensure_service_running(callback)
 
   M.check_service_health(function(healthy)
     if healthy then
-      finish(nil)
+      finish_ready()
       return
     end
 
@@ -1059,6 +1432,7 @@ function M.ensure_service_running(callback)
 end
 
 function M.debug_snapshot()
+  M.refresh_managed_base_url()
   local command = M.service_command()
   local command_text = type(command) == 'table' and table.concat(command, ' ') or tostring(command)
   local base_url = normalize_base_url(state.config.base_url)

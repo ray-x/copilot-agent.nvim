@@ -17,12 +17,20 @@ local is_connection_error = utils.is_connection_error
 
 local M = {}
 
-local function effective_base_url()
+local function effective_base_url(base_url_override)
+  local override = normalize_base_url(base_url_override)
+  if type(override) == 'string' and override ~= '' then
+    return override
+  end
+
   if state.base_url_managed ~= false then
     local ok, service = pcall(require, 'copilot_agent.service')
     if ok and type(service) == 'table' and type(service.refresh_managed_base_url) == 'function' then
-      service.refresh_managed_base_url()
+      if service.refresh_managed_base_url() then
+        return normalize_base_url(state.config.base_url)
+      end
     end
+    return ''
   end
 
   local base_url = normalize_base_url(state.config.base_url)
@@ -42,8 +50,8 @@ local function effective_base_url()
   return base_url
 end
 
-function M.build_url(path)
-  return effective_base_url() .. path
+function M.build_url(path, base_url_override)
+  return effective_base_url(base_url_override) .. path
 end
 
 local function has_base_url()
@@ -51,11 +59,11 @@ local function has_base_url()
   return type(base_url) == 'string' and base_url ~= ''
 end
 
-local function log_http_request(mode, method, path, body)
+local function log_http_request(mode, method, path, body, base_url_override)
   if not should_log(vim.log.levels.DEBUG) then
     return
   end
-  log(string.format('http.%s request method=%s path=%s url=%s body=%s', mode, tostring(method), tostring(path), M.build_url(path), serialize_log_value(body)), vim.log.levels.DEBUG)
+  log(string.format('http.%s request method=%s path=%s url=%s body=%s', mode, tostring(method), tostring(path), M.build_url(path, base_url_override), serialize_log_value(body)), vim.log.levels.DEBUG)
 end
 
 local function log_http_response(mode, method, path, status, exit_code, payload, err)
@@ -132,12 +140,13 @@ function M.encode_json(value)
 end
 
 -- Synchronous HTTP request via vim.system / vim.fn.system.
-function M.sync_request(method, path, body)
+function M.sync_request(method, path, body, opts)
+  opts = opts or {}
   if not M.ensure_curl() then
     return nil, 'curl executable not found: ' .. state.config.curl_bin
   end
 
-  log_http_request('sync', method, path, body)
+  log_http_request('sync', method, path, body, opts.base_url)
   local args = {
     state.config.curl_bin,
     '-sS',
@@ -147,7 +156,7 @@ function M.sync_request(method, path, body)
     '\n%{http_code}',
     '-X',
     method,
-    M.build_url(path),
+    M.build_url(path, opts.base_url),
     '-H',
     'Accept: application/json',
   }
@@ -216,13 +225,14 @@ function M.sync_request(method, path, body)
 end
 
 -- Async HTTP request via vim.fn.jobstart.
-function M.raw_request(method, path, body, callback)
+function M.raw_request(method, path, body, callback, opts)
+  opts = opts or {}
   if not M.ensure_curl() then
     callback(nil, 'curl executable not found: ' .. state.config.curl_bin)
     return
   end
 
-  log_http_request('async', method, path, body)
+  log_http_request('async', method, path, body, opts.base_url)
   local stdout = {}
   local stderr = {}
   local args = {
@@ -234,7 +244,7 @@ function M.raw_request(method, path, body, callback)
     '\n%{http_code}',
     '-X',
     method,
-    M.build_url(path),
+    M.build_url(path, opts.base_url),
     '-H',
     'Accept: application/json',
   }
@@ -313,12 +323,13 @@ function M.request(method, path, body, callback, opts)
 
     -- Lazy-require to avoid circular dependency with service.lua.
     local service = require('copilot_agent.service')
+    service.forget_service_addr()
     service.ensure_service_running(function(start_err)
       if start_err then
         callback(nil, start_err, nil)
         return
       end
-      M.raw_request(method, path, body, callback)
+      M.raw_request(method, path, body, callback, opts)
     end)
     return
   end
@@ -331,6 +342,7 @@ function M.request(method, path, body, callback, opts)
       )
       -- Lazy-require to break http↔service circular dependency.
       local service = require('copilot_agent.service')
+      service.forget_service_addr()
       service.ensure_service_running(function(start_err)
         if start_err then
           log(string.format('http.request retry failed method=%s path=%s startup_error=%s', tostring(method), tostring(path), serialize_log_value(start_err, { max_len = 600 })), vim.log.levels.WARN)
@@ -338,7 +350,7 @@ function M.request(method, path, body, callback, opts)
           return
         end
         log(string.format('http.request retrying method=%s path=%s after service start', tostring(method), tostring(path)), vim.log.levels.DEBUG)
-        M.raw_request(method, path, body, callback)
+        M.raw_request(method, path, body, callback, opts)
       end)
       return
     end

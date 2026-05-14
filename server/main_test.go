@@ -238,6 +238,77 @@ func TestBuildContextWindowSnapshotUsesModelPromptLimit(t *testing.T) {
 	}
 }
 
+func TestServiceClientRegistrationAndIdleShutdown(t *testing.T) {
+	t.Parallel()
+
+	stopCh := make(chan struct{}, 1)
+	svc := &service{
+		activeClients:     make(map[string]registeredClient),
+		idleShutdownGrace: 20 * time.Millisecond,
+		stop: func() {
+			select {
+			case stopCh <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	if got := svc.registerClient("client-a", "alpha"); got != 1 {
+		t.Fatalf("expected 1 active client after register, got %d", got)
+	}
+	if got := svc.unregisterClient("client-a"); got != 0 {
+		t.Fatalf("expected 0 active clients after unregister, got %d", got)
+	}
+
+	select {
+	case <-stopCh:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected detached service shutdown after last client unregisters")
+	}
+}
+
+func TestServiceClientRegistrationCancelsIdleShutdown(t *testing.T) {
+	t.Parallel()
+
+	stopCh := make(chan struct{}, 1)
+	svc := &service{
+		activeClients:     make(map[string]registeredClient),
+		idleShutdownGrace: 25 * time.Millisecond,
+		stop: func() {
+			select {
+			case stopCh <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	if got := svc.registerClient("client-a", "alpha"); got != 1 {
+		t.Fatalf("expected 1 active client after register, got %d", got)
+	}
+	if got := svc.unregisterClient("client-a"); got != 0 {
+		t.Fatalf("expected 0 active clients after unregister, got %d", got)
+	}
+	if got := svc.registerClient("client-b", "beta"); got != 1 {
+		t.Fatalf("expected 1 active client after re-register, got %d", got)
+	}
+
+	select {
+	case <-stopCh:
+		t.Fatal("did not expect shutdown while a client is registered again")
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	if got := svc.unregisterClient("client-b"); got != 0 {
+		t.Fatalf("expected 0 active clients after final unregister, got %d", got)
+	}
+
+	select {
+	case <-stopCh:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected shutdown after the final client unregisters")
+	}
+}
+
 // ── boolOrDefault ─────────────────────────────────────────────────────────────
 
 func TestBoolOrDefaultNilUseFallback(t *testing.T) {

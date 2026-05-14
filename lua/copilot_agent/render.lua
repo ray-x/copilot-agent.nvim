@@ -3305,6 +3305,7 @@ function M.render_chat()
     state.entry_row_index = {}
 
     lines[#lines + 1] = state.config.chat.title
+    service.refresh_managed_base_url()
     local service_url = normalize_base_url(state.config.base_url)
     if service_url == '' then
       service_url = '<discovering via control socket>'

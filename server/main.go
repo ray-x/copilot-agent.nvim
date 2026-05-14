@@ -90,6 +90,10 @@ type createSessionRequest struct {
 	DisabledSkills                 []string                     `json:"disabledSkills,omitempty"`
 }
 
+type registerClientRequest struct {
+	ClientName string `json:"clientName,omitempty"`
+}
+
 type sendMessageRequest struct {
 	Prompt         string               `json:"prompt"`
 	Attachments    []copilot.Attachment `json:"attachments,omitempty"`
@@ -291,8 +295,112 @@ type service struct {
 	defaultModel            string
 	defaultWorkingDirectory string
 	shutdownHTTP            func(context.Context) error
+	stop                    func()
+	clientRegistryMu        sync.Mutex
+	activeClients           map[string]registeredClient
+	idleShutdownTimer       *time.Timer
+	idleShutdownGrace       time.Duration
 	sessions                map[string]*managedSession
 	sessionsMu              sync.RWMutex
+}
+
+type registeredClient struct {
+	ClientName   string
+	RegisteredAt time.Time
+	LastSeen     time.Time
+}
+
+func (s *service) detachedIdleGrace() time.Duration {
+	if s != nil && s.idleShutdownGrace > 0 {
+		return s.idleShutdownGrace
+	}
+	return clientLeaseEmptyGrace
+}
+
+func (s *service) cancelIdleShutdownLocked() {
+	if s.idleShutdownTimer == nil {
+		return
+	}
+	if s.idleShutdownTimer.Stop() {
+		logInfof("client registration resumed; canceled detached-service idle timer")
+	}
+	s.idleShutdownTimer = nil
+}
+
+func (s *service) scheduleIdleShutdownLocked(reason string) {
+	if s == nil || s.stop == nil {
+		return
+	}
+	grace := s.detachedIdleGrace()
+	if grace <= 0 {
+		return
+	}
+	s.cancelIdleShutdownLocked()
+	logInfof("no active registered clients; will shut down detached service in %s (%s)", grace, reason)
+	s.idleShutdownTimer = time.AfterFunc(grace, func() {
+		s.clientRegistryMu.Lock()
+		if len(s.activeClients) > 0 {
+			s.clientRegistryMu.Unlock()
+			return
+		}
+		s.idleShutdownTimer = nil
+		s.clientRegistryMu.Unlock()
+		logWarnf("no active registered clients for %s (%s); shutting down detached service", grace, reason)
+		s.stop()
+	})
+}
+
+func (s *service) startIdleShutdownIfNoClients(reason string) {
+	s.clientRegistryMu.Lock()
+	defer s.clientRegistryMu.Unlock()
+	if len(s.activeClients) == 0 {
+		s.scheduleIdleShutdownLocked(reason)
+	}
+}
+
+func (s *service) registerClient(clientID, clientName string) int {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return 0
+	}
+	now := time.Now()
+	s.clientRegistryMu.Lock()
+	defer s.clientRegistryMu.Unlock()
+	if s.activeClients == nil {
+		s.activeClients = make(map[string]registeredClient)
+	}
+	reg, exists := s.activeClients[clientID]
+	reg.ClientName = clientName
+	if reg.RegisteredAt.IsZero() {
+		reg.RegisteredAt = now
+	}
+	reg.LastSeen = now
+	s.activeClients[clientID] = reg
+	if !exists {
+		logInfof("client registered clientID=%s name=%s activeClients=%d", clientID, clientName, len(s.activeClients))
+	} else {
+		logInfof("client refreshed clientID=%s name=%s activeClients=%d", clientID, clientName, len(s.activeClients))
+	}
+	s.cancelIdleShutdownLocked()
+	return len(s.activeClients)
+}
+
+func (s *service) unregisterClient(clientID string) int {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return 0
+	}
+	s.clientRegistryMu.Lock()
+	defer s.clientRegistryMu.Unlock()
+	if s.activeClients == nil {
+		s.activeClients = make(map[string]registeredClient)
+	}
+	delete(s.activeClients, clientID)
+	logInfof("client unregistered clientID=%s activeClients=%d", clientID, len(s.activeClients))
+	if len(s.activeClients) == 0 {
+		s.scheduleIdleShutdownLocked("last client unregistered")
+	}
+	return len(s.activeClients)
 }
 
 func main() {
@@ -300,7 +408,6 @@ func main() {
 	portRange := flag.String("port-range", "", "Port range to try when -addr is not set, e.g. 18000-19000. The first available port in the range is used.")
 	controlSocket := flag.String("control-socket", "", "Unix socket path for local control API (GET /service-addr, GET /healthz, POST /shutdown)")
 	controlAddr := flag.String("control-addr", "", "TCP listen address for local control API (use on Windows, e.g. 127.0.0.1:0)")
-	clientLeaseDir := flag.String("client-lease-dir", "", "Neovim client lease directory used to self-stop detached services when no clients remain")
 	cliPath := flag.String("cli-path", defaultCLIPath(), "path to Copilot CLI binary or JS entrypoint")
 	cliURL := flag.String("cli-url", "", "URL for an already-running Copilot CLI server")
 	model := flag.String("model", defaultModel, "default model for new sessions; empty uses the Copilot CLI account default")
@@ -360,6 +467,9 @@ func main() {
 		},
 		defaultModel:            strings.TrimSpace(*model),
 		defaultWorkingDirectory: workingDirectory,
+		stop:                    stop,
+		activeClients:           make(map[string]registeredClient),
+		idleShutdownGrace:       clientLeaseEmptyGrace,
 		sessions:                make(map[string]*managedSession),
 	}
 
@@ -393,6 +503,8 @@ func main() {
 	mux.HandleFunc("POST /sessions/{id}/permission-mode", svc.handleSetPermissionMode)
 	mux.HandleFunc("POST /sessions/{id}/abort", svc.handleAbortSession)
 	mux.HandleFunc("POST /sessions/{id}/tools", svc.handleSetTools)
+	mux.HandleFunc("POST /clients/{id}", svc.handleRegisterClient)
+	mux.HandleFunc("DELETE /clients/{id}", svc.handleUnregisterClient)
 	mux.HandleFunc("POST /shutdown", svc.handleShutdown)
 
 	// Resolve listen address. When -addr is not set, honour -port-range if
@@ -476,8 +588,7 @@ func main() {
 	} else if strings.TrimSpace(*cliPath) != "" {
 		logInfof("Using Copilot CLI at %s", strings.TrimSpace(*cliPath))
 	}
-
-	startClientLeaseWatcher(ctx, strings.TrimSpace(*clientLeaseDir), stop)
+	svc.startIdleShutdownIfNoClients("startup")
 
 	// Print the machine-readable address to stderr so it doesn't pollute the
 	// LSP stdio stream. The Neovim plugin reads it from on_stderr.
@@ -524,6 +635,7 @@ func startControlServer(ctx context.Context, svc *service, network string, socke
 		})
 	})
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, _ *http.Request) {
+		logInfof("shutdown requested via control socket")
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		if svc.shutdownHTTP == nil {
 			return
@@ -573,6 +685,7 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 	if leaseDir == "" || stop == nil {
 		return
 	}
+	logInfof("client lease watcher active dir=%s poll=%s grace=%s", leaseDir, clientLeasePollInterval, clientLeaseEmptyGrace)
 
 	// Require several consecutive empty reads before shutting down.
 	// This prevents transient filesystem glitches (momentary empty
@@ -589,6 +702,7 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 
 		seenLease := false
 		consecutiveEmpty := 0
+		lastLeaseCount := -1
 		shutdown := func(reason string) {
 			logWarnf("client lease dir empty (%s, %d consecutive checks); shutting down detached service", reason, consecutiveEmpty)
 			stop()
@@ -610,6 +724,10 @@ func startClientLeaseWatcher(ctx context.Context, leaseDir string, stop func()) 
 				logWarnf("watch client leases %s: %v", leaseDir, err)
 				consecutiveEmpty = 0
 				return false, "error"
+			}
+			if count := len(entries); count != lastLeaseCount {
+				logInfof("client lease watcher state dir=%s leases=%d seenLease=%t", leaseDir, count, seenLease)
+				lastLeaseCount = count
 			}
 			if len(entries) > 0 {
 				seenLease = true
@@ -1672,7 +1790,7 @@ func (s *service) handleSetTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *service) handleShutdown(w http.ResponseWriter, r *http.Request) {
-	logInfof("shutdown requested")
+	logInfof("shutdown requested via HTTP path=%s remote=%s", r.URL.Path, r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	if s.shutdownHTTP == nil {
 		return
@@ -1684,6 +1802,43 @@ func (s *service) handleShutdown(w http.ResponseWriter, r *http.Request) {
 			logWarnf("shutdown via endpoint: %v", err)
 		}
 	}()
+}
+
+func (s *service) handleRegisterClient(w http.ResponseWriter, r *http.Request) {
+	clientID := strings.TrimSpace(r.PathValue("id"))
+	if clientID == "" {
+		writeError(w, http.StatusBadRequest, "client id is required")
+		return
+	}
+
+	var req registerClientRequest
+	if err := decodeJSON(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	count := s.registerClient(clientID, req.ClientName)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"clientId":      clientID,
+		"clientName":    req.ClientName,
+		"activeClients": count,
+	})
+}
+
+func (s *service) handleUnregisterClient(w http.ResponseWriter, r *http.Request) {
+	clientID := strings.TrimSpace(r.PathValue("id"))
+	if clientID == "" {
+		writeError(w, http.StatusBadRequest, "client id is required")
+		return
+	}
+
+	count := s.unregisterClient(clientID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"clientId":      clientID,
+		"activeClients": count,
+	})
 }
 
 func (s *service) liveSessionSummaries() []sessionSummary {

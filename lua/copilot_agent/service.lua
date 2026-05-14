@@ -783,10 +783,7 @@ function M.last_service_output()
 end
 
 function M.check_service_health(callback)
-  local discovered = refresh_service_addr_from_control()
-  if not discovered then
-    discovered = refresh_service_addr_from_state()
-  end
+  local discovered = M.refresh_managed_base_url()
   if state.base_url_managed ~= false and not discovered then
     callback(false, 'service address not discovered yet', nil)
     return
@@ -795,6 +792,18 @@ function M.check_service_health(callback)
   http.raw_request('GET', state.config.service.healthcheck_path, nil, function(_, err, status)
     callback(err == nil and status and status < 400, err, status)
   end)
+end
+
+function M.refresh_managed_base_url()
+  if state.base_url_managed == false then
+    return false
+  end
+
+  local discovered = refresh_service_addr_from_control()
+  if not discovered then
+    discovered = refresh_service_addr_from_state()
+  end
+  return discovered
 end
 
 function M.ensure_service_live(callback)

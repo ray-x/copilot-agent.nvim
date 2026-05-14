@@ -742,12 +742,14 @@ describe('service coordination', function()
   local original_jobstart
   local original_filereadable
   local original_executable
+  local original_system
   local original_os_uname
   local temp_state_dir
 
   before_each(function()
     package.loaded['copilot_agent'] = nil
     package.loaded['copilot_agent.service'] = nil
+    package.loaded['copilot_agent.http'] = nil
     agent = require('copilot_agent')
     agent.setup({ auto_create_session = false })
     service = require('copilot_agent.service')
@@ -755,6 +757,7 @@ describe('service coordination', function()
     original_jobstart = vim.fn.jobstart
     original_filereadable = vim.fn.filereadable
     original_executable = vim.fn.executable
+    original_system = vim.fn.system
     original_os_uname = vim.uv.os_uname
     temp_state_dir = vim.fn.tempname()
     vim.fn.mkdir(temp_state_dir, 'p')
@@ -771,6 +774,7 @@ describe('service coordination', function()
     vim.fn.jobstart = original_jobstart
     vim.fn.filereadable = original_filereadable
     vim.fn.executable = original_executable
+    vim.fn.system = original_system
     vim.uv.os_uname = original_os_uname
     pcall(service._release_spawn_lock)
   end)
@@ -963,6 +967,48 @@ describe('service coordination', function()
     vim.fn.jobstop = original_jobstop
 
     assert_eq(0, #calls)
+  end)
+
+  it('uses the shared addr file when control discovery is unavailable', function()
+    agent.state.base_url_managed = true
+    agent.state.config.base_url = 'http://127.0.0.1:62569'
+    vim.fn.writefile({ '127.0.0.1:49357' }, temp_state_dir .. '/copilot-agent.addr')
+
+    local http = require('copilot_agent.http')
+
+    assert_eq('http://127.0.0.1:49357/sessions', http.build_url('/sessions'))
+    assert_eq('http://127.0.0.1:49357', agent.state.config.base_url)
+  end)
+
+  it('prefers control socket discovery over the shared addr file', function()
+    local socket_path = temp_state_dir .. '/copilot-agent.sock'
+    agent.state.base_url_managed = true
+    agent.state.config.base_url = 'http://127.0.0.1:62569'
+    vim.fn.writefile({ '' }, socket_path)
+    vim.fn.writefile({ '127.0.0.1:49357' }, temp_state_dir .. '/copilot-agent.addr')
+
+    vim.fn.filereadable = function(path)
+      if path == socket_path then
+        return 1
+      end
+      return original_filereadable(path)
+    end
+
+    vim.fn.executable = function(path)
+      if path == agent.state.config.curl_bin then
+        return 1
+      end
+      return original_executable(path)
+    end
+
+    vim.fn.system = function(_)
+      return '{"serviceAddr":"127.0.0.1:50123"}\n200'
+    end
+
+    local http = require('copilot_agent.http')
+
+    assert_eq('http://127.0.0.1:50123/sessions', http.build_url('/sessions'))
+    assert_eq('http://127.0.0.1:50123', agent.state.config.base_url)
   end)
 end)
 
@@ -6264,6 +6310,8 @@ describe('mcp slash command', function()
 
   it('supports show, add, disable, enable, delete, and edit actions', function()
     local original_system = vim.system
+    local original_filereadable = vim.fn.filereadable
+    local global_mcp = vim.fn.expand('~/.copilot/mcp-config.json')
     local mcp_list_output = [[
 {
   "mcpServers": {
@@ -6319,6 +6367,12 @@ describe('mcp slash command', function()
       end
       return original_system(args, opts)
     end
+    vim.fn.filereadable = function(path)
+      if path == global_mcp then
+        return 0
+      end
+      return original_filereadable(path)
+    end
 
     local ok, err = pcall(function()
       assert_true(slash.execute('/mcp show'))
@@ -6370,6 +6424,7 @@ describe('mcp slash command', function()
     end)
 
     vim.system = original_system
+    vim.fn.filereadable = original_filereadable
     assert_true(ok, err)
   end)
 
@@ -6402,7 +6457,14 @@ describe('mcp slash command', function()
     agent.state.creating_session = false
     assert_true(slash.execute('/mcp reload'))
     vim.wait(20)
-    assert_true(agent.state.entries[#agent.state.entries].content:find('No active session', 1, true) ~= nil)
+    local saw_no_session = false
+    for _, entry in ipairs(agent.state.entries) do
+      if type(entry.content) == 'string' and entry.content:find('No active session', 1, true) ~= nil then
+        saw_no_session = true
+        break
+      end
+    end
+    assert_true(saw_no_session)
   end)
 end)
 

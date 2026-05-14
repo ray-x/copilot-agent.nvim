@@ -18,6 +18,13 @@ local is_connection_error = utils.is_connection_error
 local M = {}
 
 local function effective_base_url()
+  if state.base_url_managed ~= false then
+    local ok, service = pcall(require, 'copilot_agent.service')
+    if ok and type(service) == 'table' and type(service.refresh_managed_base_url) == 'function' then
+      service.refresh_managed_base_url()
+    end
+  end
+
   local base_url = normalize_base_url(state.config.base_url)
   if type(base_url) == 'string' and base_url ~= '' then
     return base_url

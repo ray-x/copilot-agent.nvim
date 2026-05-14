@@ -680,9 +680,15 @@ refresh_service_addr_from_state = function()
   if state.base_url_managed == false then
     return false
   end
+
+  if not shared_service_pid_alive() then
+    return false
+  end
+
   local saved_addr = load_service_addr()
   if saved_addr and saved_addr ~= '' then
     state.config.base_url = 'http://' .. saved_addr
+    state.service_addr_known = true
     return true
   end
   return false

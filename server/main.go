@@ -139,7 +139,7 @@ type sessionSummary struct {
 	WorkspacePath     string                      `json:"workspacePath,omitempty"`
 	PermissionMode    string                      `json:"permissionMode"`
 	ExcludedTools     []string                    `json:"excludedTools,omitempty"`
-	Capabilities      copilot.SessionCapabilities `json:"capabilities,omitempty"`
+	Capabilities      copilot.SessionCapabilities `json:"capabilities"`
 	PendingUserInputs []pendingUserInputView      `json:"pendingUserInputs,omitempty"`
 	Summary           string                      `json:"summary,omitempty"`
 	Live              bool                        `json:"live"`
@@ -422,7 +422,7 @@ func main() {
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	svc.shutdownHTTP = server.Shutdown
-	controlCleanup := func() {}
+	var controlCleanup func()
 	socketPath := strings.TrimSpace(*controlSocket)
 	controlListenAddr := strings.TrimSpace(*controlAddr)
 	switch {
@@ -1381,10 +1381,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 func shouldReplayHistoryEvent(event copilot.SessionEvent, replayPermissionHistory bool) bool {
 	if event.Type == "permission.requested" || event.Type == "permission.completed" {
-		if replayPermissionHistory {
-			return true
-		}
-		return false
+		return replayPermissionHistory
 	}
 	if event.Type != copilot.SessionEventTypeAssistantMessage {
 		return true

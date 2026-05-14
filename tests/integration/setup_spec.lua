@@ -779,11 +779,19 @@ describe('service coordination', function()
     pcall(service._release_spawn_lock)
   end)
 
-  it('refreshes the managed base url from the shared addr file', function()
+  it('refreshes the managed base url from the shared addr file for a live shared service', function()
     agent.state.base_url_managed = true
     agent.state.config.base_url = 'http://127.0.0.1:1111'
 
+    service._save_service_pid(vim.fn.getpid())
     service._save_service_addr('127.0.0.1:2222')
+    vim.fn.system = function(args)
+      local command = table.concat(args, ' ')
+      if command:find('http://127.0.0.1:2222/healthz', 1, true) ~= nil then
+        return '{"ok":true}\n200'
+      end
+      return original_system(args)
+    end
 
     assert_true(service._refresh_service_addr_from_state())
     assert_eq('http://127.0.0.1:2222', agent.state.config.base_url)
@@ -797,6 +805,15 @@ describe('service coordination', function()
 
     assert_false(service._refresh_service_addr_from_state())
     assert_eq('http://127.0.0.1:9999', agent.state.config.base_url)
+  end)
+
+  it('ignores a stale shared addr file when no live shared service is known', function()
+    agent.state.base_url_managed = true
+    agent.state.config.base_url = ''
+    service._save_service_addr('127.0.0.1:2222')
+
+    assert_false(service._refresh_service_addr_from_state())
+    assert_eq('', agent.state.config.base_url)
   end)
 
   it('uses a startup lock to serialize service spawns', function()
@@ -856,6 +873,61 @@ describe('service coordination', function()
     assert_true(vim.tbl_contains(calls[1].args, socket_path))
     assert_true(vim.tbl_contains(calls[1].args, 'http://localhost/shutdown'))
     assert_eq('127.0.0.1:43123', service._load_service_addr())
+  end)
+
+  it('restarts the helper lsp when a copilot-agent client already exists', function()
+    local lsp = require('copilot_agent.lsp')
+    local original_get_clients = vim.lsp.get_clients
+    local original_start = vim.lsp.start
+    local original_stop_client = vim.lsp.stop_client
+    local original_check_service_health = service.check_service_health
+    local stopped = {}
+    local started_config = nil
+
+    agent.state.config.base_url = 'http://127.0.0.1:50123'
+
+    vim.lsp.get_clients = function(opts)
+      if opts and opts.name == 'copilot-agent' then
+        return {
+          {
+            id = 99,
+            name = 'copilot-agent',
+            config = {
+              root_dir = temp_state_dir,
+            },
+          },
+        }
+      end
+      return original_get_clients(opts)
+    end
+
+    vim.lsp.stop_client = function(client_id, force)
+      stopped[#stopped + 1] = { client_id = client_id, force = force }
+      return true
+    end
+
+    vim.lsp.start = function(config)
+      started_config = vim.deepcopy(config)
+      return 123
+    end
+
+    service.check_service_health = function(callback)
+      callback(true)
+    end
+
+    local client_id = lsp.start_lsp({ root_dir = temp_state_dir })
+
+    vim.lsp.get_clients = original_get_clients
+    vim.lsp.start = original_start
+    vim.lsp.stop_client = original_stop_client
+    service.check_service_health = original_check_service_health
+
+    assert_eq(1, #stopped)
+    assert_eq(99, stopped[1].client_id)
+    assert_true(stopped[1].force == true)
+    assert_true(type(started_config) == 'table')
+    assert_true(vim.tbl_contains(started_config.cmd, '-lsp-only'))
+    assert_eq(123, client_id)
   end)
 
   it('uses a TCP control endpoint on Windows', function()
@@ -969,10 +1041,18 @@ describe('service coordination', function()
     assert_eq(0, #calls)
   end)
 
-  it('uses the shared addr file when control discovery is unavailable', function()
+  it('uses the shared addr file when a live shared service is known', function()
     agent.state.base_url_managed = true
     agent.state.config.base_url = 'http://127.0.0.1:62569'
+    service._save_service_pid(vim.fn.getpid())
     vim.fn.writefile({ '127.0.0.1:49357' }, temp_state_dir .. '/copilot-agent.addr')
+    vim.fn.system = function(args)
+      local command = table.concat(args, ' ')
+      if command:find('http://127.0.0.1:49357/healthz', 1, true) ~= nil then
+        return '{"ok":true}\n200'
+      end
+      return original_system(args)
+    end
 
     local http = require('copilot_agent.http')
 

@@ -789,10 +789,19 @@ function M.start_lsp(opts)
   opts = opts or {}
 
   local root = opts.root_dir or service.working_directory()
+  local stale_clients = {}
   for _, client in ipairs(vim.lsp.get_clients({ name = 'copilot-agent' })) do
     if client.config.root_dir == root then
-      state.lsp_client_id = client.id
-      return client.id
+      stale_clients[#stale_clients + 1] = client
+    end
+  end
+
+  if #stale_clients > 0 and type(vim.lsp.stop_client) == 'function' then
+    for _, client in ipairs(stale_clients) do
+      pcall(vim.lsp.stop_client, client.id, true)
+      if state.lsp_client_id == client.id then
+        state.lsp_client_id = nil
+      end
     end
   end
 

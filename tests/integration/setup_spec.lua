@@ -1082,10 +1082,11 @@ describe('service coordination', function()
     local original_get_clients = vim.lsp.get_clients
     local original_start = vim.lsp.start
     local original_stop_client = vim.lsp.stop_client
-    local original_check_service_health = service.check_service_health
+    local original_ensure_service_running = service.ensure_service_running
     local original_service_command = service.service_command
     local stopped = {}
     local started_config = nil
+    local ensure_calls = 0
 
     agent.state.config.base_url = 'http://127.0.0.1:50123'
     agent.state.service_starting = false
@@ -1119,8 +1120,9 @@ describe('service coordination', function()
       return 123
     end
 
-    service.check_service_health = function(callback)
-      callback(true)
+    service.ensure_service_running = function(callback)
+      ensure_calls = ensure_calls + 1
+      callback(nil)
     end
 
     local client_id = lsp.start_lsp({ root_dir = temp_state_dir })
@@ -1131,12 +1133,13 @@ describe('service coordination', function()
     vim.lsp.get_clients = original_get_clients
     vim.lsp.start = original_start
     vim.lsp.stop_client = original_stop_client
-    service.check_service_health = original_check_service_health
+    service.ensure_service_running = original_ensure_service_running
     service.service_command = original_service_command
 
     assert_eq(1, #stopped)
     assert_eq(99, stopped[1].client_id)
     assert_true(stopped[1].force == true)
+    assert_eq(1, ensure_calls)
     assert_true(type(started_config) == 'table')
     assert_true(vim.tbl_contains(started_config.cmd, '-lsp-only'))
     assert_eq(123, client_id)
@@ -1419,6 +1422,7 @@ describe('user commands', function()
     'CopilotAgentSwitchSession',
     'CopilotAgentDeleteSession',
     'CopilotAgentStart',
+    'CopilotAgentServerStart',
     'CopilotAgentAsk',
     'CopilotAgentModel',
     'CopilotAgentStop',

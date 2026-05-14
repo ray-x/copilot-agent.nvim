@@ -42,7 +42,6 @@ local prompt = require('copilot_agent.prompt')
 local commit = require('copilot_agent.commit')
 
 -- ── Local aliases ─────────────────────────────────────────────────────────────
-local ensure_service_running = service.ensure_service_running
 local append_entry = render.append_entry
 local ensure_chat_window = chat.ensure_chat_window
 
@@ -164,6 +163,8 @@ function M.setup(opts)
   state.overlay_tool_display = nil
   state.overlay_tool_queue = {}
   state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+  state.setup_generation = (tonumber(state.setup_generation) or 0) + 1
+  state.startup_session_discovery = false
   state.post_tool_use_hooks = {}
   state.recent_activity_lines = {}
   state.recent_activity_items = {}
@@ -319,19 +320,7 @@ function M.setup(opts)
   end)
   -- Eagerly connect to an existing shared service or start one if needed.
   -- Session creation is still deferred until the user opens chat.
-  if state.config.service.auto_start then
-    vim.schedule(function()
-      ensure_service_running(function(err)
-        if err then
-          notify('Failed to start Copilot service: ' .. err, vim.log.levels.ERROR)
-          return
-        end
-        if state.config.lsp and state.config.lsp.enabled then
-          lsp.start_lsp()
-        end
-      end)
-    end)
-  elseif state.config.lsp and state.config.lsp.enabled then
+  if state.config.lsp and state.config.lsp.enabled then
     vim.schedule(function()
       lsp.start_lsp()
     end)
@@ -444,7 +433,7 @@ end
 -- ── Service / misc ───────────────────────────────────────────────────────────
 
 function M.start_service(callback)
-  ensure_service_running(function(err)
+  service.start_service_with_current_config(function(err)
     if err then
       notify('Failed to start service: ' .. err, vim.log.levels.ERROR)
       append_entry('error', 'Failed to start service: ' .. err)

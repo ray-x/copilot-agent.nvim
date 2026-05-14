@@ -233,6 +233,7 @@ local function request_generated_commit_message(repo_root, callback)
   local function send_prompt()
     request('POST', string.format('/sessions/%s/messages', side_session_id), {
       prompt = prompt,
+      clientId = service.client_id(),
     }, function(_, err)
       if err then
         finish(nil, err)
@@ -253,6 +254,7 @@ local function request_generated_commit_message(repo_root, callback)
 
   local function create_side_session(agent_name)
     request('POST', '/sessions', {
+      clientId = service.client_id(),
       clientName = state.config.client_name,
       -- The commit agent must run git shell commands; approve-reads would fall
       -- back to interactive permission prompts with no UI attached here.

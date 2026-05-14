@@ -1293,6 +1293,7 @@ function M.ask(prompt, opts)
       schedule_render()
 
       local body = { prompt = prompt_body }
+      body.clientId = service.client_id()
       if #api_attachments > 0 then
         body.attachments = api_attachments
       end

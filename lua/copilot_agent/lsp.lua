@@ -778,7 +778,7 @@ function M.install_binary(opts)
       if ext == '' then
         vim.fn.system({ 'chmod', '+x', out_path })
       end
-      notify('copilot-agent installed → ' .. out_path .. '\nRestart Neovim or run :CopilotAgentStart', vim.log.levels.INFO)
+      notify('copilot-agent installed → ' .. out_path .. '\nRestart Neovim or run :CopilotAgentServerStart', vim.log.levels.INFO)
       if opts.on_complete then
         opts.on_complete(out_path)
       end
@@ -847,24 +847,9 @@ function M.start_lsp(opts)
     end
   end
 
-  if state.service_starting then
-    service.ensure_service_running(function(err)
-      if err then
-        notify('Failed to start Copilot agent LSP: ' .. err, vim.log.levels.ERROR)
-        return
-      end
-      start_helper_lsp()
-    end)
-    return state.lsp_client_id
-  end
-
-  service.check_service_health(function(healthy, err, status)
-    if not healthy then
-      local message = err or 'service is not running'
-      if status then
-        message = message .. ' (status ' .. tostring(status) .. ')'
-      end
-      notify('Failed to start Copilot agent LSP: ' .. message, vim.log.levels.ERROR)
+  service.ensure_service_running(function(err)
+    if err then
+      notify('Failed to start Copilot agent LSP: ' .. err, vim.log.levels.ERROR)
       return
     end
     start_helper_lsp()

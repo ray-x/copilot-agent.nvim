@@ -375,11 +375,19 @@ local function handoff_to_chat(text)
   agent.ask(text)
 end
 
+local function connect_session_error(err)
+  local message = tostring(err or '')
+  if utils.is_connection_error(message) or message:find('service address not discovered yet', 1, true) or message:find('service auto_start is disabled', 1, true) then
+    return 'Unable to connect to the Copilot Agent server. Start it first with :CopilotAgentServerStart.'
+  end
+  return 'Failed to connect session: ' .. message
+end
+
 local function connect_last_session()
   local agent = replace_dashboard_with_chat()
   session.attach_latest_project_session_or_create(function(_, err)
     if err then
-      notify('Failed to connect session: ' .. tostring(err), vim.log.levels.ERROR)
+      notify(connect_session_error(err), vim.log.levels.ERROR)
       return
     end
     vim.schedule(function()
@@ -406,7 +414,7 @@ local function submit_prompt(text)
 
   session.attach_latest_project_session_or_create(function(_, err)
     if err then
-      notify('Failed to connect session: ' .. tostring(err), vim.log.levels.ERROR)
+      notify(connect_session_error(err), vim.log.levels.ERROR)
       focus_prompt()
       return
     end

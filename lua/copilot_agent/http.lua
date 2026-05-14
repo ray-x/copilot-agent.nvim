@@ -315,6 +315,11 @@ end
 function M.request(method, path, body, callback, opts)
   opts = opts or {}
 
+  if state.shutting_down then
+    callback(nil, 'service is shutting down', nil)
+    return
+  end
+
   if not has_base_url() then
     if opts.auto_start == false then
       callback(nil, 'service address not discovered yet', nil)
@@ -336,6 +341,10 @@ function M.request(method, path, body, callback, opts)
 
   M.raw_request(method, path, body, function(payload, err, status)
     if err and opts.auto_start ~= false and is_connection_error(err) then
+      if state.base_url_managed == false then
+        callback(nil, err, status)
+        return
+      end
       log(
         string.format('http.request retry method=%s path=%s status=%s reason=%s', tostring(method), tostring(path), tostring(status or '<none>'), serialize_log_value(err, { max_len = 600 })),
         vim.log.levels.WARN

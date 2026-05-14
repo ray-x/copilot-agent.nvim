@@ -3474,6 +3474,7 @@ local function ask_side_question(prompt, opts)
 
   local function send_prompt()
     local body = { prompt = request_prompt }
+    body.clientId = service.client_id()
     if #api_attachments > 0 then
       body.attachments = api_attachments
     end
@@ -3496,6 +3497,7 @@ local function ask_side_question(prompt, opts)
   end
 
   request('POST', '/sessions', {
+    clientId = service.client_id(),
     clientName = state.config.client_name,
     permissionMode = 'approve-reads',
     workingDirectory = working_directory(),

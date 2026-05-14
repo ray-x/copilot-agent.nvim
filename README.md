@@ -384,7 +384,8 @@ Use `:CopilotAgentDashboard` or `:CopilotAgentChat` to get started.
 | `:CopilotAgentSwitchSession`         | Pick from all persisted sessions and switch                                                                                    |
 | `:CopilotAgentDeleteSession`         | Pick a session by summary + exact ID and delete it                                                                             |
 | `:CopilotAgentModel [id]`            | Pick or set a model; tab-completes from service model list                                                                     |
-| `:CopilotAgentStart`                 | Manually start the Go service                                                                                                  |
+| `:CopilotAgentStart`                 | Start the Go service with the current config                                                                                   |
+| `:CopilotAgentServerStart`           | Start the Copilot Agent server with the current config                                                                         |
 | `:CopilotAgentStop`                  | Disconnect the active session                                                                                                  |
 | `:CopilotAgentStop!`                 | Delete the active session; checkpoint cleanup waits 7 days                                                                     |
 | `:CopilotAgentCancel`                | Cancel the current agent turn                                                                                                  |

@@ -48,7 +48,11 @@ end, { desc = 'Delete a persisted Copilot session from a picker' })
 
 vim.api.nvim_create_user_command('CopilotAgentStart', function()
   copilot_agent.start_service()
-end, { desc = 'Start the Copilot Go service' })
+end, { desc = 'Start the Copilot Go service with the current config' })
+
+vim.api.nvim_create_user_command('CopilotAgentServerStart', function()
+  copilot_agent.start_service()
+end, { desc = 'Start the Copilot Agent server with the current config' })
 
 vim.api.nvim_create_user_command('CopilotAgentAsk', function(command)
   copilot_agent.ask(table.concat(command.fargs, ' '))

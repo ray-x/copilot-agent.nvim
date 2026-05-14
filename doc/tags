@@ -6,6 +6,7 @@
 :CopilotAgentNewSession	copilot-agent.txt	/*:CopilotAgentNewSession*
 :CopilotAgentPasteImage	copilot-agent.txt	/*:CopilotAgentPasteImage*
 :CopilotAgentStart	copilot-agent.txt	/*:CopilotAgentStart*
+:CopilotAgentServerStart	copilot-agent.txt	/*:CopilotAgentServerStart*
 :CopilotAgentStatus	copilot-agent.txt	/*:CopilotAgentStatus*
 :CopilotAgentStop	copilot-agent.txt	/*:CopilotAgentStop*
 copilot-agent-api	copilot-agent.txt	/*copilot-agent-api*

@@ -73,6 +73,7 @@ func fatalErrorf(format string, args ...any) {
 type createSessionRequest struct {
 	SessionID                      string                       `json:"sessionId,omitempty"`
 	Resume                         bool                         `json:"resume,omitempty"`
+	ClientID                       string                       `json:"clientId,omitempty"`
 	ClientName                     string                       `json:"clientName,omitempty"`
 	Model                          string                       `json:"model,omitempty"`
 	ReasoningEffort                string                       `json:"reasoningEffort,omitempty"`
@@ -91,11 +92,13 @@ type createSessionRequest struct {
 }
 
 type registerClientRequest struct {
+	ClientID   string `json:"clientId,omitempty"`
 	ClientName string `json:"clientName,omitempty"`
 }
 
 type sendMessageRequest struct {
 	Prompt         string               `json:"prompt"`
+	ClientID       string               `json:"clientId,omitempty"`
 	Attachments    []copilot.Attachment `json:"attachments,omitempty"`
 	RequestHeaders map[string]string    `json:"requestHeaders,omitempty"`
 }
@@ -979,6 +982,14 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientName := strings.TrimSpace(req.ClientName)
+	if clientName == "" {
+		clientName = defaultClientName
+	}
+	if clientID := strings.TrimSpace(req.ClientID); clientID != "" {
+		s.registerClient(clientID, clientName)
+	}
+
 	if existing, ok := s.getManagedSession(req.SessionID); ok {
 		if req.PermissionMode != "" && req.PermissionMode != existing.permissionMode {
 			existing.permissionMode = req.PermissionMode
@@ -1002,10 +1013,6 @@ func (s *service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	streaming := boolOrDefault(req.Streaming, true)
 	configDiscovery := boolOrDefault(req.EnableConfigDiscovery, true)
-	clientName := strings.TrimSpace(req.ClientName)
-	if clientName == "" {
-		clientName = defaultClientName
-	}
 
 	model, err := s.resolveRequestedModel(r.Context(), firstNonEmpty(req.Model, s.defaultModel))
 	if err != nil {
@@ -1307,6 +1314,9 @@ func (s *service) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Prompt) == "" {
 		writeError(w, http.StatusBadRequest, "prompt is required")
 		return
+	}
+	if clientID := strings.TrimSpace(req.ClientID); clientID != "" {
+		s.registerClient(clientID, managed.clientName)
 	}
 
 	messageID, err := managed.session.Send(r.Context(), copilot.MessageOptions{
@@ -1813,6 +1823,7 @@ func (s *service) handleRegisterClient(w http.ResponseWriter, r *http.Request) {
 
 	var req registerClientRequest
 	if err := decodeJSON(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		logWarnf("client register decode failed clientID=%s err=%v", clientID, err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

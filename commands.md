@@ -45,7 +45,7 @@ Below, **Plugin** means there is a working Neovim command/keymap/UI path now. **
 | `/login`               | No          |          No | Authenticate outside the plugin with Copilot CLI / env vars                                                                               |
 | `/logout`              | No          |          No | Same as `/login`                                                                                                                          |
 | `/exit`                | No          |          No | Quit Neovim or close the chat window                                                                                                      |
-| `/restart`             | **Partial** |          No | `:CopilotAgentStop` then `:CopilotAgentStart`                                                                                             |
+| `/restart`             | **Partial** |          No | `:CopilotAgentStop` then `:CopilotAgentServerStart`                                                                                         |
 
 A few important takeaways:
 

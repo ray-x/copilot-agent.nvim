@@ -226,7 +226,11 @@ default is `stdpath("state") .. "/copilot-agent-service.log"`.
 
                                                   *:CopilotAgentStart*
 :CopilotAgentStart
-    Manually start the Go service (useful when `auto_start = false`).
+    Start the Go service with the current config.
+
+                                                  *:CopilotAgentServerStart*
+:CopilotAgentServerStart
+    Start the Copilot Agent server with the current config.
 
                                                   *:CopilotAgentStop*
 :CopilotAgentStop[!]

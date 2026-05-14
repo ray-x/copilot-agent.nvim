@@ -927,6 +927,14 @@ local function current_service_base_url()
   if type(base_url) == 'string' and base_url ~= '' then
     return base_url
   end
+
+  if M.refresh_managed_base_url() then
+    base_url = normalize_base_url(state.config.base_url)
+    if type(base_url) == 'string' and base_url ~= '' then
+      return base_url
+    end
+  end
+
   local registered = state.client_registered_base_url
   if type(registered) == 'string' and registered ~= '' then
     return registered
@@ -939,6 +947,10 @@ local function client_registration_path()
 end
 
 function M.register_client()
+  if state.shutting_down then
+    return nil, 'service is shutting down'
+  end
+
   local base_url = current_service_base_url()
   if base_url == '' then
     return nil, 'service address not discovered yet'
@@ -1001,6 +1013,48 @@ function M.unregister_client()
   state.client_registered_base_url = nil
   log(string.format('unregister_client succeeded client_id=%s base_url=%s', client_id, base_url), vim.log.levels.DEBUG)
   return true
+end
+
+function M.ensure_managed_base_url(callback)
+  if type(callback) ~= 'function' then
+    return
+  end
+
+  if state.shutting_down then
+    callback('service is shutting down', nil)
+    return
+  end
+
+  if state.base_url_managed == false then
+    local base_url = normalize_base_url(state.config.base_url)
+    callback(nil, base_url ~= '' and base_url or nil)
+    return
+  end
+
+  local timeout_ms, interval_ms = interval_settings()
+  local deadline_ms = now_ms() + timeout_ms
+
+  local function try_refresh()
+    if refresh_service_addr_from_control() then
+      callback(nil, normalize_base_url(state.config.base_url))
+      return
+    end
+
+    if now_ms() >= deadline_ms then
+      callback('service address not discovered yet', nil)
+      return
+    end
+
+    vim.defer_fn(try_refresh, interval_ms)
+  end
+
+  M.ensure_service_running(function(err)
+    if err then
+      callback(err, nil)
+      return
+    end
+    try_refresh()
+  end)
 end
 
 M.register_client_lease = M.register_client
@@ -1174,9 +1228,13 @@ function M.ensure_service_live(callback)
     return
   end
 
+  if state.shutting_down then
+    callback('service is shutting down')
+    return
+  end
+
   M.check_service_health(function(healthy, err, status)
     if healthy then
-      pcall(M.register_client)
       callback(nil)
       return
     end
@@ -1197,30 +1255,8 @@ function M.ensure_service_live(callback)
   end)
 end
 
-function M.ensure_service_running(callback)
+local function start_service_sequence(callback)
   if type(callback) ~= 'function' then
-    return
-  end
-
-  if state.config.service.auto_start ~= true then
-    M.check_service_health(function(healthy, err, status)
-      if healthy then
-        local registered, register_err = M.register_client()
-        if not registered and register_err then
-          log('client registration failed after health check: ' .. tostring(register_err), vim.log.levels.WARN)
-        end
-        callback(nil)
-        return
-      end
-      local message = err
-      if not message then
-        message = 'service auto_start is disabled'
-        if status then
-          message = message .. ' with status ' .. tostring(status)
-        end
-      end
-      callback(message)
-    end)
     return
   end
 
@@ -1247,9 +1283,9 @@ function M.ensure_service_running(callback)
   end
 
   local function finish_ready()
-    local registered, register_err = M.register_client()
-    if not registered and register_err then
-      log('client registration failed after service startup: ' .. tostring(register_err), vim.log.levels.WARN)
+    if state.shutting_down then
+      finish('service is shutting down')
+      return
     end
     finish(nil)
   end
@@ -1362,6 +1398,11 @@ function M.ensure_service_running(callback)
   end
 
   local function wait_for_service_start()
+    if state.shutting_down then
+      finish('service is shutting down')
+      return
+    end
+
     M.check_service_health(function(healthy)
       if healthy then
         finish_ready()
@@ -1381,7 +1422,7 @@ function M.ensure_service_running(callback)
         return
       end
 
-      local acquired, acquire_err = try_acquire_spawn_lock(timeout_ms)
+      local acquired, acquire_err = try_acquire_spawn_lock(math.max(timeout_ms * 4, 60000))
       if acquire_err then
         finish(acquire_err)
         return
@@ -1429,6 +1470,54 @@ function M.ensure_service_running(callback)
     end
     wait_for_service_start()
   end)
+end
+
+function M.ensure_service_running(callback)
+  if type(callback) ~= 'function' then
+    return
+  end
+
+  if state.shutting_down then
+    callback('service is shutting down')
+    return
+  end
+
+  if state.config.service.auto_start ~= true then
+    M.check_service_health(function(healthy, err, status)
+      if healthy then
+        local registered, register_err = M.register_client()
+        if not registered and register_err then
+          log('client registration failed after health check: ' .. tostring(register_err), vim.log.levels.WARN)
+        end
+        callback(nil)
+        return
+      end
+      local message = err
+      if not message then
+        message = 'service auto_start is disabled'
+        if status then
+          message = message .. ' with status ' .. tostring(status)
+        end
+      end
+      callback(message)
+    end)
+    return
+  end
+
+  start_service_sequence(callback)
+end
+
+function M.start_service_with_current_config(callback)
+  if type(callback) ~= 'function' then
+    return
+  end
+
+  if state.shutting_down then
+    callback('service is shutting down')
+    return
+  end
+
+  start_service_sequence(callback)
 end
 
 function M.debug_snapshot()

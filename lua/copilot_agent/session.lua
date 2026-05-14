@@ -155,8 +155,12 @@ local function merge_sessions(response)
   return items
 end
 
-local function fetch_sorted_sessions(context, callback)
-  request('GET', '/sessions', nil, function(response, err)
+local request_with_managed_base_url
+
+local function fetch_sorted_sessions(context, callback, opts)
+  opts = opts or {}
+  local request_fn = opts.strict_discovery == true and request_with_managed_base_url or request
+  request_fn('GET', '/sessions', nil, function(response, err)
     if err then
       callback(nil, err, response)
       return
@@ -249,6 +253,26 @@ local function delete_session_request(session_id, delete_state, callback)
       callback(err)
     end
   end, { auto_start = false })
+end
+
+request_with_managed_base_url = function(method, path, body, callback, opts)
+  opts = opts or {}
+  service.ensure_managed_base_url(function(err, base_url)
+    if err then
+      callback(nil, err)
+      return
+    end
+    request(
+      method,
+      path,
+      body,
+      callback,
+      vim.tbl_extend('force', opts, {
+        base_url = base_url,
+        auto_start = false,
+      })
+    )
+  end)
 end
 
 function M.disconnect_session(session_id, delete_state, callback)
@@ -348,9 +372,11 @@ function M.resume_session(session_id, callback, opts)
   opts = opts or {}
   local requested_wd = working_directory()
   log(string.format('resume_session request id=%s cwd=%s', format_session_id(session_id), requested_wd), vim.log.levels.DEBUG)
-  request('POST', '/sessions', {
+  local request_fn = opts.strict_discovery == true and request_with_managed_base_url or request
+  request_fn('POST', '/sessions', {
     sessionId = session_id,
     resume = true,
+    clientId = service.client_id(),
     clientName = state.config.client_name,
     permissionMode = state.permission_mode or state.config.permission_mode,
     workingDirectory = requested_wd,
@@ -359,6 +385,7 @@ function M.resume_session(session_id, callback, opts)
     model = state.config.session.model,
     agent = state.config.session.agent,
   }, function(response, err)
+    state.startup_session_discovery = false
     state.creating_session = false
     if opts.guard_current_session_id and state.session_id ~= nil and state.session_id ~= opts.guard_current_session_id then
       local message = 'resume cancelled: active session changed'
@@ -566,17 +593,19 @@ end
 
 function M.pick_or_create_session(callback)
   local wd = working_directory()
+  local strict_startup_discovery = state.startup_session_discovery == true
   -- Show a connecting indicator immediately while the async fetch runs.
   append_entry('system', 'Connecting…')
   log('pick_or_create_session cwd=' .. tostring(wd), vim.log.levels.INFO)
-  request('GET', '/sessions', nil, function(response, err)
+  fetch_sorted_sessions('pick_or_create_session', function(sessions, err, raw_response)
     if err then
       log('pick_or_create_session list failed: ' .. tostring(err), vim.log.levels.ERROR)
-      create_session(callback)
+      create_session(callback, { strict_discovery = strict_startup_discovery })
       return
     end
 
-    local sessions = merge_sessions(response)
+    strict_startup_discovery = strict_startup_discovery and #sessions == 0
+    state.startup_session_discovery = false
     log_session_catalog('pick_or_create_session', sessions, wd)
     local matching = {}
     for _, s in ipairs(sessions) do
@@ -589,8 +618,8 @@ function M.pick_or_create_session(callback)
       string.format(
         'pick_or_create_session cwd=%s persisted=%d live=%d merged=%d matching=%d',
         tostring(wd),
-        #((response and response.persisted) or {}),
-        #((response and response.live) or {}),
+        #((raw_response and raw_response.persisted) or {}),
+        #((raw_response and raw_response.live) or {}),
         #sessions,
         #matching
       ),
@@ -599,7 +628,7 @@ function M.pick_or_create_session(callback)
 
     if #matching == 0 then
       log('pick_or_create_session no matching session; creating new session', vim.log.levels.WARN)
-      create_session(callback)
+      create_session(callback, { strict_discovery = strict_startup_discovery })
       return
     end
 
@@ -666,7 +695,7 @@ function M.pick_or_create_session(callback)
             log_message = 'pick_or_create_session picker cancelled; resuming ' .. format_session_id(default.id),
           })
         else
-          create_session(callback)
+          create_session(callback, { strict_discovery = strict_startup_discovery })
         end
         return
       end
@@ -700,7 +729,7 @@ function M.pick_or_create_session(callback)
                   resolve_pending = true,
                 })
               else
-                create_session(callback)
+                create_session(callback, { strict_discovery = state.startup_session_discovery == true })
               end
               return
             end
@@ -712,7 +741,7 @@ function M.pick_or_create_session(callback)
                 log_message = 'pick_or_create_session resumed from all-sessions picker ' .. format_session_id(p.id),
               })
             else
-              create_session(callback)
+              create_session(callback, { strict_discovery = strict_startup_discovery })
             end
           end)
         end, 100)
@@ -723,10 +752,10 @@ function M.pick_or_create_session(callback)
           log_message = 'pick_or_create_session resumed from matching picker ' .. format_session_id(picked.id),
         })
       else
-        create_session(callback)
+        create_session(callback, { strict_discovery = strict_startup_discovery })
       end
     end)
-  end, { auto_start = false })
+  end, { strict_discovery = strict_startup_discovery })
 end
 
 create_session = function(callback, opts)
@@ -742,8 +771,10 @@ create_session = function(callback, opts)
     ),
     vim.log.levels.DEBUG
   )
-  request('POST', '/sessions', {
+  local request_fn = opts.strict_discovery == true and request_with_managed_base_url or request
+  request_fn('POST', '/sessions', {
     sessionId = opts.session_id,
+    clientId = service.client_id(),
     clientName = state.config.client_name,
     permissionMode = state.permission_mode or state.config.permission_mode,
     workingDirectory = requested_wd,
@@ -752,6 +783,7 @@ create_session = function(callback, opts)
     model = state.config.session.model,
     agent = state.config.session.agent,
   }, function(response, err)
+    state.startup_session_discovery = false
     state.creating_session = false
     if err then
       if is_stale_service_error(err) and opts.service_restart_attempted ~= true then
@@ -853,7 +885,7 @@ function M.create_new_session(callback)
     return
   end
   state.creating_session = true
-  create_session(callback)
+  create_session(callback, { strict_discovery = false })
 end
 
 function M.with_session(callback, opts)
@@ -869,6 +901,7 @@ function M.with_session(callback, opts)
   table.insert(state.pending_session_callbacks, callback)
   if opts.open_input_on_session_ready then
     state.open_input_on_session_ready = true
+    state.startup_session_discovery = true
   end
   if state.creating_session then
     return
@@ -902,7 +935,7 @@ function M.new_session()
       end
       append_entry('system', 'Created session ' .. session_id)
     end)
-  end)
+  end, { auto_start = false })
 end
 
 function M.clear_and_new_session()

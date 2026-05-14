@@ -1335,6 +1335,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			logInfof("SSE client disconnected session=%s", managed.session.SessionID)
 			return
 		case <-keepAlive.C:
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
@@ -1344,6 +1345,7 @@ func (s *service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		case msg, ok := <-sub:
 			if !ok {
+				logInfof("SSE subscriber channel closed session=%s", managed.session.SessionID)
 				return
 			}
 			if err := writeSSE(w, msg.Event, msg.Data); err != nil {

@@ -325,7 +325,7 @@ When the plugin starts the service on Windows, it appends a localhost control ad
 
 **Global service vs isolated instances**
 
-By default, `auto_start = true` connects to the shared service if it is already running, otherwise it starts a single detached background service for your user account. The last bound address is stored in `stdpath("state") .. "/copilot-agent.addr"`, so new Neovim instances reconnect to that same service automatically. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default. On quit, the last Neovim instance now requests detached-service shutdown in the background so exit does not wait on a slow control socket.
+By default, `auto_start = true` connects to the shared service if it is already running, otherwise it starts a single detached background service for your user account. In managed mode, the plugin first discovers the live HTTP address via the local control endpoint (`copilot-agent.sock` / `--control-addr`), then falls back to `stdpath("state") .. "/copilot-agent.addr"` when control discovery is unavailable. Session resume is still matched by `session.working_directory`, but the service process and persisted session catalog are global by default. On quit, the last Neovim instance now requests detached-service shutdown in the background so exit does not wait on a slow control socket.
 
 The helper LSP reuses that same shared service; it does not spawn a separate Copilot backend.
 

@@ -37,7 +37,7 @@ Below, **Plugin** means there is a working Neovim command/keymap/UI path now. **
 | `/copy`                | No          |          No | Use normal Neovim clipboard/yank                                                                                                          |
 | `/rewind`              | No          |          No | No equivalent; use git/manual undo                                                                                                        |
 | `/undo`                | No          |          No | Same as `/rewind`                                                                                                                         |
-| `/ask`                 | **Partial** |          No | `:CopilotAgentAsk`, but it **does** add to session history                                                                                |
+| `/ask`                 | **Partial** |          No | `:CopilotAgentAsk`; `@visual-selection` attaches the current visual selection to the prompt; it **does** add to session history             |
 | `/search`              | No          |          No | Use normal Neovim search or your picker plugin                                                                                            |
 | `/env`                 | **Partial** | **Partial** | `:CopilotAgentStatus` + statusline counts/intent/context; no dedicated env command                                                        |
 | `/experimental`        | No          |          No | No toggle; plugin already has ask/plan/agent/autopilot modes                                                                              |

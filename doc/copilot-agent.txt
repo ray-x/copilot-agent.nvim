@@ -297,7 +297,7 @@ Normal and insert mode (unless noted):
 Press <C-a> to open the attachment picker. Options:
 
   Current buffer        Attach the previously-focused file buffer
-  Visual selection      Attach the last visual selection (file + line range)
+  Visual selection      Attach the current visual selection (file + line range)
   File                  Pick one or more files via fuzzy finder
   Folder                Pick a directory
   Instructions file     Pick a file to use as instructions context (📋)
@@ -463,8 +463,11 @@ Each instance binds to the first free port in the range.
 ==============================================================================
 10. LSP CODE ACTIONS                              *copilot-agent-lsp*
 
-The Go binary runs an LSP server on stdio. Start it with |:CopilotAgentLsp|
-or `require("copilot_agent").start_lsp()`.
+The Go binary runs an LSP server on stdio. Setting `lsp.enabled = true`
+starts the helper automatically from |copilot-agent.setup()|. Use |:CopilotAgentLsp| or
+`require("copilot_agent").start_lsp()` only when you want explicit or delayed
+startup; the helper reuses the existing HTTP service instead of spawning a
+fresh backend session.
 
 Available code actions (trigger with `vim.lsp.buf.code_action()` on any
 selection):
@@ -477,7 +480,7 @@ selection):
 The action builds a prompt from the selection, file path, and line range,
 then posts it to the active HTTP session.
 
-Call `start_lsp()` in setup to make code actions available immediately: >lua
+Call `start_lsp()` in setup only if you want explicit immediate startup: >lua
   require("copilot_agent").setup({ ... })
   require("copilot_agent").start_lsp()
 <
@@ -880,7 +883,7 @@ v0.5.0 ~
   • Emoji icons in mode prompt prefix (💬 📋 🤖 🚀)
   • `approve-reads` permission mode (auto-approve reads, prompt writes)
   • Extmark-based role header highlights (works with treesitter)
-  • `User:` / `Assistant:` headers in chat history replay
+  • `Prompt:` / `Response:` headers in chat history replay
   • Horizontal rule separator between chat messages
   • Markdown table column alignment (conceal-aware)
   • Statusline: tool activity, agent intent, context token usage

@@ -5141,6 +5141,63 @@ describe('ask command', function()
     assert_true(vim.tbl_contains(lines, 'answer line'))
   end)
 
+  it('attaches the current visual selection when /ask uses @visual-selection', function()
+    local captured_body
+    local result_buf
+
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(bufnr, '/tmp/sample.txt')
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
+      'local value = 1',
+      'return value',
+    })
+    vim.api.nvim_set_current_buf(bufnr)
+    vim.api.nvim_buf_set_mark(bufnr, '<', 1, 0, {})
+    vim.api.nvim_buf_set_mark(bufnr, '>', 2, 11, {})
+
+    vim.api.nvim_open_win = function(buf, enter, config)
+      result_buf = buf
+      return original_open_win(buf, enter, config)
+    end
+
+    http.request = function(method, path, body, callback)
+      if method == 'POST' and path == '/sessions' then
+        callback({ sessionId = 'side-1' }, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/mode' then
+        callback({}, nil)
+      elseif method == 'POST' and path == '/sessions/side-1/messages' then
+        captured_body = body
+        callback({}, nil)
+      elseif method == 'GET' and path == '/sessions/side-1/messages' then
+        callback({
+          events = {
+            { Type = 'assistant.turn_start' },
+            { Type = 'assistant.message', Data = { Content = 'selection answer' } },
+            { Type = 'assistant.turn_end' },
+          },
+        }, nil)
+      elseif method == 'DELETE' and path == '/sessions/side-1?delete=true' then
+        callback({}, nil)
+      else
+        error('unexpected request: ' .. method .. ' ' .. path)
+      end
+    end
+
+    package.loaded['copilot_agent.slash'] = nil
+    slash = require('copilot_agent.slash')
+
+    assert_true(slash.execute('/ask @visual-selection refactor the selected code'))
+    assert_true(vim.wait(1200, function()
+      return result_buf ~= nil
+    end, 50))
+    assert_true(result_buf ~= nil)
+    assert_not_nil(captured_body)
+    assert_true(captured_body.prompt:find('refactor the selected code', 1, true) ~= nil)
+    assert_eq(1, #(captured_body.attachments or {}))
+    assert_true(vim.endswith(captured_body.attachments[1].filePath, '/sample.txt'))
+    assert_true(captured_body.attachments[1].text:find('local value = 1', 1, true) ~= nil)
+  end)
+
   it('waits for the final answer when history briefly ends before the answer is persisted', function()
     local result_buf
     local message_reads = 0
@@ -5316,6 +5373,7 @@ end)
 describe('restore context prompt injection', function()
   local agent
   local chat
+  local selection
   local http
   local session
   local original_request
@@ -5338,6 +5396,7 @@ describe('restore context prompt injection', function()
     })
     agent.state.session_id = 'session-123'
     chat = require('copilot_agent.chat')
+    selection = require('copilot_agent.selection')
     http = require('copilot_agent.http')
     session = require('copilot_agent.session')
     original_request = http.request
@@ -5417,6 +5476,45 @@ describe('restore context prompt injection', function()
     assert_eq(2, #(captured_body.attachments or {}))
     assert_eq('example.lua', captured_body.attachments[1].displayName)
     assert_eq('selection:example.lua:1-1', captured_body.attachments[2].displayName)
+  end)
+
+  it('attaches the current visual selection to the prompt', function()
+    local captured_body
+
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(bufnr, '/tmp/sample-restore.txt')
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
+      'local value = 1',
+      'return value',
+    })
+    vim.api.nvim_set_current_buf(bufnr)
+    vim.api.nvim_buf_set_mark(bufnr, '<', 1, 0, {})
+    vim.api.nvim_buf_set_mark(bufnr, '>', 2, 11, {})
+
+    session.with_session = function(callback)
+      callback('session-123', nil)
+    end
+    http.request = function(method, path, body, callback)
+      if method == 'POST' and path == '/sessions/session-123/messages' then
+        captured_body = body
+      end
+      callback({}, nil)
+    end
+
+    local attachment = selection.current_buffer_selection()
+    assert_not_nil(attachment)
+    assert_eq('local value = 1\nreturn value', attachment.text)
+
+    package.loaded['copilot_agent.chat'] = nil
+    chat = require('copilot_agent.chat')
+    chat.ask('Review selected code', {
+      attachments = { attachment },
+    })
+
+    assert_not_nil(captured_body)
+    assert_eq(1, #(captured_body.attachments or {}))
+    assert_eq('selection:sample-restore.txt:1-2', captured_body.attachments[1].displayName)
+    assert_true(captured_body.attachments[1].text:find('local value = 1', 1, true) ~= nil)
   end)
 end)
 
@@ -5832,9 +5930,9 @@ describe('share command', function()
 
     assert_eq(1, vim.fn.filereadable(export_path))
     local lines = vim.fn.readfile(export_path)
-    assert_true(vim.tbl_contains(lines, 'User:'))
+    assert_true(vim.tbl_contains(lines, 'Prompt:'))
     assert_true(vim.tbl_contains(lines, '  share this session'))
-    assert_true(vim.tbl_contains(lines, 'Assistant:'))
+    assert_true(vim.tbl_contains(lines, 'Response:'))
     assert_true(vim.tbl_contains(lines, '  done'))
   end)
 
@@ -5851,10 +5949,10 @@ describe('share command', function()
 
     assert_eq(1, vim.fn.filereadable(export_path))
     local lines = vim.fn.readfile(export_path)
-    assert_true(vim.tbl_contains(lines, 'User:'))
+    assert_true(vim.tbl_contains(lines, 'Prompt:'))
     assert_true(vim.tbl_contains(lines, '  share this session'))
     assert_true(vim.tbl_contains(lines, '  📎 /tmp/example.lua'))
-    assert_true(vim.tbl_contains(lines, 'Assistant:'))
+    assert_true(vim.tbl_contains(lines, 'Response:'))
     assert_true(vim.tbl_contains(lines, '  done'))
   end)
 end)
@@ -9078,7 +9176,7 @@ describe('chat input behavior', function()
     }, 1, false)
 
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First sentence.',
       '  ',
       '  Second sentence.',
@@ -9106,7 +9204,7 @@ describe('chat input behavior', function()
     }, 1, false)
 
     assert.same({
-      'Assistant:',
+      'Response:',
       '  Before code.',
       '  ```lua',
       '  # heading-like comment',
@@ -9127,7 +9225,7 @@ describe('chat input behavior', function()
     }, 1, false)
 
     assert.same({
-      'Assistant:',
+      'Response:',
       '  ' .. content,
       '',
     }, lines)
@@ -9148,7 +9246,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First sentence.',
       '  Second sentence.',
       '  Third sentence.',
@@ -9193,7 +9291,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First update.',
       '  Second update.',
       '  Final update.',
@@ -9236,7 +9334,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       "  I've got the changed file list. Now I'm reading the actual hunks so I can explain the behavior changes, not just the filenames.",
       '',
     }, { unpack(lines, #lines - 2, #lines) })
@@ -9287,7 +9385,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  I found the merge helper issue.',
       '',
     }, { unpack(lines, #lines - 2, #lines) })
@@ -9379,7 +9477,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  I found the mismatch, and I am tracing the render race now.',
       '',
     }, { unpack(lines, #lines - 2, #lines) })
@@ -9442,10 +9540,10 @@ describe('chat input behavior', function()
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local transcript_end = #lines - (agent.state.chat_tail_spacer_lines or 0)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First turn summary.',
       '',
-      'Assistant:',
+      'Response:',
       '  Second turn summary.',
       '',
     }, { unpack(lines, transcript_end - 5, transcript_end) })
@@ -9494,10 +9592,10 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First turn summary.',
       '',
-      'Assistant:',
+      'Response:',
       '  Second turn live reply.',
       '',
     }, { unpack(lines, #lines - 5, #lines) })
@@ -9560,12 +9658,12 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  I am investigating the mismatch now.',
       '',
       'Activity: rg activity lua/copilot_agent (2 items hidden)',
       '',
-      'Assistant:',
+      'Response:',
       '  I found the activity summary hook.',
       '',
     }, { unpack(lines, #lines - 7, #lines) })
@@ -9857,7 +9955,7 @@ describe('chat input behavior', function()
     assert.same({
       'Activity: git status --short (1 item hidden)',
       '',
-      'Assistant:',
+      'Response:',
       '  Usage is visible in the transcript now.',
       '',
     }, { unpack(lines, #lines - 4, #lines) })
@@ -9919,7 +10017,7 @@ describe('chat input behavior', function()
     assert.same({
       'Activity: Used report_intent Finalizing process (1 item hidden)',
       '',
-      'Assistant:',
+      'Response:',
       '  Intent summary rendered.',
       '',
     }, { unpack(lines, #lines - 4, #lines) })
@@ -9984,7 +10082,7 @@ describe('chat input behavior', function()
     assert.same({
       'Activity: rg activity lua/copilot_agent (2 items hidden)',
       '',
-      'Assistant:',
+      'Response:',
       '  Priority summary rendered.',
       '',
     }, { unpack(lines, #lines - 4, #lines) })
@@ -10701,7 +10799,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  Sentence.',
       '  ',
       '  1. item',
@@ -10747,7 +10845,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  I am checking the request error path.I am checking the request error path.',
       '  I am adding a focused regression.',
       '  I am adding a focused regression.',
@@ -10824,7 +10922,7 @@ describe('chat input behavior', function()
 
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  Fence state is lost in the second pass. I am fixing that now.',
       '',
     }, { unpack(lines, #lines - 2, #lines) })
@@ -10866,7 +10964,7 @@ describe('chat input behavior', function()
     end
     assert_eq(1, second_count)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First paragraph.',
       '  Second paragraph.',
       '  Third paragraph.',
@@ -12703,13 +12801,13 @@ describe('checkpoint id replay', function()
 
     local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First rebuild note.',
       '',
-      'Assistant:',
+      'Response:',
       '  Second rebuild note.',
       '',
-      'Assistant:',
+      'Response:',
       '  Third rebuild note.',
       '',
     }, { unpack(lines, #lines - 8, #lines) })
@@ -12753,12 +12851,12 @@ describe('checkpoint id replay', function()
 
     local lines = vim.api.nvim_buf_get_lines(agent.state.chat_bufnr, 0, -1, false)
     assert.same({
-      'Assistant:',
+      'Response:',
       '  First rebuild note.',
       '',
       'Activity: rg activity (2 items hidden)',
       '',
-      'Assistant:',
+      'Response:',
       '  Second rebuild note.',
       '',
     }, { unpack(lines, #lines - 7, #lines) })

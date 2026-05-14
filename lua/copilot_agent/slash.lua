@@ -18,6 +18,7 @@ local session = require('copilot_agent.session')
 local session_names = require('copilot_agent.session_names')
 local sl = require('copilot_agent.statusline')
 local tasks = require('copilot_agent.tasks')
+local selection = require('copilot_agent.selection')
 local utils = require('copilot_agent.utils')
 local window = require('copilot_agent.window')
 
@@ -33,6 +34,7 @@ local is_list = vim.islist
 
 local M = {}
 local SEARCH_LABEL_MAX_LEN = 72 -- Long search hits should stay scannable inside vim.ui.select pickers.
+local VISUAL_SELECTION_TOKEN = '@visual-selection'
 local RESULT_FLOAT_WIDTH_RATIO = 0.8 -- Result floats should use most of the editor width without becoming full-screen.
 local RESULT_FLOAT_MAX_WIDTH = 120 -- Cap result floats so long lines remain readable on very wide monitors.
 local RESULT_FLOAT_MIN_HEIGHT = 12 -- Keep short result windows tall enough to show title, borders, and a few lines of content.
@@ -3208,10 +3210,10 @@ local function transcript_lines()
     local kind = type(entry) == 'table' and entry.kind or 'system'
     local label = ({
       activity = 'Activity',
-      assistant = 'Assistant',
+      assistant = 'Response',
       error = 'Error',
       system = 'System',
-      user = 'User',
+      user = 'Prompt',
     })[kind] or 'System'
     local content = sanitize_export_text(type(entry) == 'table' and entry.content or '')
     if kind == 'assistant' and vim.trim(content) == '' then
@@ -3521,6 +3523,21 @@ end
 
 local function ask_command(args, opts)
   local prompt = vim.trim(args or '')
+  opts = opts or {}
+  if prompt:find(VISUAL_SELECTION_TOKEN, 1, true) then
+    local attachment = selection.current_buffer_selection()
+    if not attachment then
+      notify('No visual selection found for @visual-selection', vim.log.levels.ERROR)
+      return true
+    end
+    local attachments = vim.deepcopy(opts.attachments or {})
+    attachments[#attachments + 1] = attachment
+    opts.attachments = attachments
+    prompt = vim.trim((prompt:gsub(VISUAL_SELECTION_TOKEN, ' ', 1)))
+    if prompt == '' then
+      prompt = 'Explain the selected code.'
+    end
+  end
   if prompt ~= '' then
     ask_side_question(prompt, opts)
     return true

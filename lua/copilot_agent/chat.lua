@@ -8,6 +8,7 @@ local service = require('copilot_agent.service')
 local sl = require('copilot_agent.statusline')
 local render = require('copilot_agent.render')
 local win = require('copilot_agent.window')
+local selection = require('copilot_agent.selection')
 
 local state = cfg.state
 local notify = cfg.notify
@@ -1034,6 +1035,7 @@ function M.setup_action_keymaps(bufnr)
 
   -- Resource / attachment picker.
   vim.keymap.set({ 'n', 'i' }, '<C-a>', function()
+    local visual_mode = vim.fn.visualmode()
     local choices = {
       'Current buffer',
       'Visual selection',
@@ -1071,20 +1073,12 @@ function M.setup_action_keymaps(bufnr)
         end
       elseif choice == 'Visual selection' then
         local sel_buf = vim.fn.bufnr('#') ~= -1 and vim.fn.bufnr('#') or 0
-        local start_line = vim.fn.line("'<", vim.fn.win_getid()) - 1
-        local end_line = vim.fn.line("'>", vim.fn.win_getid()) - 1
-        local lines = vim.api.nvim_buf_get_lines(sel_buf, start_line, end_line + 1, false)
-        local text = table.concat(lines, '\n')
-        local filepath = vim.api.nvim_buf_get_name(sel_buf)
-        if text ~= '' then
-          add_attachment({
-            type = 'selection',
-            path = filepath,
-            text = text,
-            start_line = start_line,
-            end_line = end_line,
-            display = 'selection:' .. vim.fn.fnamemodify(filepath, ':t') .. ':' .. (start_line + 1) .. '-' .. (end_line + 1),
-          })
+        local att = selection.current_buffer_selection({
+          bufnr = sel_buf,
+          visual_mode = visual_mode,
+        })
+        if att then
+          add_attachment(att)
         end
       elseif choice == 'File' then
         M.pick_path({ prompt = 'Attach file', type = 'file' }, function(paths)

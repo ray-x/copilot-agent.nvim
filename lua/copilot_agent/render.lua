@@ -1555,7 +1555,7 @@ local function collapse_merged_assistant_lines(lines)
   if type(lines) ~= 'table' or #lines == 0 then
     return lines
   end
-  table.remove(lines, 1) -- drop the repeated "Assistant:" header
+  table.remove(lines, 1) -- drop the repeated "Response:" header
   return lines
 end
 
@@ -2491,14 +2491,14 @@ function M.entry_lines(entry, _idx, align)
     -- Skip entries whose content is only whitespace after trimming.
     local trimmed = vim.trim(content)
     if trimmed ~= '' then
-      out[#out + 1] = 'Assistant:'
+      out[#out + 1] = 'Response:'
       for _, l in ipairs(verbatim_content_lines(split_lines(content))) do
         out[#out + 1] = '  ' .. l
       end
       out[#out + 1] = ''
     end
   else
-    out[#out + 1] = 'User:'
+    out[#out + 1] = 'Prompt:'
     for _, l in ipairs(normalize_content_lines(split_lines(content))) do
       out[#out + 1] = '  ' .. l
     end
@@ -3130,7 +3130,7 @@ highlight_lines = function(bufnr, from_row, to_row)
   local lines = vim.api.nvim_buf_get_lines(bufnr, from_row, to_row, false)
   for i, line in ipairs(lines) do
     local row = from_row + i - 1
-    if line == 'User:' then
+    if line == 'Prompt:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentUser', row, 0, -1)
       local entry_idx = state.entry_row_index[row]
       local entry = entry_idx and state.entries[entry_idx] or nil
@@ -3149,7 +3149,7 @@ highlight_lines = function(bufnr, from_row, to_row)
           })
         end
       end
-    elseif line == 'Assistant:' then
+    elseif line == 'Response:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentAssistant', row, 0, -1)
     elseif line:match('^Activity:') or line == 'System:' then
       vim.api.nvim_buf_add_highlight(bufnr, CHAT_HL_NS, 'CopilotAgentActivity', row, 0, -1)

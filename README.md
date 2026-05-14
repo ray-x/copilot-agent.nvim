@@ -189,7 +189,7 @@ For most users, this minimal setup is enough:
   build = ":CopilotAgentInstall",
   opts = function()
     require("copilot_agent").setup({
-      -- lsp = { enabled = true }, -- experimental if you want to start lsp, it will be a separate copilot-agent lsp process
+      -- lsp = { enabled = true }, -- auto-starts the helper LSP from setup(); call start_lsp() only for explicit/delayed startup
     })
   end,
 }
@@ -214,7 +214,7 @@ For most users, this minimal setup is enough:
       permission_mode = "approve-all",  -- "interactive" | "approve-all" | "autopilot" | "reject-all"
       auto_create_session = true,
       lsp = {
-        enabled = true, -- start the helper LSP automatically from setup()
+        enabled = true, -- auto-start the helper LSP from setup()
       },
       session = {
         working_directory = function() return vim.fn.getcwd() end,
@@ -292,8 +292,8 @@ For most users, this minimal setup is enough:
       },
     })
     -- Start the combined HTTP + LSP service.
-    -- Called automatically by CopilotAgentChat / CopilotAgentAsk if auto_start = true.
-    -- Call explicitly here to get LSP code actions available immediately:
+    -- lsp.enabled = true already starts the helper automatically from setup().
+    -- Call explicitly here only if you want immediate or delayed startup control:
     require("copilot_agent").start_lsp()
   end,
 }
@@ -431,8 +431,8 @@ Open with `:CopilotAgentChat`, then press `i` or `<Enter>` in the chat buffer.
 | `gK` (output)                     | Move focus into the current Activity hover preview (opens it first if needed)                           |
 | `<C-w>j` (output)                 | Move into Activity hover preview when available; otherwise fallback to normal window-down (`<C-w>j`)    |
 | `CursorHold` / `CursorHoldI`      | When `activity_hover_cursor_hold=true`, show the concise read-only hover preview on Activity lines      |
-| `[[` / `]]` (output)              | Jump to previous/next conversation (`User:` block)                                                      |
-| `[a` / `]a` (output)              | Jump to previous/next `Assistant:` or `Activity:` block                                                 |
+| `[[` / `]]` (output)              | Jump to previous/next conversation (`Prompt:` block)                                                    |
+| `[a` / `]a` (output)              | Jump to previous/next `Response:` or `Activity:` block                                                  |
 | `gT` (normal)                     | Open TODO float for the current turn                                                                    |
 | `g?` (normal)                     | Show help float with keybindings, session commands, and recovery tips                                   |
 
@@ -450,7 +450,7 @@ The input buffer supports built-in slash commands handled by the plugin before t
 | `/add-dir`             | `[path]`                                                               | Add a directory to the session's allowed-directory list; prompts if omitted                                                                                                                                                                                                                  |
 | `/agent`               | `[name\|default\|clear]`                                               | Pick a discovered custom agent, or reset back to the default agent                                                                                                                                                                                                                           |
 | `/allow-all`           | —                                                                      | Switch permission mode to `approve-all`                                                                                                                                                                                                                                                      |
-| `/ask`                 | `[question]`                                                           | Ask a side question in a temporary read-only session and show the answer separately                                                                                                                                                                                                          |
+| `/ask`                 | `[question]` or `@visual-selection [question]`                         | Ask a side question in a temporary read-only session; `@visual-selection` attaches the current selection to the prompt                                                                                                                                                                   |
 | `/clear`               | —                                                                      | Clear the current conversation and start a fresh session                                                                                                                                                                                                                                     |
 | `/compact`             | —                                                                      | Compact session history and refresh context usage                                                                                                                                                                                                                                            |
 | `/context`             | —                                                                      | Show current context-window token usage plus the latest quota and usage snapshot                                                                                                                                                                                                             |
@@ -506,7 +506,7 @@ Press `<C-a>` in the input buffer to open the resource picker:
 | Choice                     | What it does                                                   |
 | -------------------------- | -------------------------------------------------------------- |
 | Current buffer             | Attaches the previously focused file buffer                    |
-| Visual selection           | Attaches the last visual selection with file path + line range |
+| Visual selection           | Attaches the current visual selection with file path + line range |
 | File                       | Opens fuzzy picker → select one or more files (multi-select)   |
 | Folder                     | Opens fuzzy picker / `vim.ui.input` to pick a directory        |
 | Instructions file          | Same as File but marked as an instructions context file (📋)   |
@@ -609,7 +609,7 @@ There are **two separate interruption points** in an agentic loop:
 
 ## LSP Code Actions
 
-The Go binary runs an LSP server on stdio. `:CopilotAgentLsp` or `require("copilot_agent").start_lsp()` now starts an LSP-only process that reuses the existing HTTP service instead of spawning a fresh backend session.
+The Go binary runs an LSP server on stdio. Setting `lsp.enabled = true` starts the helper automatically from `setup()`. `:CopilotAgentLsp` or `require("copilot_agent").start_lsp()` is only needed when you want explicit or delayed startup, and the helper reuses the existing HTTP service instead of spawning a fresh backend session.
 
 This helper server is separate from the project language servers used by Copilot CLI for code intelligence. Use `/lsp create` to bootstrap `.github/lsp.json` from active Neovim project LSP clients, then restart the Copilot service so config discovery reloads it.
 

@@ -999,6 +999,24 @@ func TestMarshalReplaySessionEventsKeepsFullAssistantMessages(t *testing.T) {
 	}
 }
 
+func TestReadSelectionTextExtractsExactRange(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("alpha beta\ngamma delta\nepsilon zeta\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	got := readSelectionText(path, lspRange{
+		Start: lspPosition{Line: 0, Character: 6},
+		End:   lspPosition{Line: 1, Character: 5},
+	})
+	if got != "beta\ngamma" {
+		t.Fatalf("expected exact selection text, got %q", got)
+	}
+}
+
 func TestLiveSessionSummariesOnlyIncludesAttachedSessions(t *testing.T) {
 	t.Parallel()
 

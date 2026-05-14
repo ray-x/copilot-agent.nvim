@@ -217,8 +217,17 @@ func (s *lspServer) readMessage() (*lspMessage, error) {
 	return &msg, nil
 }
 
-func (s *lspServer) send(msg lspMessage) {
-	msg.JSONRPC = "2.0"
+func (s *lspServer) sendResponse(id any, result any, errPayload *lspError) {
+	msg := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+	}
+	if errPayload != nil {
+		msg["error"] = errPayload
+	} else {
+		msg["result"] = result
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		log.Printf("lsp: marshal response: %v", err)
@@ -231,11 +240,11 @@ func (s *lspServer) send(msg lspMessage) {
 }
 
 func (s *lspServer) reply(id any, result any) {
-	s.send(lspMessage{ID: id, Result: result})
+	s.sendResponse(id, result, nil)
 }
 
 func (s *lspServer) replyError(id any, code int, message string) {
-	s.send(lspMessage{ID: id, Error: &lspError{Code: code, Message: message}})
+	s.sendResponse(id, nil, &lspError{Code: code, Message: message})
 }
 
 func (s *lspServer) handleMessage(ctx context.Context, msg *lspMessage) {
@@ -353,8 +362,8 @@ func (s *lspServer) handleExecuteCommand(ctx context.Context, msg *lspMessage) {
 		return
 	}
 
-	// Read the selected lines from the file.
-	code := readFileRange(filename, arg.Range)
+	// Read the selected text from the file.
+	code := readSelectionText(filename, arg.Range)
 	prompt := def.prompt(code, filename)
 
 	// Resolve which session to use.
@@ -456,25 +465,74 @@ func uriToFilename(uri string) string {
 	return decoded
 }
 
-// readFileRange reads lines [start.Line, end.Line] (0-based) from a file.
-func readFileRange(filename string, r lspRange) string {
+// readSelectionText reads the selected text range from a file.
+func readSelectionText(filename string, r lspRange) string {
 	f, err := os.Open(filename)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
 
-	var lines []string
 	scanner := bufio.NewScanner(f)
-	lineNum := 0
+	var lines []string
 	for scanner.Scan() {
-		if lineNum >= r.Start.Line && lineNum <= r.End.Line {
-			lines = append(lines, scanner.Text())
-		}
-		if lineNum > r.End.Line {
-			break
-		}
-		lineNum++
+		lines = append(lines, scanner.Text())
 	}
-	return strings.Join(lines, "\n")
+	if err := scanner.Err(); err != nil {
+		return ""
+	}
+	return selectionTextFromLines(lines, r)
+}
+
+func selectionTextFromLines(lines []string, r lspRange) string {
+	if len(lines) == 0 {
+		return ""
+	}
+
+	startLine := clampInt(r.Start.Line, 0, len(lines)-1)
+	endLine := clampInt(r.End.Line, 0, len(lines)-1)
+	startChar := clampInt(r.Start.Character, 0, len(lines[startLine]))
+	endChar := clampInt(r.End.Character, 0, len(lines[endLine]))
+	if startLine > endLine || (startLine == endLine && startChar > endChar) {
+		startLine, endLine = endLine, startLine
+		startChar, endChar = endChar, startChar
+	}
+
+	if startLine == endLine {
+		return sliceByBytes(lines[startLine], startChar, endChar)
+	}
+
+	parts := make([]string, 0, endLine-startLine+1)
+	parts = append(parts, sliceByBytes(lines[startLine], startChar, len(lines[startLine])))
+	for line := startLine + 1; line < endLine; line++ {
+		parts = append(parts, lines[line])
+	}
+	parts = append(parts, sliceByBytes(lines[endLine], 0, endChar))
+	return strings.Join(parts, "\n")
+}
+
+func sliceByBytes(text string, start, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if start > len(text) {
+		start = len(text)
+	}
+	if end > len(text) {
+		end = len(text)
+	}
+	return text[start:end]
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }

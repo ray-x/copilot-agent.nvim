@@ -10400,6 +10400,7 @@ describe('chat input behavior', function()
 
   it('opens an apply_patch hover preview for multi-file activity changes', function()
     local events = require('copilot_agent.events')
+    local render = require('copilot_agent.render')
     agent.state.session_id = 'session-123'
     agent.state.entries = {}
     agent.state.entry_row_index = {}
@@ -10494,8 +10495,55 @@ describe('chat input behavior', function()
     assert_true(joined:find('*** Update File: lua/copilot_agent/activity_diff.lua', 1, true) ~= nil)
     assert_true(joined:find('*** Update File: lua/copilot_agent/chat.lua', 1, true) ~= nil)
     assert_true(joined:find('@@', 1, true) ~= nil)
+    local focused = render.focus_activity_hover_preview(agent.state.chat_winid)
+    assert_true(focused)
+    assert_true(vim.api.nvim_win_is_valid(vim.api.nvim_get_current_win()))
+    preview_winid = agent.state.activity_hover_winid
+    vim.wait(250)
+    assert_true(vim.api.nvim_win_is_valid(preview_winid))
+
+    vim.api.nvim_set_current_win(agent.state.chat_winid)
+    vim.wait(250)
+    assert_true(preview_winid == nil or not vim.api.nvim_win_is_valid(preview_winid))
     vim.wait(180)
     assert_true(preview_winid == nil or not vim.api.nvim_win_is_valid(preview_winid))
+  end)
+
+  it('keeps the hover preview open while it has focus', function()
+    local render = require('copilot_agent.render')
+    agent.state.config.chat.activity_view = 'hover'
+    agent.state.config.chat.activity_hover_timeout_ms = 1000
+    agent.state.entries = {
+      {
+        kind = 'activity',
+        content = 'Used edit',
+        activity_items = {
+          {
+            kind = 'tool',
+            tool_name = 'bash',
+            summary = 'Used bash',
+          },
+        },
+      },
+    }
+    agent.open_chat()
+    agent.state.entry_row_index = { [0] = 1 }
+    vim.api.nvim_win_set_cursor(agent.state.chat_winid, { 1, 0 })
+
+    local opened = render.refresh_activity_hover_preview(agent.state.chat_winid)
+    assert_true(opened)
+    local hover_winid = agent.state.activity_hover_winid
+    assert_true(hover_winid ~= nil and vim.api.nvim_win_is_valid(hover_winid))
+
+    local focused = render.focus_activity_hover_preview(agent.state.chat_winid)
+    assert_true(focused)
+    hover_winid = agent.state.activity_hover_winid
+    vim.wait(250)
+    assert_true(vim.api.nvim_win_is_valid(hover_winid))
+
+    vim.api.nvim_set_current_win(agent.state.chat_winid)
+    vim.wait(1250)
+    assert_true(hover_winid == nil or not vim.api.nvim_win_is_valid(hover_winid))
   end)
 
   it('opens a hover diff preview for single-file activity changes', function()

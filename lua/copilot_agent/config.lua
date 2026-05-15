@@ -39,6 +39,7 @@ local defaults = {
     healthcheck_path = '/healthz',
     startup_timeout_ms = 15000,
     startup_poll_interval_ms = 250,
+    client_heartbeat_interval_ms = 10000,
   },
   chat = {
     split = 'botright vnew',
@@ -185,6 +186,7 @@ local state = {
   service_process_pid = nil,
   client_id = nil,
   client_registered_base_url = nil,
+  client_heartbeat_timer = nil,
   client_lease_registered = false,
   service_launch_info = nil, -- human-readable launch mode/command shown in chat header
   service_starting = false,

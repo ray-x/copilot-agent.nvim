@@ -21,6 +21,7 @@ local SERVICE_OUTPUT_HISTORY_LIMIT = 20 -- Keep only the most recent startup lin
 local CONTROL_REQUEST_TIMEOUT_SECONDS = '2' -- Bound local control-socket curl calls so stale sockets cannot hang startup or exit indefinitely.
 local SAVED_ADDR_PROBE_TIMEOUT_SECONDS = '1' -- Quick probe timeout when validating persisted service addresses.
 local STALE_ADDR_FAILURE_THRESHOLD = 3 -- After this many consecutive health-check failures on the same discovered address, force a fresh restart.
+local DEFAULT_CLIENT_HEARTBEAT_INTERVAL_MS = 10000 -- Refresh client registration periodically so detached idle shutdown never races active chat use.
 local DEFAULT_SERVICE_LOG_PATH = vim.fn.stdpath('state') .. '/copilot-agent-service.log'
 local DEFAULT_CLIENT_ID_LENGTH = 32
 
@@ -648,6 +649,63 @@ local function interval_settings()
   return timeout_ms, interval_ms
 end
 
+local function client_heartbeat_interval_ms()
+  local interval = tonumber(state.config.service.client_heartbeat_interval_ms)
+  if interval == nil then
+    interval = DEFAULT_CLIENT_HEARTBEAT_INTERVAL_MS
+  end
+  return math.max(0, interval)
+end
+
+local function close_client_heartbeat_timer()
+  local timer = state.client_heartbeat_timer
+  if timer == nil then
+    return
+  end
+  pcall(function()
+    timer:stop()
+    timer:close()
+  end)
+  state.client_heartbeat_timer = nil
+end
+
+local function start_client_heartbeat_timer()
+  if state.shutting_down then
+    return
+  end
+
+  local interval_ms = client_heartbeat_interval_ms()
+  if interval_ms <= 0 then
+    return
+  end
+
+  if state.client_heartbeat_timer == nil then
+    state.client_heartbeat_timer = uv.new_timer()
+  end
+  local timer = state.client_heartbeat_timer
+  if timer == nil then
+    return
+  end
+
+  timer:stop()
+  timer:start(
+    interval_ms,
+    interval_ms,
+    vim.schedule_wrap(function()
+      if state.shutting_down then
+        return
+      end
+      if type(state.client_registered_base_url) ~= 'string' or state.client_registered_base_url == '' then
+        return
+      end
+      local registered, register_err = M.register_client()
+      if not registered and register_err then
+        log('client heartbeat renewal failed: ' .. tostring(register_err), vim.log.levels.DEBUG)
+      end
+    end)
+  )
+end
+
 write_text_file = function(path, content)
   local ok, err = pcall(function()
     local f = assert(io.open(path, 'w'))
@@ -958,6 +1016,7 @@ function M.register_client()
 
   if state.client_registered_base_url == base_url then
     log(string.format('client already registered client_id=%s base_url=%s', M.client_id(), base_url), vim.log.levels.DEBUG)
+    start_client_heartbeat_timer()
     return true
   end
 
@@ -990,11 +1049,13 @@ function M.register_client()
   end
 
   state.client_registered_base_url = base_url
+  start_client_heartbeat_timer()
   log(string.format('registering client succeeded client_id=%s base_url=%s', M.client_id(), base_url), vim.log.levels.DEBUG)
   return true
 end
 
 function M.unregister_client()
+  close_client_heartbeat_timer()
   local base_url = type(state.client_registered_base_url) == 'string' and state.client_registered_base_url or current_service_base_url()
   if base_url == '' then
     log('unregister_client skipped: no registered base_url', vim.log.levels.DEBUG)

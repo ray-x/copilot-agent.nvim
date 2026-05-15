@@ -51,8 +51,8 @@ Service log lines are prefixed with `[INFO]`, `[WARN]`, or `[ERROR]` when
 
 When `-client-lease-dir` is configured, detached-service shutdown is delayed by
 the lease watcher grace window. Current defaults (from `server/main.go`) are:
-`clientLeasePollInterval = 500ms` and `clientLeaseEmptyGrace = 30s` (i.e. the
-lease directory must stay empty for 30 seconds before shutdown).
+`clientLeasePollInterval = 500ms` and `clientLeaseEmptyGrace = 5m` (i.e. the
+lease directory must stay empty for five minutes before shutdown).
 
 ---
 

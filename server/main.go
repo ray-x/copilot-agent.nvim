@@ -45,7 +45,7 @@ const (
 	httpShutdownTimeout        = 5 * time.Second  // Allow in-flight HTTP requests a brief grace period during service shutdown.
 	sseKeepAliveInterval       = 15 * time.Second // Keep reverse proxies and clients from treating idle event streams as dead.
 	clientLeasePollInterval    = 500 * time.Millisecond
-	clientLeaseEmptyGrace      = 30 * time.Second
+	clientLeaseEmptyGrace      = 10 * time.Minute
 	sseSubscriberBufferSize    = 256 // Absorb bursts of session events (tool calls can produce 100+ events rapidly).
 	asyncResultChannelSize     = 1   // Each pending prompt/permission only needs to hold a single terminal response.
 	permissionRequestIDPrefix  = "perm"

@@ -147,6 +147,13 @@ function M.setup(opts)
   state.service_job_id = nil
   state.service_process_pid = nil
   state.client_registered_base_url = nil
+  if state.client_heartbeat_timer then
+    pcall(function()
+      state.client_heartbeat_timer:stop()
+      state.client_heartbeat_timer:close()
+    end)
+  end
+  state.client_heartbeat_timer = nil
   state.service_starting = false
   state.service_addr_known = false
   state.pending_service_callbacks = {}

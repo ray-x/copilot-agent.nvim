@@ -392,7 +392,7 @@ local function factory(deps)
       end
       return 'Used report_intent'
     end
-    if normalized == 'apply_patch' then
+    if normalized == 'apply_patch' or normalized == 'edit' then
       return summarize_apply_patch_activity(data)
     end
     if looks_like_shell_tool and looks_like_shell_tool(tool) then

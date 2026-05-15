@@ -157,7 +157,7 @@ local function entry_code_change(entry)
       if type(item) == 'table' and type(item.code_change) == 'table' and type(item.code_change.files) == 'table' and #item.code_change.files > 0 then
         return item.code_change
       end
-      if type(item) == 'table' and vim.trim(tostring(item.tool_name or '')) == 'apply_patch' then
+      if type(item) == 'table' and (vim.trim(tostring(item.tool_name or '')) == 'apply_patch' or vim.trim(tostring(item.tool_name or '')) == 'edit') then
         local patch_text = item.start_input or item.start_data or item.complete_data or item.data or item
         local changes = apply_patch.extract_patch_changes(patch_text)
         if type(changes) == 'table' and #changes > 0 then
@@ -2016,6 +2016,17 @@ local function normalize_activity_detail_text(text)
   return text
 end
 
+local function item_is_edit_code_change(item)
+  if type(item) ~= 'table' then
+    return false
+  end
+  if vim.trim(tostring(item.tool_name or '')):lower() ~= 'edit' then
+    return false
+  end
+  local code_change = type(item.code_change) == 'table' and item.code_change or nil
+  return type(code_change) == 'table' and type(code_change.files) == 'table' and #code_change.files > 0
+end
+
 local function append_markdown_heading(lines, heading)
   if #lines > 0 and lines[#lines] ~= '' then
     lines[#lines + 1] = ''
@@ -2173,16 +2184,18 @@ build_activity_details_lines = function(entry)
   local code_change_count = 0
   local usage_count = 0
   for _, item in ipairs(items) do
-    if type(item) == 'table' and item.kind == 'code_change' then
+    local edit_code_change = item_is_edit_code_change(item)
+    if type(item) == 'table' and (item.kind == 'code_change' or edit_code_change) then
+      local code_change = type(item.code_change) == 'table' and item.code_change or {}
       code_change_count = code_change_count + 1
       local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Code change ' .. tostring(code_change_count))
       local heading = (type(item.from_commit) == 'string' and item.from_commit ~= '' and type(item.to_commit) == 'string' and item.to_commit ~= '')
           and string.format('## Code change %d — %s', code_change_count, title)
         or string.format('## File change %d — %s', code_change_count, title)
       append_markdown_heading(lines, heading)
-      append_markdown_field(lines, 'From', item.from_commit)
-      append_markdown_field(lines, 'To', item.to_commit)
-      local diffstat = type(item.diffstat) == 'table' and item.diffstat or {}
+      append_markdown_field(lines, 'From', code_change.from_commit)
+      append_markdown_field(lines, 'To', code_change.to_commit)
+      local diffstat = type(item.diffstat) == 'table' and item.diffstat or code_change.files or {}
       if #diffstat > 0 then
         append_markdown_heading(lines, '### Files')
         for _, changed in ipairs(diffstat) do
@@ -2193,7 +2206,7 @@ build_activity_details_lines = function(entry)
         end
       end
     end
-    if type(item) == 'table' and (item.kind == 'tool' or item.output_text or item.partial_output) then
+    if type(item) == 'table' and not edit_code_change and (item.kind == 'tool' or item.output_text or item.partial_output) then
       tool_count = tool_count + 1
       local title = type(item.summary) == 'string' and item.summary ~= '' and item.summary or ('Tool ' .. tostring(tool_count))
       append_markdown_heading(lines, string.format('## Tool %d — %s', tool_count, title))

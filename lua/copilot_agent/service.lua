@@ -4,7 +4,7 @@
 
 -- Service lifecycle: binary detection, auto-start, health polling.
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local cfg = require('copilot_agent.config')
 local http = require('copilot_agent.http')
 local state = cfg.state
@@ -52,7 +52,7 @@ end
 local function generate_client_id()
   local entropy = table.concat({
     tostring(vim.fn.getpid()),
-    tostring((uv and uv.hrtime and uv.hrtime()) or 0),
+    tostring((uv.hrtime and uv.hrtime()) or 0),
     tostring(os.time()),
     tostring(math.random()),
   }, ':')
@@ -1235,6 +1235,10 @@ function M.ensure_service_live(callback)
 
   M.check_service_health(function(healthy, err, status)
     if healthy then
+      local registered, register_err = M.register_client()
+      if not registered and register_err then
+        log('client registration failed after health check: ' .. tostring(register_err), vim.log.levels.WARN)
+      end
       callback(nil)
       return
     end
@@ -1286,6 +1290,10 @@ local function start_service_sequence(callback)
     if state.shutting_down then
       finish('service is shutting down')
       return
+    end
+    local registered, register_err = M.register_client()
+    if not registered and register_err then
+      log('client registration failed after service startup: ' .. tostring(register_err), vim.log.levels.WARN)
     end
     finish(nil)
   end

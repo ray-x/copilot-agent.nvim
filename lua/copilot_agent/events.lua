@@ -1161,14 +1161,24 @@ local function capture_tool_execution_start(data)
     item.start_data = item.start_data or data
     local summary = summarize_tool_activity(tool_name, item.start_data) or fallback_tool_activity_summary(tool_name, detail)
     item.summary = item.summary or summary
-    if sanitize_permission_text(tool_name) == 'apply_patch' then
+    local normalized_tool = sanitize_permission_text(tool_name)
+    if normalized_tool == 'apply_patch' or normalized_tool == 'edit' then
       local patch_source = item.start_input or item.start_data or data
       local changes = normalize_apply_patch_changes(apply_patch.extract_patch_changes(patch_source))
       if type(changes) == 'table' and #changes > 0 then
         item.code_change = item.code_change or {}
-        item.code_change.source = item.code_change.source or 'apply_patch'
+        item.code_change.source = item.code_change.source or normalized_tool
         item.code_change.files = item.code_change.files or changes
         item.code_change.apply_patch_text = item.code_change.apply_patch_text or apply_patch.extract_patch_text(patch_source)
+      else
+        -- edit tool output is a unified diff (diff --git) — try that parser
+        local unified_changes = apply_patch.extract_unified_patch_changes(patch_source)
+        if type(unified_changes) == 'table' and #unified_changes > 0 then
+          item.code_change = item.code_change or {}
+          item.code_change.source = item.code_change.source or normalized_tool
+          item.code_change.files = item.code_change.files or unified_changes
+          item.code_change.apply_patch_text = item.code_change.apply_patch_text or apply_patch.extract_unified_patch_text(patch_source)
+        end
       end
     end
     remember_recent_activity_line(summary)
@@ -1338,14 +1348,30 @@ local function capture_post_tool_use_end(data)
     end
     local summary = summarize_tool_activity(tool_name, summary_data) or fallback_tool_activity_summary(tool_name, detail)
     if type(item) == 'table' then
-      if sanitize_permission_text(tool_name) == 'apply_patch' then
+      local normalized_tool = sanitize_permission_text(tool_name)
+      if normalized_tool == 'apply_patch' or normalized_tool == 'edit' then
         local patch_source = item.start_input or item.start_data or summary_data or data
+        -- Also consider the tool result text for edit (the diff output)
+        local output_source = item.output_text or item.post_tool_use_raw_result_text
         local changes = normalize_apply_patch_changes(apply_patch.extract_patch_changes(patch_source))
         if type(changes) == 'table' and #changes > 0 then
           item.code_change = item.code_change or {}
-          item.code_change.source = item.code_change.source or 'apply_patch'
+          item.code_change.source = item.code_change.source or normalized_tool
           item.code_change.files = item.code_change.files or changes
           item.code_change.apply_patch_text = item.code_change.apply_patch_text or apply_patch.extract_patch_text(patch_source)
+        else
+          -- edit tool emits unified diffs — try the output text first, then patch_source
+          local unified_src = output_source or patch_source
+          local unified_changes = apply_patch.extract_unified_patch_changes(unified_src)
+          if (not unified_changes or #unified_changes == 0) and unified_src ~= patch_source then
+            unified_changes = apply_patch.extract_unified_patch_changes(patch_source)
+          end
+          if type(unified_changes) == 'table' and #unified_changes > 0 then
+            item.code_change = item.code_change or {}
+            item.code_change.source = item.code_change.source or normalized_tool
+            item.code_change.files = item.code_change.files or unified_changes
+            item.code_change.apply_patch_text = item.code_change.apply_patch_text or apply_patch.extract_unified_patch_text(unified_src)
+          end
         end
       end
       log_debug_trace('capture_post_tool_use_end item.output_text=', function()

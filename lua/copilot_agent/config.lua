@@ -251,6 +251,7 @@ local state = {
   activity_hover_winid = nil, -- active read-only hover preview window for file changes
   activity_hover_entry_idx = nil, -- activity entry index currently shown in hover preview
   activity_hover_timer = nil, -- auto-close timer for the active hover preview
+  activity_hover_autocmd_group = nil, -- autocmd group that pauses/resumes hover timeout while focused
   overlay_tool_display = nil, -- currently displayed shell activity item in the chat overlay
   overlay_tool_queue = {}, -- queued shell activity items waiting for minimum display time
   overlay_tool_run_id = 0, -- incrementing id assigned to shell activity items

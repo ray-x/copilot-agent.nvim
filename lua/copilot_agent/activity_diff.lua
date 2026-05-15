@@ -19,6 +19,11 @@ local function close_hover_preview()
     pcall(timer.close, timer)
     state.activity_hover_timer = nil
   end
+  local group = state.activity_hover_autocmd_group
+  if group then
+    pcall(vim.api.nvim_del_augroup_by_id, group)
+    state.activity_hover_autocmd_group = nil
+  end
   local winid = state.activity_hover_winid
   if winid and vim.api.nvim_win_is_valid(winid) then
     pcall(vim.api.nvim_win_close, winid, true)
@@ -48,6 +53,11 @@ local function schedule_hover_close(timeout_ms)
   timer:start(delay, 0, function()
     vim.schedule(function()
       if state.activity_hover_timer == timer then
+        local winid = state.activity_hover_winid
+        if winid and vim.api.nvim_win_is_valid(winid) and vim.api.nvim_get_current_win() == winid then
+          schedule_hover_close(delay)
+          return
+        end
         close_hover_preview()
       else
         pcall(timer.stop, timer)
@@ -55,6 +65,22 @@ local function schedule_hover_close(timeout_ms)
       end
     end)
   end)
+end
+
+local function pause_hover_close()
+  local timer = state.activity_hover_timer
+  if not timer then
+    return
+  end
+  pcall(timer.stop, timer)
+  pcall(timer.close, timer)
+  state.activity_hover_timer = nil
+end
+
+local function resume_hover_close(timeout_ms)
+  if state.activity_hover_winid and vim.api.nvim_win_is_valid(state.activity_hover_winid) then
+    schedule_hover_close(timeout_ms)
+  end
 end
 
 local function clamp(value, min_value, max_value)
@@ -314,6 +340,26 @@ local function open_preview_float(title, diff_text, opts)
   vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true })
   vim.keymap.set('n', '<Esc><Esc>', close, { buffer = buf, nowait = true })
   vim.keymap.set({ 'n', 'i' }, '<C-c>', close, { buffer = buf, nowait = true })
+  local group = vim.api.nvim_create_augroup('CopilotAgentActivityHover' .. tostring(win), { clear = true })
+  state.activity_hover_autocmd_group = group
+  vim.api.nvim_create_autocmd({ 'BufEnter', 'WinEnter' }, {
+    group = group,
+    buffer = buf,
+    callback = function()
+      if state.activity_hover_winid == win then
+        pause_hover_close()
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd({ 'BufLeave', 'WinLeave' }, {
+    group = group,
+    buffer = buf,
+    callback = function()
+      if state.activity_hover_winid == win then
+        resume_hover_close(config.timeout_ms)
+      end
+    end,
+  })
   vim.api.nvim_create_autocmd('WinClosed', {
     pattern = tostring(win),
     callback = function()
@@ -323,7 +369,11 @@ local function open_preview_float(title, diff_text, opts)
     end,
     once = true,
   })
-  schedule_hover_close(config.timeout_ms)
+  if enter then
+    pause_hover_close()
+  else
+    schedule_hover_close(config.timeout_ms)
+  end
   return true, nil
 end
 

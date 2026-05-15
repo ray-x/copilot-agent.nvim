@@ -114,6 +114,13 @@ local function help_lines()
   }
 end
 
+local function is_session_not_attached_error(err)
+  if type(err) ~= 'string' then
+    return false
+  end
+  return err:lower():find('session is not attached to this service', 1, true) ~= nil
+end
+
 local function show_help_popup()
   local lines = help_lines()
   local max_w = 0
@@ -1256,6 +1263,60 @@ function M.ask(prompt, opts)
     local function dispatch_prompt()
       local prompt_body = text
       local included_restore_context = false
+      local body = { prompt = prompt_body }
+
+      local function cleanup_temp_files()
+        for _, p in ipairs(temp_files) do
+          pcall(os.remove, p)
+        end
+      end
+
+      local function finalize_failure(request_err)
+        state.pending_checkpoint_turn = nil
+        state.active_turn_assistant_index = nil
+        state.live_assistant_entry_index = nil
+        state.active_turn_assistant_message_id = nil
+        state.active_assistant_merge_group = nil
+        state.active_tool = nil
+        state.active_tool_run_id = nil
+        state.active_tool_detail = nil
+        state.pending_tool_detail = nil
+        state.overlay_tool_display = nil
+        state.overlay_tool_queue = {}
+        state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
+        state.post_tool_use_hooks = {}
+        state.recent_activity_lines = {}
+        state.recent_activity_items = {}
+        state.recent_activity_tool_calls = {}
+        state.current_intent = nil
+        state.chat_busy = false
+        refresh_statuslines()
+        refresh_reasoning_overlay(true)
+        append_entry('error', 'Failed to send prompt: ' .. request_err)
+      end
+
+      local function send_once()
+        request('POST', string.format('/sessions/%s/messages', session_id), body, function(_, request_err)
+          if request_err and is_session_not_attached_error(request_err) then
+            -- Recover the session so the next user prompt will succeed, but do
+            -- NOT retry automatically — retrying risks sending the prompt twice.
+            require('copilot_agent.session').recover_after_service_restart(session_id, function() end)
+            cleanup_temp_files()
+            finalize_failure(request_err .. ' (session recovered — please resend)')
+            return
+          end
+
+          cleanup_temp_files()
+          if request_err then
+            finalize_failure(request_err)
+            return
+          end
+          if included_restore_context then
+            state.pending_session_context = nil
+          end
+        end)
+      end
+
       local pending_context = state.pending_session_context
       if type(pending_context) == 'table' and type(pending_context.text) == 'string' and pending_context.text ~= '' then
         if pending_context.session_id == nil or pending_context.session_id == session_id then
@@ -1270,6 +1331,8 @@ function M.ask(prompt, opts)
           state.pending_session_context = nil
         end
       end
+
+      body.prompt = prompt_body
 
       require('copilot_agent').open_chat({
         activate_input_on_session_ready = false,
@@ -1286,44 +1349,11 @@ function M.ask(prompt, opts)
       refresh_statuslines()
       schedule_render()
 
-      local body = { prompt = prompt_body }
       body.clientId = service.client_id()
       if #api_attachments > 0 then
         body.attachments = api_attachments
       end
-      request('POST', string.format('/sessions/%s/messages', session_id), body, function(_, request_err)
-        -- Clean up any clipboard temp PNGs — the HTTP request has been delivered.
-        for _, p in ipairs(temp_files) do
-          pcall(os.remove, p)
-        end
-        if request_err then
-          state.pending_checkpoint_turn = nil
-          state.active_turn_assistant_index = nil
-          state.live_assistant_entry_index = nil
-          state.active_turn_assistant_message_id = nil
-          state.active_assistant_merge_group = nil
-          state.active_tool = nil
-          state.active_tool_run_id = nil
-          state.active_tool_detail = nil
-          state.pending_tool_detail = nil
-          state.overlay_tool_display = nil
-          state.overlay_tool_queue = {}
-          state.overlay_tool_schedule_token = (tonumber(state.overlay_tool_schedule_token) or 0) + 1
-          state.post_tool_use_hooks = {}
-          state.recent_activity_lines = {}
-          state.recent_activity_items = {}
-          state.recent_activity_tool_calls = {}
-          state.current_intent = nil
-          state.chat_busy = false
-          refresh_statuslines()
-          refresh_reasoning_overlay(true)
-          append_entry('error', 'Failed to send prompt: ' .. request_err)
-          return
-        end
-        if included_restore_context then
-          state.pending_session_context = nil
-        end
-      end)
+      send_once()
     end
 
     dispatch_prompt()

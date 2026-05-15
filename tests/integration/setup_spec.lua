@@ -8309,6 +8309,60 @@ describe('chat session activation', function()
     assert_eq(false, captured_opts.activate_input_on_session_ready)
   end)
 
+  it('recovers session on stale attachment error without retrying', function()
+    local original_open_chat = agent.open_chat
+    local original_with_session = session.with_session
+    local http = require('copilot_agent.http')
+    local original_request = http.request
+    local original_recover = session.recover_after_service_restart
+    local request_count = 0
+    local recovered_session_id
+
+    agent.open_chat = function() end
+    session.with_session = function(callback)
+      callback('session-123', nil)
+    end
+    session.recover_after_service_restart = function(session_id, callback)
+      recovered_session_id = session_id
+      if callback then
+        callback(session_id, nil)
+      end
+    end
+    http.request = function(method, path, _body, callback)
+      if method == 'POST' and path == '/sessions/session-123/messages' then
+        request_count = request_count + 1
+        if request_count == 1 then
+          callback(nil, 'session is not attached to this service')
+        else
+          callback({}, nil)
+        end
+        return
+      end
+      error('unexpected request ' .. method .. ' ' .. path)
+    end
+
+    package.loaded['copilot_agent.chat'] = nil
+    local chat = require('copilot_agent.chat')
+    chat.ask('hello')
+
+    agent.open_chat = original_open_chat
+    session.with_session = original_with_session
+    http.request = original_request
+    session.recover_after_service_restart = original_recover
+
+    -- Should NOT retry — only 1 request sent
+    assert_eq(1, request_count)
+    assert_eq('session-123', recovered_session_id)
+    -- Error entry should be appended (prompt failed)
+    local has_error = false
+    for _, entry in ipairs(agent.state.entries) do
+      if entry.kind == 'error' then
+        has_error = true
+      end
+    end
+    assert_true(has_error)
+  end)
+
   it('opens input immediately when a session is already active', function()
     local input = require('copilot_agent.input')
     local original_open_input_window = input.open_input_window

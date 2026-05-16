@@ -2166,10 +2166,14 @@ local function answer_permission(session_id, request_id, approved, callback)
   end)
 end
 
-local function sync_model_state(model, reasoning_effort)
+local function sync_model_state(model, reasoning_effort, session_id)
   if type(model) == 'string' and model ~= '' then
     state.current_model = model
     state.config.session.model = model
+    local active_session_id = type(session_id) == 'string' and session_id ~= '' and session_id or state.session_id
+    if type(active_session_id) == 'string' and active_session_id ~= '' then
+      state.session_models[active_session_id] = model
+    end
   elseif model == '' or model == nil then
     state.current_model = nil
   end
@@ -2506,7 +2510,7 @@ local function handle_host_event(event_name, payload)
   local data = payload and payload.data or {}
   if event_name == 'host.session_attached' then
     clear_reasoning_preview('session attached')
-    sync_model_state(data.model, data.reasoningEffort)
+    sync_model_state(data.model, data.reasoningEffort, data.sessionId or state.session_id)
     sync_config_counts(data)
     state.last_assistant_usage = nil
     state.context_tokens = nil
@@ -2523,7 +2527,7 @@ local function handle_host_event(event_name, payload)
     end
     refresh_statuslines()
   elseif event_name == 'host.model_changed' then
-    sync_model_state(data.model, data.reasoningEffort)
+    sync_model_state(data.model, data.reasoningEffort, data.sessionId or state.session_id)
     refresh_statuslines()
     append_entry('system', 'Model changed to ' .. tostring(data.model or '<unknown>'))
   elseif event_name == 'host.session_disconnected' then
@@ -3528,7 +3532,7 @@ local function handle_session_event(payload)
   end
 
   if event_type == 'session.model_change' then
-    sync_model_state(data.model or data.newModel, data.reasoningEffort or data.newReasoningEffort)
+    sync_model_state(data.model or data.newModel, data.reasoningEffort or data.newReasoningEffort, data.sessionId or state.session_id)
     refresh_statuslines()
     return
   end
@@ -3543,7 +3547,7 @@ local function handle_session_event(payload)
       local quotas, primary = assistant_usage.normalize_quotas(quota_snapshots)
       if primary then
         state.last_assistant_usage_snapshot = {
-          model = data.model or state.current_model or state.config.session.model,
+          model = data.model or state.current_model or cfg.active_session_model(state.session_id),
           quotas = quotas,
           primary_quota = primary,
         }

@@ -12,6 +12,7 @@ local notify = cfg.notify
 local request = http.request
 local split_lines = utils.split_lines
 local working_directory = service.working_directory
+local active_session_model = cfg.active_session_model
 
 local M = {}
 
@@ -262,7 +263,7 @@ local function request_generated_commit_message(repo_root, callback)
       workingDirectory = repo_root,
       streaming = state.config.session.streaming,
       enableConfigDiscovery = state.config.session.enable_config_discovery,
-      model = state.current_model or state.config.session.model,
+      model = active_session_model(state.session_id),
       agent = agent_name,
     }, function(response, err)
       if err then

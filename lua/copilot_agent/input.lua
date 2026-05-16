@@ -32,6 +32,7 @@ local input_modes = { 'ask', 'plan', 'agent', 'autopilot' }
 local session_label_max_len = 32
 local islist = vim.islist
 local separator_ns = vim.api.nvim_create_namespace('copilot_agent_input_separator')
+local attachment_badge_ns = vim.api.nvim_create_namespace('copilot_agent_input_attachment_badge')
 local attachment_completion_max_items = 80
 local completion_runtime = {}
 local attachment_fd_cache = {
@@ -381,6 +382,137 @@ local function refresh_separator()
     virt_lines_above = true,
     virt_lines_leftcol = true,
   })
+end
+
+local function attachment_badge_lines()
+  if type(state.pending_attachments) ~= 'table' or vim.tbl_isempty(state.pending_attachments) then
+    return nil
+  end
+
+  local labels = {}
+  for _, attachment in ipairs(state.pending_attachments) do
+    if type(attachment) == 'table' then
+      local label = attachment.display or attachment.path or attachment.type or ''
+      label = vim.fn.fnamemodify(label, ':t')
+      if label ~= '' then
+        labels[#labels + 1] = label
+      end
+    end
+  end
+
+  if vim.tbl_isempty(labels) then
+    return nil
+  end
+
+  return labels
+end
+
+local function refresh_attachment_badge()
+  if not state.input_bufnr or not vim.api.nvim_buf_is_valid(state.input_bufnr) then
+    return
+  end
+
+  vim.api.nvim_buf_clear_namespace(state.input_bufnr, attachment_badge_ns, 0, -1)
+  if not state.input_winid or not vim.api.nvim_win_is_valid(state.input_winid) then
+    return
+  end
+
+  local labels = attachment_badge_lines()
+  if not labels then
+    return
+  end
+
+  local win_width = vim.api.nvim_win_get_width(state.input_winid)
+  local virt_lines = {}
+  for _, label in ipairs(labels) do
+    local display_text = '📎 ' .. label
+    local text_width = vim.fn.strdisplaywidth(display_text)
+    local pad = math.max(0, win_width - text_width - 1)
+    virt_lines[#virt_lines + 1] = {
+      { string.rep(' ', pad), '' },
+      { display_text, 'CopilotAgentOverlayEmphasis' },
+    }
+  end
+
+  local line_count = vim.api.nvim_buf_line_count(state.input_bufnr)
+  local anchor_row = math.max(0, line_count - 1)
+  vim.api.nvim_buf_set_extmark(state.input_bufnr, attachment_badge_ns, anchor_row, 0, {
+    virt_lines = virt_lines,
+    virt_lines_leftcol = true,
+    virt_lines_above = false,
+    priority = 4096,
+  })
+end
+
+local function pending_attachment_label(attachment, index)
+  if type(attachment) ~= 'table' then
+    return nil
+  end
+
+  local label = attachment.display or attachment.path
+  if type(label) ~= 'string' or label == '' then
+    label = attachment.type or 'attachment'
+  end
+
+  label = vim.fn.fnamemodify(label, ':t')
+  if label == '' then
+    label = attachment.type or 'attachment'
+  end
+
+  if #state.pending_attachments > 1 then
+    local prefix = index and tostring(index) .. '. ' or ''
+    return prefix .. label
+  end
+
+  return label
+end
+
+local function remove_pending_attachment_at(index)
+  index = tonumber(index)
+  if not index or index < 1 or index > #state.pending_attachments then
+    return false
+  end
+
+  local attachment = state.pending_attachments[index]
+  if type(attachment) == 'table' and attachment.temp and attachment.path then
+    pcall(os.remove, attachment.path)
+  end
+  table.remove(state.pending_attachments, index)
+  refresh_attachment_badge()
+  refresh_statuslines()
+  return true
+end
+
+local function prompt_delete_pending_attachment()
+  local attachments = state.pending_attachments
+  if type(attachments) ~= 'table' or vim.tbl_isempty(attachments) then
+    cfg.notify('No pending attachments to delete.', vim.log.levels.INFO)
+    return
+  end
+
+  if #attachments == 1 then
+    remove_pending_attachment_at(1)
+    return
+  end
+
+  local choices = {}
+  for i, attachment in ipairs(attachments) do
+    choices[#choices + 1] = {
+      label = pending_attachment_label(attachment, i) or ('Attachment ' .. tostring(i)),
+      index = i,
+    }
+  end
+
+  vim.ui.select(choices, {
+    prompt = 'Delete which attachment?',
+    format_item = function(item)
+      return item.label
+    end,
+  }, function(choice)
+    if choice then
+      remove_pending_attachment_at(choice.index)
+    end
+  end)
 end
 
 local function frontmatter_name(path)
@@ -1913,6 +2045,7 @@ local function submit_message_text(text)
   end
 
   state.pending_attachments = {}
+  refresh_attachment_badge()
   state.chat_busy = true
   refresh_statuslines()
   require('copilot_agent').ask(prompt_text, { attachments = attachments })
@@ -2293,6 +2426,7 @@ local function create_input_buffer()
     local _, segments, placeholder = prompt.build(icon, mode, typed_count)
     set_input_prompt_prefix(bufnr, placeholder)
     prompt.apply(bufnr, segments)
+    refresh_attachment_badge()
     refresh_statuslines()
   end
 
@@ -2376,6 +2510,7 @@ local function create_input_buffer()
       reset_prompt_history_navigation()
       -- Re-apply the prompt prefix and overlay (cleared by buf_set_lines).
       refresh_prompt()
+      refresh_attachment_badge()
       vim.cmd('startinsert')
       submit_message_text(text)
     end)
@@ -2420,6 +2555,11 @@ local function create_input_buffer()
   end
   vim.keymap.set('i', '<C-w>', delete_input_previous_word, { buffer = bufnr, silent = true, desc = 'Delete previous input word (keep prompt prefix)' })
   vim.keymap.set('i', '<C-u>', delete_input_to_prompt_start, { buffer = bufnr, silent = true, desc = 'Delete input to prompt start' })
+  vim.keymap.set({ 'n', 'i' }, '<M-d>', prompt_delete_pending_attachment, {
+    buffer = bufnr,
+    silent = true,
+    desc = 'Delete pending attachment',
+  })
   -- <C-t> in input also refreshes the prompt prefix and returns to insert mode.
   vim.keymap.set({ 'n', 'i' }, '<C-t>', function()
     local idx = 1
@@ -2562,6 +2702,7 @@ function M.open_input_window()
   -- Statusline is populated by refresh_input_statusline below.
   refresh_statuslines()
   refresh_separator()
+  refresh_attachment_badge()
 
   clamp_input_cursor_to_prompt(state.input_bufnr, state.input_winid)
   vim.cmd('startinsert')
@@ -2776,6 +2917,7 @@ M._is_input_anchored_below_chat = is_input_anchored_below_chat
 M._input_completefunc = input_completefunc
 M._input_omnifunc = input_completefunc
 M.refresh_separator = refresh_separator
+M.refresh_attachment_badge = refresh_attachment_badge
 M._discovered_agent_names = discovered_agent_names
 M._discovered_skill_names = discovered_skill_names
 M._discovered_instruction_names = discovered_instruction_names
@@ -2789,6 +2931,7 @@ M._select_visible_completion = select_visible_completion
 M._input_backspace_or_ignore = input_backspace_or_ignore
 M._delete_input_previous_word = delete_input_previous_word
 M._delete_input_to_prompt_start = delete_input_to_prompt_start
+M.refresh_attachment_badge = refresh_attachment_badge
 M._has_completion_trigger_space = has_completion_trigger_space
 M._input_completion_context = input_completion_context
 M._input_prompt_prefix = input_prompt_prefix

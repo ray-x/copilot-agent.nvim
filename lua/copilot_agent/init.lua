@@ -500,7 +500,7 @@ function M.status()
   local lines = {
     'service: ' .. normalize_base_url(state.config.base_url),
     'session: ' .. (state.session_id or '<none>'),
-    'model: ' .. tostring(state.config.session.model or '<default>'),
+    'model: ' .. tostring(cfg.active_session_model(state.session_id) or '<default>'),
     'service_job: ' .. tostring(state.service_job_id or '<none>'),
     'service_starting: ' .. tostring(state.service_starting),
     'streaming: ' .. tostring(state.events_job_id ~= nil),

@@ -738,8 +738,15 @@ local function apply_snapshot(snapshot)
   state.context_limit = nil
   state.chat_busy = false
   state.pending_attachments = {}
+  local ok, input_mod = pcall(require, 'copilot_agent.input')
+  if ok and type(input_mod) == 'table' and type(input_mod.refresh_attachment_badge) == 'function' then
+    input_mod.refresh_attachment_badge()
+  end
   state.session_name = snapshot.session_name
   state.current_model = snapshot.current_model
+  if type(state.session_id) == 'string' and state.session_id ~= '' and type(snapshot.current_model) == 'string' and snapshot.current_model ~= '' then
+    state.session_models[state.session_id] = snapshot.current_model
+  end
   state.reasoning_effort = snapshot.reasoning_effort
   state.input_mode = snapshot.input_mode or state.input_mode
   state.permission_mode = snapshot.permission_mode or state.permission_mode

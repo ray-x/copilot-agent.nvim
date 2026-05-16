@@ -1059,6 +1059,10 @@ function M.setup_action_keymaps(bufnr)
 
       local function add_attachment(att)
         table.insert(state.pending_attachments, att)
+        local ok, input_mod = pcall(require, 'copilot_agent.input')
+        if ok and type(input_mod) == 'table' and type(input_mod.refresh_attachment_badge) == 'function' then
+          input_mod.refresh_attachment_badge()
+        end
         refresh_statuslines()
         vim.schedule(function()
           if state.compose_winid and vim.api.nvim_win_is_valid(state.compose_winid) then

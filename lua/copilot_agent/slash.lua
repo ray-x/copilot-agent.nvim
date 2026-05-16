@@ -152,6 +152,10 @@ local function clear_consumed_attachments(opts)
     return
   end
   state.pending_attachments = {}
+  local ok, input_mod = pcall(require, 'copilot_agent.input')
+  if ok and type(input_mod) == 'table' and type(input_mod.refresh_attachment_badge) == 'function' then
+    input_mod.refresh_attachment_badge()
+  end
   refresh_statuslines()
 end
 
@@ -728,7 +732,7 @@ local function render_session_info(target, live_summary)
   lines[#lines + 1] = '  Attached here: ' .. ((session_id == state.session_id) and 'yes' or 'no')
   lines[#lines + 1] = '  Live: ' .. (((live_summary and live_summary.live) or (target.session and target.session.live)) and 'yes' or 'no')
 
-  local model_name = first_non_empty_string(live_summary and live_summary.model, session_id == state.session_id and state.current_model or nil)
+  local model_name = first_non_empty_string(live_summary and live_summary.model, session_id == state.session_id and cfg.active_session_model(state.session_id) or nil)
   if model_name then
     lines[#lines + 1] = '  Model: ' .. model_name
   end
@@ -1446,7 +1450,7 @@ local function usage_command()
   local lines = {
     'Session usage snapshot:',
     '  Session: ' .. tostring(state.session_id or '<none>'),
-    '  Model: ' .. tostring(state.current_model or state.config.session.model or '<default>'),
+    '  Model: ' .. tostring(cfg.active_session_model(state.session_id) or '<default>'),
     '  Mode: ' .. tostring(state.input_mode or 'agent'),
     '  Permission: ' .. tostring(state.permission_mode or 'interactive'),
     string.format(
@@ -2160,7 +2164,7 @@ local function env_command()
     '  Service command: ' .. command_text,
     '  Base URL: ' .. tostring(state.config.base_url),
     '  Session: ' .. tostring(state.session_id or '<none>'),
-    '  Model: ' .. tostring(state.current_model or state.config.session.model or '<default>'),
+    '  Model: ' .. tostring(cfg.active_session_model(state.session_id) or '<default>'),
     '  Mode: ' .. tostring(state.input_mode or 'agent'),
     '  Permission: ' .. tostring(state.permission_mode or 'interactive'),
     '  Auto-start service: ' .. tostring(state.config.service.auto_start == true),
@@ -3505,7 +3509,7 @@ local function ask_side_question(prompt, opts)
     workingDirectory = working_directory(),
     streaming = state.config.session.streaming,
     enableConfigDiscovery = state.config.session.enable_config_discovery,
-    model = state.current_model or state.config.session.model,
+    model = cfg.active_session_model(state.session_id),
     agent = state.config.session.agent,
   }, function(response, err)
     if err then

@@ -245,7 +245,8 @@ local state = {
   pending_workspace_updates = 0, -- file updates still being applied in Neovim
   background_tasks = {}, -- non-terminal background/subagent tasks still in flight
   -- Live agent activity (updated from SSE events, shown in statusline)
-  current_model = nil, -- model ID from SDK events (overrides config default in display)
+  current_model = nil, -- model ID for the currently attached session
+  session_models = {}, -- per-session model cache keyed by sessionId
   active_tool = nil, -- name of currently executing tool (nil when idle)
   active_tool_run_id = nil, -- overlay queue id for the currently executing shell tool
   active_tool_detail = nil, -- detailed command/description for the active tool overlay
@@ -348,6 +349,29 @@ local function normalize_base_url(url)
   return utils.normalize_base_url(url, fallback)
 end
 
+local function active_session_model(session_id)
+  local active_session_id = type(session_id) == 'string' and session_id or state.session_id
+  if type(active_session_id) == 'string' and active_session_id ~= '' then
+    local models = state.session_models
+    if type(models) == 'table' then
+      local model = models[active_session_id]
+      if type(model) == 'string' and model ~= '' then
+        return model
+      end
+    end
+    if type(state.current_model) == 'string' and state.current_model ~= '' then
+      return state.current_model
+    end
+    return nil
+  end
+
+  local model = state.config and state.config.session and state.config.session.model
+  if type(model) == 'string' and model ~= '' then
+    return model
+  end
+  return 'auto'
+end
+
 return {
   defaults = defaults,
   state = state,
@@ -359,4 +383,5 @@ return {
   should_log = logging.should_log,
   serialize_log_value = logging.serialize_log_value,
   normalize_base_url = normalize_base_url,
+  active_session_model = active_session_model,
 }

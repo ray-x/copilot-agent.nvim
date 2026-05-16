@@ -140,7 +140,6 @@ end
 function M.apply_model(model, callback, opts)
   opts = opts or {}
   local selected = vim.trim(model or '')
-  local previous_model = state.config.session.model
   if selected == '' then
     if callback then
       callback(nil, 'model is required')
@@ -148,7 +147,6 @@ function M.apply_model(model, callback, opts)
     return
   end
 
-  state.config.session.model = selected
   local known = false
   for _, item in ipairs(state.model_cache) do
     if item.id == selected then
@@ -164,6 +162,7 @@ function M.apply_model(model, callback, opts)
     })
   end
   if not state.session_id then
+    state.config.session.model = selected
     append_entry('system', 'Model for next session: ' .. selected)
     if callback then
       callback(selected, nil)
@@ -182,7 +181,6 @@ function M.apply_model(model, callback, opts)
         append_entry('system', string.format('Model "%s" is unavailable; choose a supported model.', um))
         M.prompt_supported_model_selection(um, 'Select a supported Copilot model', function(reselected_model, prompt_err)
           if prompt_err then
-            state.config.session.model = previous_model
             if callback then
               callback(nil, prompt_err)
             end
@@ -194,15 +192,18 @@ function M.apply_model(model, callback, opts)
         end)
         return
       end
-      state.config.session.model = previous_model
       if callback then
         callback(nil, err)
       end
       return
     end
-    state.config.session.model = response and response.model or selected
-    state.current_model = state.config.session.model
-    local msg = 'Active model: ' .. state.config.session.model
+    local active_model = response and response.model or selected
+    state.current_model = active_model
+    state.config.session.model = active_model
+    if state.session_id and state.session_id ~= '' then
+      state.session_models[state.session_id] = active_model
+    end
+    local msg = 'Active model: ' .. active_model
     if opts.reasoning_effort and opts.reasoning_effort ~= '' then
       state.reasoning_effort = opts.reasoning_effort
       msg = msg .. ' (effort: ' .. opts.reasoning_effort .. ')'
@@ -212,7 +213,7 @@ function M.apply_model(model, callback, opts)
     append_entry('system', msg)
     refresh_statuslines()
     if callback then
-      callback(state.config.session.model, nil)
+      callback(active_model, nil)
     end
   end)
 end

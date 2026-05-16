@@ -707,6 +707,10 @@ function M.paste_clipboard_image()
           display = '🖼️ clipboard.png',
           temp = true,
         })
+        local ok, input_mod = pcall(require, 'copilot_agent.input')
+        if ok and type(input_mod) == 'table' and type(input_mod.refresh_attachment_badge) == 'function' then
+          input_mod.refresh_attachment_badge()
+        end
         sl.refresh_statuslines()
         notify('Image from clipboard added as attachment.', vim.log.levels.INFO)
         if state.input_winid and vim.api.nvim_win_is_valid(state.input_winid) then

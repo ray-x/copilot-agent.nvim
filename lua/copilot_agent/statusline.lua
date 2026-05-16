@@ -112,8 +112,8 @@ function M.statusline_mode()
 end
 
 function M.statusline_model()
-  local m = state.current_model or (state.config.session and state.config.session.model) or ''
-  local label = m ~= '' and m or 'default'
+  local m = cfg.active_session_model(state.session_id)
+  local label = type(m) == 'string' and m ~= '' and m or 'default'
   if state.reasoning_effort and state.reasoning_effort ~= '' then
     label = label .. ' [' .. state.reasoning_effort .. ']'
   end

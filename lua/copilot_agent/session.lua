@@ -227,6 +227,10 @@ function M.discard_pending_attachments()
     end
   end
   state.pending_attachments = {}
+  local ok, input_mod = pcall(require, 'copilot_agent.input')
+  if ok and type(input_mod) == 'table' and type(input_mod.refresh_attachment_badge) == 'function' then
+    input_mod.refresh_attachment_badge()
+  end
   refresh_statuslines()
 end
 
@@ -382,7 +386,7 @@ function M.resume_session(session_id, callback, opts)
     workingDirectory = requested_wd,
     streaming = state.config.session.streaming,
     enableConfigDiscovery = state.config.session.enable_config_discovery,
-    model = state.config.session.model,
+    model = cfg.active_session_model(session_id) or state.config.session.model,
     agent = state.config.session.agent,
   }, function(response, err)
     state.startup_session_discovery = false
@@ -425,6 +429,10 @@ function M.resume_session(session_id, callback, opts)
     local resumed_session_id = response and response.sessionId or nil
     state.session_id = resumed_session_id
     state.session_working_directory = (response and response.workingDirectory) or requested_wd
+    if type(response and response.model) == 'string' and response.model ~= '' and resumed_session_id then
+      state.session_models[resumed_session_id] = response.model
+      state.current_model = response.model
+    end
 
     -- Ensure an initial checkpoint exists for the session so diffs have a baseline.
     -- Create or initialize checkpoint repo asynchronously but don't block resume.
@@ -454,6 +462,10 @@ function M.resume_session(session_id, callback, opts)
       vim.log.levels.DEBUG
     )
     approvals.reset()
+    if type(response and response.model) == 'string' and response.model ~= '' then
+      state.session_models[state.session_id] = response.model
+      state.current_model = response.model
+    end
     start_event_stream(state.session_id)
     on_session_ready(state.session_id)
     if callback then
@@ -481,6 +493,8 @@ local function reset_for_session_switch()
   state.session_id = nil
   state.session_name = nil
   state.session_working_directory = nil
+  state.current_model = nil
+  state.reasoning_effort = nil
   state.creating_session = true
   M.discard_pending_attachments()
   clear_transcript()
@@ -780,7 +794,7 @@ create_session = function(callback, opts)
     workingDirectory = requested_wd,
     streaming = state.config.session.streaming,
     enableConfigDiscovery = state.config.session.enable_config_discovery,
-    model = state.config.session.model,
+    model = cfg.active_session_model(opts.session_id) or state.config.session.model,
     agent = state.config.session.agent,
   }, function(response, err)
     state.startup_session_discovery = false

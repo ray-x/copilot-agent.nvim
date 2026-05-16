@@ -4,6 +4,7 @@
 
 -- :checkhealth copilot_agent
 local M = {}
+local cfg = require('copilot_agent.config')
 
 local function check_neovim_version()
   vim.health.start('Neovim version')
@@ -127,7 +128,7 @@ local function check_session()
   local session_id = ca.state and ca.state.session_id
   if session_id then
     vim.health.ok('session connected: ' .. session_id)
-    local model = ca.state.config and ca.state.config.session and ca.state.config.session.model
+    local model = cfg.active_session_model(session_id)
     if model then
       vim.health.ok('model: ' .. model)
     else

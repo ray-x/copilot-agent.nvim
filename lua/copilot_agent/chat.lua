@@ -183,7 +183,7 @@ local function ensure_chat_keymaps(bufnr)
   end, { buffer = bufnr, silent = true, nowait = true, desc = 'Open activity details or prompt' })
 
   vim.keymap.set('n', 'gT', function()
-    require('copilot_agent.todo').show_todo_float()
+    render.open_todo_float()
   end, { buffer = bufnr, silent = true, desc = 'Show TODO float' })
 
   vim.keymap.set('n', '[[', function()
